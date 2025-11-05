@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/gorilla/mux"
 )
@@ -44,11 +43,8 @@ func main() {
 	r.HandleFunc("/users", GetUsersHandler).Methods("GET")
 	r.HandleFunc("/users/{username}", GetUserHandler).Methods("GET")
 	r.HandleFunc("/users", CreateUserHandler).Methods("POST")
+	r.HandleFunc("/search", SearchHandler).Methods("GET")
 
-	port := os.Getenv("PORT")
-	if port == "" {
-    	port = "8080"
-	}
-log.Printf("Starting server on :%s", port)
-log.Fatal(http.ListenAndServe(":"+port, r))
+	log.Println("Starting server on :8081")
+	log.Fatal(http.ListenAndServe(":8081", r))
 }

@@ -1,22 +1,43 @@
 package main
 
+import "time"
+
 type Post struct {
 	Type    string `json:"type"` // "image" or "video"
 	URL     string `json:"url"`
 	Caption string `json:"caption"`
 }
 
+type InteractionStats struct {
+	Likes    int `json:"likes"`
+	Searches int `json:"searches"`
+	DMs      int `json:"dms"`
+}
+
 type User struct {
-	Username    string `json:"username"`
-	FullName    string `json:"fullName"`
-	League      string `json:"league"`
-	Caption     string `json:"caption"`
-	PostsCount  int    `json:"postsCount"`
-	Wins        int    `json:"wins"`
-	Losses      int    `json:"losses"`
-	Followers   int    `json:"followers"`
-	Following   int    `json:"following"`
-	Posts       []Post `json:"posts"`
+	Username          string           `json:"username"`
+	FullName          string           `json:"fullName"`
+	League            string           `json:"league"`
+	Caption           string           `json:"caption"`
+	PostsCount        int              `json:"postsCount"`
+	Wins              int              `json:"wins"`
+	Losses            int              `json:"losses"`
+	Followers         int              `json:"followers"`
+	Following         int              `json:"following"`
+	Posts             []Post           `json:"posts"`
+	Location          string           `json:"location,omitempty"`
+	LastLogin         time.Time        `json:"lastLogin,omitempty"`
+	MutualConnections []string         `json:"mutualConnections,omitempty"`
+	Interactions      InteractionStats `json:"interactions,omitempty"`
+}
+
+// SearchUser is a lightweight version of the User struct for search results
+
+type SearchUser struct {
+	Username  string `json:"username"`
+	FullName  string `json:"fullName"`
+	League    string `json:"league"`
+	Followers int    `json:"followers"`
 }
 
 var users = []User{
@@ -35,6 +56,8 @@ var users = []User{
 			{Type: "video", URL: "https://example.com/post2.mp4", Caption: "Highlight reel"},
 			{Type: "image", URL: "https://example.com/post3.jpg", Caption: "New setup"},
 		},
+		Location:  "New York, NY",
+		LastLogin: time.Now().Add(-24 * time.Hour),
 	},
 	{
 		Username:   "gamer_girl",
@@ -53,6 +76,10 @@ var users = []User{
 			{Type: "image", URL: "https://example.com/gg_post4.jpg", Caption: "My cat watching me play"},
 			{Type: "image", URL: "https://example.com/gg_post5.jpg", Caption: "Just hit Diamond!"},
 		},
+		Location:          "London, UK",
+		LastLogin:         time.Now().Add(-72 * time.Hour),
+		MutualConnections: []string{"player1"},
+		Interactions:      InteractionStats{Likes: 50, Searches: 10, DMs: 2},
 	},
 	{
 		Username:   "pro_streamer",
@@ -68,5 +95,6 @@ var users = []User{
 			{Type: "video", URL: "https://example.com/stream_highlight1.mp4", Caption: "1v5 clutch"},
 			{Type: "video", URL: "https://example.com/stream_highlight2.mp4", Caption: "Tournament win!"},
 		},
+		LastLogin: time.Now().Add(-5 * time.Minute),
 	},
 }
