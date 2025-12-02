@@ -52,9 +52,11 @@ var users = []User{
 		Followers:  1200,
 		Following:  250,
 		Posts: []Post{
-			{Type: "image", URL: "https://example.com/post1.jpg", Caption: "First post!"},
-			{Type: "video", URL: "https://example.com/post2.mp4", Caption: "Highlight reel"},
-			{Type: "image", URL: "https://example.com/post3.jpg", Caption: "New setup"},
+			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80
+", Caption: "First post!"},
+			{Type: "video", URL: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4", Caption: "Highlight reel"},
+			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80
+", Caption: "New setup"},
 		},
 		Location:  "New York, NY",
 		LastLogin: time.Now().Add(-24 * time.Hour),
@@ -70,11 +72,15 @@ var users = []User{
 		Followers:  5600,
 		Following:  500,
 		Posts: []Post{
-			{Type: "image", URL: "https://example.com/gg_post1.jpg", Caption: "Enjoying the game"},
-			{Type: "image", URL: "https://example.com/gg_post2.jpg", Caption: "Team up?"},
-			{Type: "video", URL: "https://example.com/gg_post3.mp4", Caption: "Funny moments"},
-			{Type: "image", URL: "https://example.com/gg_post4.jpg", Caption: "My cat watching me play"},
-			{Type: "image", URL: "https://example.com/gg_post5.jpg", Caption: "Just hit Diamond!"},
+			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80
+", Caption: "Enjoying the game"},
+			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80
+", Caption: "Team up?"},
+			{Type: "video", URL: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4", Caption: "Funny moments"},
+			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80
+", Caption: "My cat watching me play"},
+			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80
+", Caption: "Just hit Diamond!"},
 		},
 		Location:          "London, UK",
 		LastLogin:         time.Now().Add(-72 * time.Hour),
@@ -92,8 +98,8 @@ var users = []User{
 		Followers:  100000,
 		Following:  100,
 		Posts: []Post{
-			{Type: "video", URL: "https://example.com/stream_highlight1.mp4", Caption: "1v5 clutch"},
-			{Type: "video", URL: "https://example.com/stream_highlight2.mp4", Caption: "Tournament win!"},
+			{Type: "video", URL: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4", Caption: "1v5 clutch"},
+			{Type: "video", URL: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4", Caption: "Tournament win!"},
 		},
 		LastLogin: time.Now().Add(-5 * time.Minute),
 	},
