@@ -52,11 +52,9 @@ var users = []User{
 		Followers:  1200,
 		Following:  250,
 		Posts: []Post{
-			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80
-", Caption: "First post!"},
+			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80", Caption: "First post!"},
 			{Type: "video", URL: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4", Caption: "Highlight reel"},
-			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80
-", Caption: "New setup"},
+			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80", Caption: "New setup"},
 		},
 		Location:  "New York, NY",
 		LastLogin: time.Now().Add(-24 * time.Hour),
@@ -72,15 +70,11 @@ var users = []User{
 		Followers:  5600,
 		Following:  500,
 		Posts: []Post{
-			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80
-", Caption: "Enjoying the game"},
-			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80
-", Caption: "Team up?"},
+			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80", Caption: "Enjoying the game"},
+			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80", Caption: "Team up?"},
 			{Type: "video", URL: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4", Caption: "Funny moments"},
-			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80
-", Caption: "My cat watching me play"},
-			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80
-", Caption: "Just hit Diamond!"},
+			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80", Caption: "My cat watching me play"},
+			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80", Caption: "Just hit Diamond!"},
 		},
 		Location:          "London, UK",
 		LastLogin:         time.Now().Add(-72 * time.Hour),
@@ -104,3 +98,4 @@ var users = []User{
 		LastLogin: time.Now().Add(-5 * time.Minute),
 	},
 }
+
