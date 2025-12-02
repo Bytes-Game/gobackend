@@ -53,7 +53,7 @@ var users = []User{
 		Following:  250,
 		Posts: []Post{
 			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80", Caption: "First post!"},
-			{Type: "video", URL: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4", Caption: "Highlight reel"},
+			{Type: "video", URL: "https://filesamples.com/samples/video/mp4/sample_640x360.mp4", Caption: "Highlight reel"},
 			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80", Caption: "New setup"},
 		},
 		Location:  "New York, NY",
@@ -72,7 +72,7 @@ var users = []User{
 		Posts: []Post{
 			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80", Caption: "Enjoying the game"},
 			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80", Caption: "Team up?"},
-			{Type: "video", URL: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4", Caption: "Funny moments"},
+			{Type: "video", URL: "https://filesamples.com/samples/video/mp4/sample_640x360.mp4", Caption: "Funny moments"},
 			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80", Caption: "My cat watching me play"},
 			{Type: "image", URL: "https://images.unsplash.com/photo-1503023345310-bd7c1de61c7d?auto=format&fit=crop&w=800&q=80", Caption: "Just hit Diamond!"},
 		},
@@ -92,10 +92,11 @@ var users = []User{
 		Followers:  100000,
 		Following:  100,
 		Posts: []Post{
-			{Type: "video", URL: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4", Caption: "1v5 clutch"},
-			{Type: "video", URL: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4", Caption: "Tournament win!"},
+			{Type: "video", URL: "https://filesamples.com/samples/video/mp4/sample_640x360.mp4", Caption: "1v5 clutch"},
+			{Type: "video", URL: "https://filesamples.com/samples/video/mp4/sample_640x360.mp4", Caption: "Tournament win!"},
 		},
 		LastLogin: time.Now().Add(-5 * time.Minute),
 	},
 }
+
 
