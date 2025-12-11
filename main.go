@@ -2,11 +2,31 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 
 	"github.com/gorilla/mux"
 )
+
+func NotificationHandler(w http.ResponseWriter, r *http.Request) {
+	params := mux.Vars(r)
+	username := params["username"]
+	log.Printf("Received notification for user %s", username)
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Error reading request body", http.StatusInternalServerError)
+		return
+	}
+	defer r.Body.Close()
+
+	HandleNotification(username, body)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "notification processed"})
+}
 
 func GetUsersHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("Received request for /users")
@@ -44,6 +64,8 @@ func main() {
 	r.HandleFunc("/users/{username}", GetUserHandler).Methods("GET")
 	r.HandleFunc("/users", CreateUserHandler).Methods("POST")
 	r.HandleFunc("/search", SearchHandler).Methods("GET")
+	r.HandleFunc("/notifications/{username}", NotificationHandler).Methods("POST")
+	r.HandleFunc("/ws", WebSocketHandler) // Added WebSocket route
 
 	log.Println("Starting server on :8081")
 	log.Fatal(http.ListenAndServe(":8081", r))
