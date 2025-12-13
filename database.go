@@ -1,100 +1,88 @@
 package main
 
-import "time"
+import (
+	"encoding/json"
+	"net/http"
+	"sort"
+	"strings"
+)
 
-type Post struct {
-	Type    string `json:"type"` // "image" or "video"
-	URL     string `json:"url"`
-	Caption string `json:"caption"`
-}
-
-type InteractionStats struct {
-	Likes    int `json:"likes"`
-	Searches int `json:"searches"`
-	DMs      int `json:"dms"`
-}
-
-type User struct {
-	Username          string           `json:"username"`
-	FullName          string           `json:"fullName"`
-	League            string           `json:"league"`
-	Caption           string           `json:"caption"`
-	PostsCount        int              `json:"postsCount"`
-	Wins              int              `json:"wins"`
-	Losses            int              `json:"losses"`
-	Followers         int              `json:"followers"`
-	Following         int              `json:"following"`
-	Posts             []Post           `json:"posts"`
-	Location          string           `json:"location,omitempty"`
-	LastLogin         time.Time        `json:"lastLogin,omitempty"`
-	MutualConnections []string         `json:"mutualConnections,omitempty"`
-	Interactions      InteractionStats `json:"interactions,omitempty"`
-}
-
-// SearchUser is a lightweight version of the User struct for search results
-
+// SearchUser defines the user data that is returned in search results.
+// It's a subset of the main User struct.
 type SearchUser struct {
-	Username  string `json:"username"`
-	FullName  string `json:"fullName"`
-	League    string `json:"league"`
-	Followers int    `json:"followers"`
+	Username string `json:"username"`
+	Name     string `json:"name"`
 }
 
-var users = []User{
-	{
-		Username:   "player1",
-		FullName:   "John Doe",
-		League:     "Gold",
-		Caption:    " aspiring pro player!",
-		PostsCount: 3,
-		Wins:       150,
-		Losses:     95,
-		Followers:  1200,
-		Following:  250,
-		Posts: []Post{
-			{Type: "image", URL: "https://example.com/post1.jpg", Caption: "First post!"},
-			{Type: "video", URL: "https://example.com/post2.mp4", Caption: "Highlight reel"},
-			{Type: "image", URL: "https://example.com/post3.jpg", Caption: "New setup"},
-		},
-		Location:  "New York, NY",
-		LastLogin: time.Now().Add(-24 * time.Hour),
-	},
-	{
-		Username:   "gamer_girl",
-		FullName:   "Jane Smith",
-		League:     "Diamond",
-		Caption:    "Just for fun ",
-		PostsCount: 5,
-		Wins:       300,
-		Losses:     120,
-		Followers:  5600,
-		Following:  500,
-		Posts: []Post{
-			{Type: "image", URL: "https://example.com/gg_post1.jpg", Caption: "Enjoying the game"},
-			{Type: "image", URL: "https://example.com/gg_post2.jpg", Caption: "Team up?"},
-			{Type: "video", URL: "https://example.com/gg_post3.mp4", Caption: "Funny moments"},
-			{Type: "image", URL: "https://example.com/gg_post4.jpg", Caption: "My cat watching me play"},
-			{Type: "image", URL: "https://example.com/gg_post5.jpg", Caption: "Just hit Diamond!"},
-		},
-		Location:          "London, UK",
-		LastLogin:         time.Now().Add(-72 * time.Hour),
-		MutualConnections: []string{"player1"},
-		Interactions:      InteractionStats{Likes: 50, Searches: 10, DMs: 2},
-	},
-	{
-		Username:   "pro_streamer",
-		FullName:   "Alex Johnson",
-		League:     "Challenger",
-		Caption:    "Streaming daily at twitch.tv/pro_streamer",
-		PostsCount: 2,
-		Wins:       500,
-		Losses:     50,
-		Followers:  100000,
-		Following:  100,
-		Posts: []Post{
-			{Type: "video", URL: "https://example.com/stream_highlight1.mp4", Caption: "1v5 clutch"},
-			{Type: "video", URL: "https://example.com/stream_highlight2.mp4", Caption: "Tournament win!"},
-		},
-		LastLogin: time.Now().Add(-5 * time.Minute),
-	},
+// WeightedUser is a helper struct to hold a user and their calculated search score.
+type WeightedUser struct {
+	User  User
+	Score float64
+}
+
+// SearchResponse is the structure for the final JSON response.
+type SearchResponse struct {
+	Results []SearchUser `json:"results"`
+	Total   int          `json:"total"`
+}
+
+func SearchHandler(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+
+	if query == "" {
+		http.Error(w, "Missing search query parameter 'q'", http.StatusBadRequest)
+		return
+	}
+
+	var weightedUsers []WeightedUser
+
+	// Iterate through all users in the database.
+	for _, user := range users {
+		// Calculate a score based on the query.
+		score := calculateScore(user, query)
+		// If the score is greater than 0, it's a match.
+		if score > 0 {
+			weightedUsers = append(weightedUsers, WeightedUser{User: user, Score: score})
+		}
+	}
+
+	// Sort users from highest score to lowest.
+	sort.Slice(weightedUsers, func(i, j int) bool {
+		return weightedUsers[i].Score > weightedUsers[j].Score
+	})
+
+	// Convert the sorted users into the simplified SearchUser format.
+	resultUsers := make([]SearchUser, len(weightedUsers))
+	for i, wu := range weightedUsers {
+		resultUsers[i] = SearchUser{
+			Username: wu.User.Username,
+			Name:     wu.User.Name,
+		}
+	}
+
+	// Create the final response object.
+	response := SearchResponse{
+		Results: resultUsers,
+		Total:   len(resultUsers),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// calculateScore gives a simple score based on matching the username or name.
+func calculateScore(user User, query string) float64 {
+	var score float64
+	query = strings.ToLower(query)
+
+	// Higher score for matching the username.
+	if strings.Contains(strings.ToLower(user.Username), query) {
+		score += 10.0
+	}
+	// Lower score for matching the full name.
+	if strings.Contains(strings.ToLower(user.Name), query) {
+		score += 5.0
+	}
+
+	return score
 }
