@@ -5,62 +5,53 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
-// SearchUser defines the user data that is returned in search results.
-// It's a subset of the main User struct.
-type SearchUser struct {
-	Username string `json:"username"`
-	Name     string `json:"name"`
+// We no longer need a separate SearchUser struct, as the main User struct in models.go is sufficient.
+// We also don't need a separate WeightedUser, we can do this on the fly.
+
+type SearchResponse struct {
+	Results []User `json:"results"`
+	Total   int    `json:"total"`
 }
 
-// WeightedUser is a helper struct to hold a user and their calculated search score.
-type WeightedUser struct {
+// Helper struct for sorting users with their scores.
+type scoredUser struct {
 	User  User
 	Score float64
 }
 
-// SearchResponse is the structure for the final JSON response.
-type SearchResponse struct {
-	Results []SearchUser `json:"results"`
-	Total   int          `json:"total"`
-}
-
 func SearchHandler(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
+	userLocation := r.URL.Query().Get("location")
 
 	if query == "" {
 		http.Error(w, "Missing search query parameter 'q'", http.StatusBadRequest)
 		return
 	}
 
-	var weightedUsers []WeightedUser
+	var scoredUsers []scoredUser
 
-	// Iterate through all users in the database.
+	// Use the global 'users' slice from database.go
 	for _, user := range users {
-		// Calculate a score based on the query.
-		score := calculateScore(user, query)
-		// If the score is greater than 0, it's a match.
+		score := calculateScore(user, query, userLocation)
 		if score > 0 {
-			weightedUsers = append(weightedUsers, WeightedUser{User: user, Score: score})
+			scoredUsers = append(scoredUsers, scoredUser{User: user, Score: score})
 		}
 	}
 
-	// Sort users from highest score to lowest.
-	sort.Slice(weightedUsers, func(i, j int) bool {
-		return weightedUsers[i].Score > weightedUsers[j].Score
+	// Sort users based on their score in descending order.
+	sort.Slice(scoredUsers, func(i, j int) bool {
+		return scoredUsers[i].Score > scoredUsers[j].Score
 	})
 
-	// Convert the sorted users into the simplified SearchUser format.
-	resultUsers := make([]SearchUser, len(weightedUsers))
-	for i, wu := range weightedUsers {
-		resultUsers[i] = SearchUser{
-			Username: wu.User.Username,
-			Name:     wu.User.Name,
-		}
+	// Extract the User objects from the sorted list.
+	resultUsers := make([]User, len(scoredUsers))
+	for i, su := range scoredUsers {
+		resultUsers[i] = su.User
 	}
 
-	// Create the final response object.
 	response := SearchResponse{
 		Results: resultUsers,
 		Total:   len(resultUsers),
@@ -70,18 +61,35 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// calculateScore gives a simple score based on matching the username or name.
-func calculateScore(user User, query string) float64 {
+// calculateScore now uses the rich User model from models.go
+func calculateScore(user User, query, userLocation string) float64 {
 	var score float64
 	query = strings.ToLower(query)
 
-	// Higher score for matching the username.
 	if strings.Contains(strings.ToLower(user.Username), query) {
 		score += 10.0
 	}
-	// Lower score for matching the full name.
 	if strings.Contains(strings.ToLower(user.Name), query) {
+		score += 10.0 // Changed from FullName to Name
+	}
+	if strings.Contains(strings.ToLower(user.Caption), query) {
+		score += 2.0
+	}
+
+	score += float64(user.Followers) * 0.5
+	score += float64(user.Wins) * 0.3
+
+	if user.Location != "" && userLocation != "" && strings.Contains(strings.ToLower(user.Location), strings.ToLower(userLocation)) {
 		score += 5.0
+	}
+
+	if !user.LastLogin.IsZero() {
+		hoursSinceLogin := time.Since(user.LastLogin).Hours()
+		if hoursSinceLogin <= 24 {
+			score += 10.0
+		} else if hoursSinceLogin <= 168 {
+			score += 5.0
+		}
 	}
 
 	return score
