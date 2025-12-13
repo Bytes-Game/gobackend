@@ -17,7 +17,6 @@ type scoredUser struct {
 // SearchHandler handles requests to the /search endpoint.
 func SearchHandler(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
-	userLocation := r.URL.Query().Get("location")
 
 	if query == "" {
 		http.Error(w, "Missing search query parameter 'q'", http.StatusBadRequest)
@@ -28,7 +27,7 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Use the global 'users' slice from database.go
 	for _, user := range users {
-		score := calculateScore(user, query, userLocation)
+		score := calculateScore(user, query)
 		if score > 0 {
 			scoredUsers = append(scoredUsers, scoredUser{User: user, Score: score})
 		}
@@ -56,24 +55,23 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // calculateScore calculates a relevance score for a user based on a search query.
-func calculateScore(user User, query, userLocation string) float64 {
+// It now uses the FullName field and no longer considers location.
+func calculateScore(user User, query string) float64 {
 	var score float64
 	query = strings.ToLower(query)
 
+	// Strong match for username
 	if strings.Contains(strings.ToLower(user.Username), query) {
 		score += 10.0
 	}
-	if strings.Contains(strings.ToLower(user.Name), query) {
+	
+	// Weaker match for full name
+	if strings.Contains(strings.ToLower(user.FullName), query) {
 		score += 5.0
 	}
 
 	// Add a small bonus for having more followers
-	score += float64(user.Followers) * 0.1
-
-	// Add a bonus for matching location
-	if user.Location != "" && userLocation != "" && strings.EqualFold(user.Location, userLocation) {
-		score += 5.0
-	}
+	score += float64(user.Followers) * 0.01 // Reduced follower bonus to avoid dominating score
 
 	return score
 }
