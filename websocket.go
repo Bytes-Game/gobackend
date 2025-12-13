@@ -37,10 +37,12 @@ func WebSocketHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("User %s connected via WebSocket", username)
 
-	// Send stored notifications from Redis.
+	// --- INTEGRATION POINT ---
+	// After connecting, immediately check for and send any stored notifications for this user.
+	// We run this in a new goroutine so it doesn't block the main read loop.
 	go SendStoredNotificationsFromRedis(conn, username)
 
-	// Keep the connection open by listening for incoming messages.
+	// Keep the connection open and listen for messages (for disconnect detection).
 	for {
 		_, _, err := conn.ReadMessage()
 		if err != nil {
@@ -48,7 +50,7 @@ func WebSocketHandler(w http.ResponseWriter, r *http.Request) {
 			clientsMu.Lock()
 			delete(clients, username)
 			clientsMu.Unlock()
-			break
+			break // Exit the loop to close the connection handler.
 		}
 	}
 }
