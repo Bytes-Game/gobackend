@@ -1,3 +1,4 @@
+
 package main
 
 import (
@@ -8,6 +9,27 @@ import (
 
 	"github.com/gorilla/mux"
 )
+
+// FollowHandler processes follow requests
+func FollowHandler(w http.ResponseWriter, r *http.Request) {
+    var req struct {
+        Follower  string `json:"follower"`
+        Following string `json:"following"`
+    }
+
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "Invalid request body", http.StatusBadRequest)
+        return
+    }
+
+    log.Printf("Processing follow request: %s is now following %s", req.Follower, req.Following)
+
+    // In a real application, you would update your database here.
+    // For this example, we'll just log it and assume success.
+
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+}
 
 func NotificationHandler(w http.ResponseWriter, r *http.Request) {
 	params := mux.Vars(r)
@@ -63,6 +85,7 @@ func main() {
 	r.HandleFunc("/users", GetUsersHandler).Methods("GET")
 	r.HandleFunc("/users/{username}", GetUserHandler).Methods("GET")
 	r.HandleFunc("/users", CreateUserHandler).Methods("POST")
+	r.HandleFunc("/users/follow", FollowHandler).Methods("POST")
 	r.HandleFunc("/search", SearchHandler).Methods("GET")
 	r.HandleFunc("/notifications/{username}", NotificationHandler).Methods("POST")
 	r.HandleFunc("/ws", WebSocketHandler) // Added WebSocket route
