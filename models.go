@@ -1,22 +1,31 @@
 package main
 
-// User is the central struct for a user's profile data.
-// This struct has been updated to exactly match the Flutter UserModel.
+import "time"
+
+// Post represents a single post made by a user, matching the client's expectations.
+type Post struct {
+	ID        string    `json:"id"`
+	URL       string    `json:"url"`
+	Caption   string    `json:"caption"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// User represents a user's profile data, with the Posts field corrected.
 type User struct {
 	Username      string   `json:"username"`
-	password      string   // This field is unexported and will not be sent in JSON responses.
+	password      string   `json:"-"` // The '-' tag prevents the password from being serialized into JSON.
 	FullName      string   `json:"fullName"`
 	Caption       string   `json:"caption"`
 	Followers     int      `json:"followers"`
 	Following     int      `json:"following"`
-	Posts         int      `json:"posts"`
+	Posts         []Post   `json:"posts"` // Corrected: This is now a slice of Post objects.
 	Wins          int      `json:"wins"`
 	Losses        int      `json:"losses"`
 	League        string   `json:"league"`
 	FollowingList []string `json:"followingList"`
 }
 
-// SearchResponse defines the structure for the /search endpoint's JSON response.
+// SearchResponse is a temporary struct for the search handler.
 type SearchResponse struct {
 	Results []User `json:"results"`
 	Total   int    `json:"total"`
