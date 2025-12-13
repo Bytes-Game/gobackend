@@ -56,6 +56,30 @@ func InitDatabase() {
 	}
 }
 
+// GetAllUsers returns a slice of all users in the database.
+func GetAllUsers() []User {
+	usersDBMu.Lock()
+	defer usersDBMu.Unlock()
+	// Return a copy to prevent external modification of the underlying array.
+	usersCopy := make([]User, len(users))
+	copy(usersCopy, users)
+	return usersCopy
+}
+
+// GetUserByUsername searches for a user by their username and returns the user object.
+func GetUserByUsername(username string) (User, bool) {
+	usersDBMu.Lock()
+	defer usersDBMu.Unlock()
+
+	for _, user := range users {
+		if user.Username == username {
+			return user, true
+		}
+	}
+
+	return User{}, false // Return an empty User and false if not found.
+}
+
 // UserExists checks if a username exists in the database.
 func UserExists(username string) bool {
 	usersDBMu.Lock()
