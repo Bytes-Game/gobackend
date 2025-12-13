@@ -37,7 +37,10 @@ func WebSocketHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("User %s connected via WebSocket", username)
 
-	// Keep the connection open
+	// Send stored notifications from Redis.
+	go SendStoredNotificationsFromRedis(conn, username)
+
+	// Keep the connection open by listening for incoming messages.
 	for {
 		_, _, err := conn.ReadMessage()
 		if err != nil {
