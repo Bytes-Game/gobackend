@@ -8,12 +8,11 @@ import (
 	"github.com/gorilla/mux"
 )
 
-// LoginHandler validates user credentials. 
-// FOR DEVELOPMENT ONLY: This handler is temporarily insecure and allows login with just a username.
+// LoginHandler validates user credentials against the in-memory database.
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	var creds struct {
 		Username string `json:"username"`
-		Password string `json:"password"` // Password may be empty during front-end dev
+		Password string `json:"password"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
@@ -21,40 +20,45 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- TEMPORARY, INSECURE LOGIN FOR DEVELOPMENT ---
-	// This block allows login with just a username, bypassing the password check.
-	// It should be removed and replaced with the commented-out secure code below
-	// before moving to production.
-	if UserExists(creds.Username) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"status": "success"})
-		log.Printf("INSECURE LOGIN: User %s logged in without a password.", creds.Username)
-		return
-	}
-	// --- END OF TEMPORARY CODE ---
-
-	/*
-	// --- SECURE LOGIN CODE ---
-	// This is the proper, secure way to handle logins.
-	// Re-enable this block when the front end is ready to send passwords.
+	// Validate credentials using the function from database.go
 	if IsValidUser(creds.Username, creds.Password) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 		log.Printf("User %s logged in successfully.", creds.Username)
 	} else {
+		// If credentials are not valid, return a 401 Unauthorized error.
 		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
 		log.Printf("Failed login attempt for user %s.", creds.Username)
 	}
-	// --- END OF SECURE LOGIN CODE ---
-	*/
-
-	// If the insecure login also fails, deny access.
-	http.Error(w, "Invalid username", http.StatusUnauthorized)
-	log.Printf("Failed login attempt for user %s.", creds.Username)
 }
 
+// GetAllUsersHandler returns a list of all users.
+func GetAllUsersHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	// The GetAllUsers function is assumed to be in database.go
+	allUsers := GetAllUsers()
+	if err := json.NewEncoder(w).Encode(allUsers); err != nil {
+		http.Error(w, "Failed to encode users", http.StatusInternalServerError)
+	}
+}
+
+// GetUserHandler returns the data for a single user.
+func GetUserHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	username := vars["username"]
+
+	user, exists := GetUserByUsername(username) // Assumed to be in database.go
+	if !exists {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(user); err != nil {
+		http.Error(w, "Failed to encode user data", http.StatusInternalServerError)
+	}
+}
 
 // main is the entry point for the application.
 func main() {
@@ -65,12 +69,17 @@ func main() {
 	r := mux.NewRouter()
 
 	// --- API ROUTES ---
+	api := r.PathPrefix("/api/v1").Subrouter()
 
-	// Authentication endpoint
+	// User-related endpoints
+	api.HandleFunc("/users", GetAllUsersHandler).Methods("GET")
+	api.HandleFunc("/users/{username}", GetUserHandler).Methods("GET")
+
+	// Authentication endpoint (outside the /api/v1 prefix)
 	r.HandleFunc("/login", LoginHandler).Methods("POST")
 
-	// Search endpoint (handler is in search.go)
-	r.HandleFunc("/search", SearchHandler).Methods("GET")
+	// WebSocket endpoint
+	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
 
 	// --- SERVER STARTUP ---
 
