@@ -9,6 +9,27 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// LoginHandler validates user credentials.
+func LoginHandler(w http.ResponseWriter, r *http.Request) {
+	var creds User
+	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Use the function from database.go to check credentials.
+	if IsValidUser(creds.Username, creds.Password) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "success", "username": creds.Username})
+		log.Printf("User %s logged in successfully.", creds.Username)
+	} else {
+		// If credentials are bad, return an unauthorized error.
+		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
+		log.Printf("Failed login attempt for user %s.", creds.Username)
+	}
+}
+
 // FollowHandler processes follow requests
 func FollowHandler(w http.ResponseWriter, r *http.Request) {
     var req struct {
@@ -79,20 +100,25 @@ func CreateUserHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-    // Initialize Redis connection
-    InitRedis()
+    // Initialize the in-memory stores
+    InitRedis()      // Initializes the (simulated) Redis notification store.
+    InitDatabase() // Initializes the in-memory user database.
 
 	r := mux.NewRouter()
 
+    // --- AUTHENTICATION ---
+    r.HandleFunc("/login", LoginHandler).Methods("POST")
+
+    // --- USER & SOCIAL ---
 	r.HandleFunc("/users", GetUsersHandler).Methods("GET")
 	r.HandleFunc("/users/{username}", GetUserHandler).Methods("GET")
 	r.HandleFunc("/users", CreateUserHandler).Methods("POST")
 	r.HandleFunc("/users/follow", FollowHandler).Methods("POST")
-	r.HandleFunc("/search", SearchHandler).Methods("GET")
+
+    // --- NOTIFICATIONS & REAL-TIME ---
 	r.HandleFunc("/notifications/{username}", NotificationHandler).Methods("POST")
-	r.HandleFunc("/ws", WebSocketHandler) // Added WebSocket route
+	r.HandleFunc("/ws", WebSocketHandler)
 
 	log.Println("Starting server on :8081")
 	log.Fatal(http.ListenAndServe(":8081", r))
 }
-
