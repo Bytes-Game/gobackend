@@ -1,6 +1,9 @@
 package main
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // users is the in-memory database for our application.
 var users []User
@@ -13,6 +16,16 @@ func InitDatabase() {
 	usersDBMu.Lock()
 	defer usersDBMu.Unlock()
 
+	// Sample posts for our users
+	postsForPlayer1 := []Post{
+		{ID: "post_1", URL: "https://example.com/post1.png", Caption: "My first post!", Timestamp: time.Now().Add(-24 * time.Hour)},
+		{ID: "post_2", URL: "https://example.com/post2.png", Caption: "Another great day!", Timestamp: time.Now().Add(-48 * time.Hour)},
+	}
+
+	postsForPlayer2 := []Post{
+		{ID: "post_3", URL: "https://example.com/post3.png", Caption: "Winning streak!", Timestamp: time.Now().Add(-72 * time.Hour)},
+	}
+
 	users = []User{
 		{
 			Username:      "player1",
@@ -21,7 +34,7 @@ func InitDatabase() {
 			Caption:       "Just for fun!",
 			Followers:     150,
 			Following:     50,
-			Posts:         12,
+			Posts:         postsForPlayer1, // Correctly using a slice of Post objects
 			Wins:          32,
 			Losses:        18,
 			League:        "Gold",
@@ -34,7 +47,7 @@ func InitDatabase() {
 			Caption:       "Competitive player.",
 			Followers:     2500,
 			Following:     100,
-			Posts:         55,
+			Posts:         postsForPlayer2, // Correctly using a slice of Post objects
 			Wins:          120,
 			Losses:        45,
 			League:        "Diamond",
@@ -47,7 +60,7 @@ func InitDatabase() {
 			Caption:       "Streaming on weekends.",
 			Followers:     1,
 			Following:     1000,
-			Posts:         3,
+			Posts:         []Post{}, // Player 3 has no posts
 			Wins:          10,
 			Losses:        5,
 			League:        "Bronze",
@@ -60,7 +73,6 @@ func InitDatabase() {
 func GetAllUsers() []User {
 	usersDBMu.Lock()
 	defer usersDBMu.Unlock()
-	// Return a copy to prevent external modification of the underlying array.
 	usersCopy := make([]User, len(users))
 	copy(usersCopy, users)
 	return usersCopy
@@ -77,7 +89,7 @@ func GetUserByUsername(username string) (User, bool) {
 		}
 	}
 
-	return User{}, false // Return an empty User and false if not found.
+	return User{}, false
 }
 
 // UserExists checks if a username exists in the database.
