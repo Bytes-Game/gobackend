@@ -1,4 +1,3 @@
-
 package main
 
 import (
@@ -80,6 +79,9 @@ func CreateUserHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+    // Initialize Redis connection
+    InitRedis()
+
 	r := mux.NewRouter()
 
 	r.HandleFunc("/users", GetUsersHandler).Methods("GET")
@@ -93,3 +95,4 @@ func main() {
 	log.Println("Starting server on :8081")
 	log.Fatal(http.ListenAndServe(":8081", r))
 }
+
