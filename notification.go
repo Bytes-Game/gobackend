@@ -1,45 +1,41 @@
 package main
 
 import (
-	"encoding/json"
 	"log"
-	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-type Notification struct {
-	EventType string `json:"event_type"`
-	Payload   struct {
-		ButtonName string `json:"button_name"`
-	} `json:"payload"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
+// HandleNotification finds the WebSocket connection for a given user and relays the
+// raw notification JSON to them.
 func HandleNotification(username string, notificationJSON []byte) {
-	var notification Notification
-	err := json.Unmarshal(notificationJSON, &notification)
-	if err != nil {
-		log.Println("Error unmarshalling notification:", err)
-		return
-	}
-
+	// Lock the mutex to safely access the clients map.
 	clientsMu.Lock()
+	// Look up the WebSocket connection for the target user.
 	conn, ok := clients[username]
+	// Unlock the mutex as soon as we're done with the map.
 	clientsMu.Unlock()
 
+	// Check if a connection was found.
 	if ok {
-		log.Printf("Sending notification to user %s via WebSocket", username)
+		// A connection exists, so the user is online.
+		log.Printf("Relaying notification to user %s via WebSocket", username)
+
+		// Send the raw JSON message over the WebSocket.
 		err := conn.WriteMessage(websocket.TextMessage, notificationJSON)
 		if err != nil {
+			// If there's an error writing the message, the connection is likely dead.
 			log.Printf("Error sending message to user %s: %v", username, err)
-			// The connection might be dead, remove it.
+
+			// Clean up the dead connection.
 			clientsMu.Lock()
 			delete(clients, username)
 			clientsMu.Unlock()
 		}
 	} else {
+		// No connection was found, so the user is offline.
 		log.Printf("User %s is offline. Storing notification.", username)
-		// Here you would add logic to store the notification for later delivery
+		// In a real application, you would add logic here to save the
+		// notification to a database for later delivery.
 	}
 }
