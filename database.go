@@ -13,6 +13,15 @@ func InitDatabase() {
 	usersDBMu.Lock()
 	defer usersDBMu.Unlock()
 
+	// Sample posts for our users
+	posts1 := []PostModel{
+		{ImageURL: "https://picsum.photos/seed/player1post1/300/300", Caption: "First post!"},
+		{ImageURL: "https://picsum.photos/seed/player1post2/300/300", Caption: "Another great day."},
+	}
+	posts2 := []PostModel{
+		{ImageURL: "https://picsum.photos/seed/player2post1/300/300", Caption: "Victory!"},
+	}
+
 	users = []User{
 		{
 			Username:      "player1",
@@ -21,7 +30,7 @@ func InitDatabase() {
 			Caption:       "Just for fun!",
 			Followers:     150,
 			Following:     50,
-			Posts:         12,
+			Posts:         posts1, // Now a slice of PostModel
 			Wins:          32,
 			Losses:        18,
 			League:        "Gold",
@@ -34,7 +43,7 @@ func InitDatabase() {
 			Caption:       "Competitive player.",
 			Followers:     2500,
 			Following:     100,
-			Posts:         55,
+			Posts:         posts2, // Now a slice of PostModel
 			Wins:          120,
 			Losses:        45,
 			League:        "Diamond",
@@ -47,7 +56,7 @@ func InitDatabase() {
 			Caption:       "Streaming on weekends.",
 			Followers:     1,
 			Following:     1000,
-			Posts:         3,
+			Posts:         []PostModel{}, // No posts yet
 			Wins:          10,
 			Losses:        5,
 			League:        "Bronze",
