@@ -6,7 +6,7 @@ import "time"
 // It is used for the database and for API responses.
 type User struct {
 	Username          string    `json:"username"`
-	Password          string    `json:"password,omitempty"` // omitempty prevents it from being sent in JSON responses
+	password          string    // This field is unexported and will not be sent in JSON responses.
 	Name              string    `json:"name"`
 	League            string    `json:"league,omitempty"`
 	Followers         int       `json:"followers,omitempty"`
@@ -14,7 +14,7 @@ type User struct {
 	PostsCount        int       `json:"postsCount,omitempty"`
 	Caption           string    `json:"caption,omitempty"`
 	Location          string    `json:"location,omitempty"`
-	LastLogin         time.Time `json:"lastLogin,omitempty"`
+	LastLogin         time.Time `json:"-"` // Explicitly exclude from JSON
 	MutualConnections []string  `json:"mutualConnections,omitempty"`
 }
 
