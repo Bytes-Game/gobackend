@@ -52,8 +52,7 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use a defer statement for robust cleanup. This will always be called
-	// when the function exits (either by returning or after the read loop breaks).
+	// Use a defer statement for robust cleanup.
 	defer func() {
 		clientsMu.Lock()
 		delete(clients, username)
@@ -68,9 +67,15 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 	clientsMu.Unlock()
 	log.Printf("WebSocket for %s connected", username)
 
-	// --- Full Heartbeat Implementation ---
+	// --- Send Stored Notifications ---
+	// Launch a goroutine to fetch and send any messages that were stored
+	// for the user while they were offline.
+	go func() {
+		log.Printf("Checking for stored messages for %s...", username)
+		SendStoredNotificationsFromRedis(conn, username)
+	}()
 
-	// Set the pong handler to reset the read deadline, keeping the connection alive.
+	// --- Full Heartbeat Implementation ---
 	conn.SetReadDeadline(time.Now().Add(pongWait))
 	conn.SetPongHandler(func(string) error {
 		conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -83,27 +88,22 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 		defer ticker.Stop()
 		for {
 			<-ticker.C
-			// Set a write deadline for the ping message.
 			conn.SetWriteDeadline(time.Now().Add(writeWait))
-			// Send a ping. If it fails, the connection is considered dead.
-			// The main read loop below will detect this and exit.
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				log.Printf("Ping failed for %s, connection will be closed: %v", username, err)
-				return // Stop the pinger.
+				return
 			}
 		}
 	}()
 
 	// This is the main read loop for the connection.
-	// It blocks waiting for messages from the client.
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
-			// If there's an error, we assume the connection is closed.
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("WebSocket read error for %s: %v", username, err)
 			}
-			break // Exit the read loop, which will trigger the deferred cleanup.
+			break
 		}
 		log.Printf("Received message from %s: %s", username, message)
 	}
