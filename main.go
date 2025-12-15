@@ -89,6 +89,7 @@ func main() {
 
 	r.HandleFunc("/login", LoginHandler).Methods("POST")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
+	r.HandleFunc("/search", SearchHandler).Methods("GET")
 
 	log.Println("Starting server on :8081...")
 	if err := http.ListenAndServe(":8081", r); err != nil {
