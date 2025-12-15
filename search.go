@@ -55,23 +55,35 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // calculateScore calculates a relevance score for a user based on a search query.
-// It now uses the FullName field and no longer considers location.
+// It tokenizes the query and gives points for matches in username and full name.
 func calculateScore(user User, query string) float64 {
 	var score float64
-	query = strings.ToLower(query)
+	lowerQuery := strings.ToLower(query)
+	lowerUsername := strings.ToLower(user.Username)
+	lowerFullName := strings.ToLower(user.FullName)
 
-	// Strong match for username
-	if strings.Contains(strings.ToLower(user.Username), query) {
-		score += 10.0
+	// Strongest bonus for an exact username match
+	if lowerUsername == lowerQuery {
+		score += 100.0
 	}
-	
-	// Weaker match for full name
-	if strings.Contains(strings.ToLower(user.FullName), query) {
-		score += 5.0
+
+	// Tokenize the query to search for individual words
+	queryTokens := strings.Fields(lowerQuery)
+
+	for _, token := range queryTokens {
+		// Bonus for token matches in username
+		if strings.Contains(lowerUsername, token) {
+			score += 10.0
+		}
+		
+		// Weaker bonus for token matches in full name
+		if strings.Contains(lowerFullName, token) {
+			score += 5.0
+		}
 	}
 
 	// Add a small bonus for having more followers
-	score += float64(user.Followers) * 0.01 // Reduced follower bonus to avoid dominating score
+	score += float64(user.Followers) * 0.01
 
 	return score
 }
