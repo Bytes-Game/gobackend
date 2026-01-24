@@ -35,29 +35,6 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Add default engagement and psychological data
-	user.Engagement = UserEngagementMetrics{
-		AvgWatchTime:           0.5,
-		WatchCompletionRate:    0.75,
-		RewatchRate:            0.1,
-		LikeBehavior:           "",
-		CommentBehavior:        "",
-		ShareBehavior:          "",
-		DislikeBehavior:        "",
-		SavesBehavior:          "",
-		SkipSpeed:              1.5,
-		FastSwipeRate:          0.2,
-		RageQuitTriggers:       []string{},
-		PostLossEngagementDrop: 0.0,
-		RevengePlayProbability: 0.5,
-	}
-	user.Psychological = UserPsychologicalProfile{
-		CurrentMood:             "neutral",
-		LastEmotion:             "happy",
-		FatigueScore:            0.2,
-	}
-
-
 	// Fetch all users for the search/discovery feature.
 	allUsers := GetAllUsers()
 
@@ -109,7 +86,6 @@ func main() {
 	api := r.PathPrefix("/api/v1").Subrouter()
 	api.HandleFunc("/users", GetAllUsersHandler).Methods("GET")
 	api.HandleFunc("/users/{username}", GetUserHandler).Methods("GET")
-	api.HandleFunc("/behavior_event", BehaviorEventHandler).Methods("POST")
 
 	r.HandleFunc("/login", LoginHandler).Methods("POST")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
