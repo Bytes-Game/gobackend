@@ -5,7 +5,6 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 )
 
@@ -57,6 +56,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		LastEmotion:             "happy",
 		FatigueScore:            0.2,
 	}
+
 
 	// Fetch all users for the search/discovery feature.
 	allUsers := GetAllUsers()
@@ -115,16 +115,8 @@ func main() {
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
 	r.HandleFunc("/search", SearchHandler).Methods("GET")
 
-	// Add CORS middleware
-	corsHandler := handlers.CORS(
-		handlers.AllowedOrigins([]string{"*"}),
-		handlers.AllowedMethods([]string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}),
-		handlers.AllowedHeaders([]string{"X-Requested-With", "Content-Type", "Authorization"}),
-	)(r)
-
 	log.Println("Starting server on :8081...")
-	if err := http.ListenAndServe(":8081", corsHandler); err != nil {
-		log.Fatalf("Could not start server: %s
-", err)
+	if err := http.ListenAndServe(":8081", r); err != nil {
+		log.Fatalf("Could not start server: %s\n", err)
 	}
 }
