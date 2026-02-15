@@ -47,7 +47,6 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 	// The SearchResponse struct is defined in models.go
 	response := SearchResponse{
 		Results: resultUsers,
-		Total:   len(resultUsers),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
