@@ -1,42 +1,101 @@
 package main
 
 import (
-	"log"
-	"github.com/gorilla/websocket"
+	"sync"
 )
 
-// HandleNotification determines if a user is online for real-time delivery
-// or offline for storage using the in-memory store.
-func HandleNotification(username string, notificationJSON []byte) {
+// users is the in-memory database for our application.
+var users []User
 
-	// First, check if the user is currently connected via WebSocket.
-	clientsMu.Lock()
-	conn, isOnline := clients[username]
-	clientsMu.Unlock()
+// usersDBMu is a mutex to make access to the users slice safe in a concurrent environment.
+var usersDBMu sync.Mutex
 
-	if isOnline {
-		// --- REAL-TIME PATH ---
-		// The user is online, so send the notification directly over the WebSocket.
-		log.Printf("User %s is ONLINE. Relaying notification via WebSocket.", username)
-		
-		err := conn.WriteMessage(websocket.TextMessage, notificationJSON)
-		
-		if err != nil {
-			// The connection was likely closed between the check and the send.
-			log.Printf("Error sending message to user %s: %v. Storing for later.", username, err)
-			
-			// Clean up the dead connection.
-			clientsMu.Lock()
-			delete(clients, username)
-			clientsMu.Unlock()
+// InitDatabase populates the in-memory user database with sample data.
+func InitDatabase() {
+	usersDBMu.Lock()
+	defer usersDBMu.Unlock()
 
-			// Since the send failed, fall back to the offline storage logic.
-			StoreNotificationInRedis(username, notificationJSON)
-		}
-
-	} else {
-		// --- OFFLINE PATH ---
-		// The user is not connected. Use the function from redis.go to store it.
-		StoreNotificationInRedis(username, notificationJSON)
+	users = []User{
+		{
+			Username:      "player1",
+			password:      "pass1",
+			FullName:      "Player One",
+			Followers:     150,
+			Wins:          32,
+			Losses:        18,
+			League:        "Gold",
+			FollowingList: []string{"player2", "player3"},
+		},
+		{
+			Username:      "player2",
+			password:      "pass2",
+			FullName:      "Player Two",
+			Followers:     2500,
+			Wins:          120,
+			Losses:        45,
+			League:        "Diamond",
+			FollowingList: []string{"player1"},
+		},
+		{
+			Username:      "player3",
+			password:      "pass3",
+			FullName:      "Player Three",
+			Followers:     1,
+			Wins:          10,
+			Losses:        5,
+			League:        "Bronze",
+			FollowingList: []string{"player1", "player2"},
+		},
 	}
+}
+
+// GetAllUsers returns a slice of all users in the database.
+func GetAllUsers() []User {
+	usersDBMu.Lock()
+	defer usersDBMu.Unlock()
+	usersCopy := make([]User, len(users))
+	copy(usersCopy, users)
+	return usersCopy
+}
+
+// GetUserByUsername searches for a user by their username and returns the user object.
+func GetUserByUsername(username string) (User, bool) {
+	usersDBMu.Lock()
+	defer usersDBMu.Unlock()
+
+	for _, user := range users {
+		if user.Username == username {
+			return user, true
+		}
+	}
+
+	return User{}, false
+}
+
+// UserExists checks if a username exists in the database.
+func UserExists(username string) bool {
+	usersDBMu.Lock()
+	defer usersDBMu.Unlock()
+
+	for _, user := range users {
+		if user.Username == username {
+			return true
+		}
+	}
+
+	return false
+}
+
+// IsValidUser checks if a username and password combination is valid.
+func IsValidUser(username, password string) bool {
+	usersDBMu.Lock()
+	defer usersDBMu.Unlock()
+
+	for _, user := range users {
+		if user.Username == username && user.password == password {
+			return true
+		}
+	}
+
+	return false
 }
