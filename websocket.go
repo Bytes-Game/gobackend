@@ -70,10 +70,7 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 	// --- Send Stored Notifications ---
 	// Launch a goroutine to fetch and send any messages that were stored
 	// for the user while they were offline.
-	go func() {
-		log.Printf("Checking for stored messages for %s...", username)
-		SendStoredNotificationsFromRedis(conn, username)
-	}()
+	go SendStoredNotifications(username)
 
 	// --- Full Heartbeat Implementation ---
 	conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -107,4 +104,12 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("Received message from %s: %s", username, message)
 	}
+}
+
+// IsUserOnline checks if a user is currently connected via WebSocket.
+func IsUserOnline(username string) (*websocket.Conn, bool) {
+	clientsMu.Lock()
+	defer clientsMu.Unlock()
+	conn, ok := clients[username]
+	return conn, ok
 }
