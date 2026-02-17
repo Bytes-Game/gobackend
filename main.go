@@ -86,6 +86,8 @@ func main() {
 	api := r.PathPrefix("/api/v1").Subrouter()
 	api.HandleFunc("/users", GetAllUsersHandler).Methods("GET")
 	api.HandleFunc("/users/{username}", GetUserHandler).Methods("GET")
+	api.HandleFunc("/follow", HandleFollowEvent).Methods("POST")
+	api.HandleFunc("/unfollow", HandleUnfollowEvent).Methods("POST")
 
 	r.HandleFunc("/login", LoginHandler).Methods("POST")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
