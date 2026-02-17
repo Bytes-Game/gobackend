@@ -11,42 +11,63 @@ var users []User
 var usersDBMu sync.Mutex
 
 // InitDatabase populates the in-memory user database with sample data.
+// It now dynamically calculates the initial follower counts to ensure data consistency.
 func InitDatabase() {
 	usersDBMu.Lock()
 	defer usersDBMu.Unlock()
 
-	users = []User{
+	// Initialize users without the `Followers` field, as it will be calculated dynamically.
+	initialUsers := []User{
 		{
+			ID:            "1",
 			Username:      "player1",
 			password:      "pass1",
 			FullName:      "Player One",
-			Followers:     150,
 			Wins:          32,
 			Losses:        18,
 			League:        "Gold",
-			FollowingList: []string{"player2", "player3"},
+			FollowingList: []string{"2", "3"}, // Player 1 follows players 2 and 3
 		},
 		{
+			ID:            "2",
 			Username:      "player2",
 			password:      "pass2",
 			FullName:      "Player Two",
-			Followers:     2500,
 			Wins:          120,
 			Losses:        45,
 			League:        "Diamond",
-			FollowingList: []string{"player1"},
+			FollowingList: []string{"1"}, // Player 2 follows player 1
 		},
 		{
+			ID:            "3",
 			Username:      "player3",
 			password:      "pass3",
 			FullName:      "Player Three",
-			Followers:     1,
 			Wins:          10,
 			Losses:        5,
 			League:        "Bronze",
-			FollowingList: []string{"player1", "player2"},
+			FollowingList: []string{"1", "2"}, // Player 3 follows players 1 and 2
 		},
 	}
+
+	// DYNAMIC CALCULATION: Create a map to hold the calculated follower counts.
+	followerCounts := make(map[string]int)
+
+	// DYNAMIC CALCULATION: Iterate through all users and their following lists.
+	for _, u := range initialUsers {
+		for _, followedID := range u.FollowingList {
+			// For each user someone is following, increment that user's follower count.
+			followerCounts[followedID]++
+		}
+	}
+
+	// DYNAMIC CALCULATION: Assign the calculated follower counts back to the users.
+	for i := range initialUsers {
+		initialUsers[i].Followers = followerCounts[initialUsers[i].ID]
+	}
+
+	// The `users` slice now contains the fully consistent, dynamically calculated data.
+	users = initialUsers
 }
 
 // GetAllUsers returns a slice of all users in the database.
@@ -71,6 +92,21 @@ func GetUserByUsername(username string) (User, bool) {
 
 	return User{}, false
 }
+
+// GetUserByID searches for a user by their ID and returns the user object.
+func GetUserByID(id string) (User, bool) {
+	usersDBMu.Lock()
+	defer usersDBMu.Unlock()
+
+	for _, user := range users {
+		if user.ID == id {
+			return user, true
+		}
+	}
+
+	return User{}, false
+}
+
 
 // UserExists checks if a username exists in the database.
 func UserExists(username string) bool {
