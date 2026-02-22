@@ -4,7 +4,8 @@ import (
 "encoding/json"
 "log"
 "net/http"
-
+"os"
+  
 "github.com/gorilla/mux"
 )
 
@@ -111,8 +112,13 @@ r.HandleFunc("/login", LoginHandler).Methods("POST","OPTIONS")
 r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
 r.HandleFunc("/search", SearchHandler).Methods("GET","OPTIONS")
 
-log.Println("Starting server on :8081...")
-if err := http.ListenAndServe(":8081", corsMiddleware(r)); err != nil {
+port := os.Getenv("PORT")
+if port == "" {
+port = "8081"
+}
+log.Printf("Starting server on :%s...\n", port)
+if err := http.ListenAndServe(":"+port, corsMiddleware(r)); err != nil {
 log.Fatalf("Could not start server: %s\n", err)
 }
 }
+
