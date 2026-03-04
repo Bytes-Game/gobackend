@@ -42,6 +42,7 @@ ClientTimestamp     time.Time `json:"clientTimestamp"`
 type Notification struct {
 Type        string `json:"type"`
 Message     string `json:"message"`
+Timestamp   string `json:"timestamp"`
 }
 
 // Post represents a piece of content (video/image short) uploaded by a user.
@@ -52,12 +53,14 @@ type Post struct {
 	AuthorLeague   string `json:"authorLeague"`
 	Type           string `json:"type"` //"video" or "image"
 	ContentURL     string `json:"contentUrl"`
+	ThumbnailURL   string `json:"thumbnailUrl,omitempty"`
 	Caption        string `json:"caption"`
 	Likes          int    `json:"likes"`
 	Views          int    `json:"views"`
 	Comments       int    `json:"comments"`
 	CreatedAt      string `json:"createdAt"`
 	IsLiked        bool   `json:"isLiked"`
+	LikedBy        []string `json:"likedBy,omitempty"`
 }
 
 // FeedResponse wraps the paginated feed.
@@ -65,4 +68,29 @@ type FeedResponse struct {
 	Posts []Post   `json:"posts"`
 	Page  int      `json:"page"`
 	HasMore bool   `json:"hasMore"`
+}
+
+// Comment represents a comment on a post.
+type Comment struct {
+	ID			   string `json:"id"`
+	PostID		   string `json:"postId"`
+	AuthorID	   string `json:"authorId"`
+	AuthorUsername string `json:"authorUsername"`
+	Text		   string `json:"text"`
+	CreatedAt	   string `json:"createdAt"`
+}
+
+// LikePayload is the request body for liking/unliking a post.
+type LikePayload struct {
+    PostID   string `json:"postId"`
+    UserID   string `json:"userId"`
+    Username string `json:"username"`
+}
+
+// CommentPayload is the request body for adding a comment.
+type CommentPayload struct {
+    PostID   string `json:"postId"`
+    UserID   string `json:"userId"`
+    Username string `json:"username"`
+    Text     string `json:"text"`
 }
