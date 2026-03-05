@@ -262,6 +262,17 @@ func GetAllPosts() []Post {
 	return posts
 }
 
+// GetPostsByUserID returns all posts authored by a given user ID.
+func GetPostsByUserID(userID string) []Post {
+	var result []Post
+	for _, p := range posts {
+		if p.AuthorID == userID {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
 // GetPostByID returns a post by its ID.
 func GetPostByID(id string) (Post, bool) {
 	for _, p := range posts {
