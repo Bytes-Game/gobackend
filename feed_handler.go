@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+
+	"github.com/gorilla/mux"
 )
 
 // FeedHandler returns a paginated list of posts
@@ -15,7 +17,7 @@ func FeedHandler(w http.ResponseWriter, r *http.Request) {
 	pageStr := r.URL.Query().Get("page")
 	limitStr := r.URL.Query().Get("limit")
 
-	page :=1
+	page := 1
 	limit := 20
 
 	if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
@@ -43,8 +45,24 @@ func FeedHandler(w http.ResponseWriter, r *http.Request) {
 
 	paginated := allPosts[start:end]
 	hasMore := end < len(allPosts)
-	
+
 	resp := FeedResponse{Posts: paginated, Page: page, HasMore: hasMore}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// UserPostsHandler returns all posts by a given user.
+//
+// GET /api/v1/posts/{userID}
+func UserPostsHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	userID := vars["userId"]
+
+	userPosts := GetPostsByUserID(userID)
+	if userPosts == nil {
+		userPosts = []Post{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(userPosts)
 }
