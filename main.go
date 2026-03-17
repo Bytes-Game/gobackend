@@ -112,6 +112,12 @@ func main() {
 	api.HandleFunc("/like", HandleLikeEvent).Methods("POST", "OPTIONS")
 	api.HandleFunc("/comments", HandleCommentEvent).Methods("POST", "OPTIONS")
 	api.HandleFunc("/comments/{postId}", GetCommentsHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/challenges", CreateChallengeHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/challenges/arena", GetArenaChallengesHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/challenges/friends", GetFriendsChallengesHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/challenges/accept", AcceptChallengeHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/challenges/like", LikeChallengeHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/challenges/{id}", GetChallengeDetailHandler).Methods("GET", "OPTIONS")
 
 	r.HandleFunc("/login", LoginHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")

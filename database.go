@@ -21,7 +21,6 @@ var db *sql.DB
 // InitDatabase connects to PostgreSQL, runs schema migrations, and seeds
 // sample data if the tables are empty.
 func InitDatabase() {
-
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
 		log.Fatal("DATABASE_URL environment variable is required")
@@ -90,6 +89,49 @@ func runMigrations() {
 		author_id  INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 		text	   TEXT NOT NULL,
 		created_at TIMESTAMPTZ DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS challenges(
+		id 		  	  SERIAL PRIMARY KEY,
+		creator_id    INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		video_url     TEXT DEFAULT '',
+		thumbnail_url TEXT DEFAULT '',
+		prefix 		  VARCHAR(100) NOT NULL DEFAULT '',
+		subject       VARCHAR(100) NOT NULL DEFAULT '',
+		visibility    VARCHAR(10) NOT NULL DEFAULT 'arena',
+		status        VARCHAR(20) NOT NULL DEFAULT 'open',
+		views         INT DEFAULT 0,
+		created_at    TIMESTAMPTZ DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS challenge_visible_to (
+		challenge_id INT NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+		user_id      INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		PRIMARY KEY (challenge_id, user_id)
+	);
+
+	CREATE TABLE IF NOT EXISTS challenge_responses (
+		id            SERIAL PRIMARY KEY,
+		challenge_id  INT NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+		responder_id  INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		video_url     TEXT DEFAULT '',
+		thumbnail_url TEXT DEFAULT '',
+		views         INT DEFAULT 0,
+		created_at    TIMESTAMPTZ DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS challenge_likes (
+		challenge_id  INT NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+		user_id       INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		created_at    TIMESTAMPTZ DEFAULT NOW(),
+		PRIMARY KEY  (challenge_id, user_id)
+	);
+
+	CREATE TABLE IF NOT EXISTS challenge_response_likes (
+		response_id   INT NOT NULL REFERENCES challenge_responses(id) ON DELETE CASCADE,
+		user_id       INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		created_at    TIMESTAMPTZ DEFAULT NOW(),
+		PRIMARY KEY (response_id, user_id)
 	);
 	`
 
@@ -510,6 +552,7 @@ func seedIfEmpty() {
 	seedFollows()
 	seedPosts()
 	seedComments()
+	seedChallenges()
 	log.Println("Seeding complete")
 }
 
@@ -630,4 +673,308 @@ func seedComments() {
 			c.postID, c.authorID, c.text, t,
 		)
 	}
+}
+
+// ------------------------------------------------------------------------------
+// Challenge CRUD
+// ------------------------------------------------------------------------------
+
+// CreateChallenge inserts a new challenge and optional visibility rows.
+func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
+	creatorID, err := strconv.Atoi(payload.CreatorID)
+	if err != nil {
+		return Challenge{}, fmt.Errorf("invalid creator ID")
+	}
+
+	var id int
+	var createdAt time.Time
+	err = db.QueryRow(
+		`INSERT INTO challenges (creator_id, video_url, thumbnail_url, prefix, subject, visibility)
+		 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, created_at`,
+		creatorID, payload.VideoURL, payload.ThumbnailURL, payload.Prefix, payload.Subject, payload.Visibility,
+	).Scan(&id, &createdAt)
+	if err != nil {
+		return Challenge{}, err
+	}
+
+	// If friends visibility with specific users, insert visibility rows.
+	if payload.Visibility == "friends" && len(payload.VisibleTo) > 0 {
+		for _, uidStr := range payload.VisibleTo {
+			uid, _ := strconv.Atoi(uidStr)
+			if uid > 0 {
+				db.Exec(`INSERT INTO challenge_visible_to (challenge_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, id, uid)
+			}
+		}
+	}
+
+	// Fetch the creator info.
+	creator, _ := GetUserByID(payload.CreatorID)
+
+	return Challenge{
+		ID:              strconv.Itoa(id),
+		CreatorID:       payload.CreatorID,
+		CreatorUsername: creator.Username,
+		CreatorLeague:   creator.League,
+		VideoURL:        payload.VideoURL,
+		ThumbnailURL:    payload.ThumbnailURL,
+		Prefix:          payload.Prefix,
+		Subject:         payload.Subject,
+		Visibility:      payload.Visibility,
+		Status:          "open",
+		CreatedAt:       createdAt.UTC().Format(time.RFC3339),
+	}, nil
+}
+
+// challengeBaseQuery is the common SELECT for challenges.
+const challengeBaseQuery = `
+SELECT c.id, c.creator_id, u.username, u.league,
+	COALESCE(c.video_url, '') AS video_url,
+	COALESCE(c.thumbnail_url, '') AS thumbnail_url,
+	c.prefix, c.subject, c.visibility, c.status, c.views,
+	COALESCE(lc.cnt, 0) AS likes,
+	COALESCE(rc.cnt, 0) AS response_count,
+	c.created_at
+FROM challenges c
+JOIN users u ON c.creator_id = u.id
+LEFT JOIN (SELECT challenge_id, COUNT(*) AS cnt FROM challenge_likes GROUP BY challenge_id) lc ON lc.challenge_id = c.id
+LEFT JOIN (SELECT challenge_id, COUNT(*) AS cnt FROM challenge_responses GROUP BY challenge_id) rc ON rc.challenge_id = c.id`
+
+// queryChallenges executes a challenge query and returns Challenge structs.
+func queryChallenges(query string, args ...interface{}) []Challenge {
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		log.Printf("queryChallenges error: %v", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var result []Challenge
+	for rows.Next() {
+		var id, creatorID, views, likes, respCount int
+		var username, league, videoURL, thumbURL, prefix, subject, visibility, status string
+		var createdAt time.Time
+
+		if rows.Scan(&id, &creatorID, &username, &league,
+			&videoURL, &thumbURL,
+			&prefix, &subject, &visibility, &status, &views,
+			&likes, &respCount, &createdAt) == nil {
+
+			result = append(result, Challenge{
+				ID:              strconv.Itoa(id),
+				CreatorID:       strconv.Itoa(creatorID),
+				CreatorUsername: username,
+				CreatorLeague:   league,
+				VideoURL:        videoURL,
+				ThumbnailURL:    thumbURL,
+				Prefix:          prefix,
+				Subject:         subject,
+				Visibility:      visibility,
+				Status:          status,
+				Views:           views,
+				Likes:           likes,
+				ResponseCount:   respCount,
+				CreatedAt:       createdAt.UTC().Format(time.RFC3339),
+			})
+		}
+	}
+	return result
+}
+
+// GetArenaChallenges returns all challenges visible to everyone (arena).
+func GetArenaChallenges() []Challenge {
+	return queryChallenges(challengeBaseQuery + `WHERE c.visibility ='arena' ORDER BY c.created_at DESC`)
+}
+
+// GetFriendsChallenges returns challenges visible to a specific user (friends-only).
+// This includes: challenges by people the user follows with visibility=friends,
+// where the user is either in the visible_to list OR the list is empty (all friends).
+func GetFriendsChallenges(userID string) []Challenge {
+	uid, err := strconv.Atoi(userID)
+	if err != nil {
+		return nil
+	}
+	query := challengeBaseQuery + `
+	WHERE c.visibility = 'friends' 
+	  AND c.creator_id IN (SELECT following_id FROM follows WHERE follower_id =$1)
+	  AND (
+		NOT EXISTS (SELECT 1 FROM challenge_visible_to WHERE challenge_id = c.id)
+		OR c.id IN (SELECT challenge_id FROM challenge_visible_to WHERE user_id = $1)
+	  )
+	ORDER BY c.created_at DESC`
+	return queryChallenges(query, uid)
+}
+
+// GetChallengeByIDreturns a single challenge.
+func GetChallengeByID(idStr string) (Challenge, bool) {
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		return Challenge{}, false
+	}
+	results := queryChallenges(challengeBaseQuery+` WHERE c.id = $1`, id)
+	if len(results) == 0 {
+		return Challenge{}, false
+	}
+	return results[0], true
+}
+
+// GetChallengeResponses returns all responses to a challenge.
+func GetChallengeResponses(challengeID string) []ChallengeResponse {
+	cid, err := strconv.Atoi(challengeID)
+	if err != nil {
+		return nil
+	}
+
+	rows, err := db.Query(
+		`SELECT cr.id, cr.challenge_id, cr.responder_id, u.username, u.league,
+				COALESCE(cr.video_url, '') AS video_url,
+				COALESCE(cr.thumbnail_url, '') AS thumbnail_url,
+				cr.views,
+				COALESCE(lc.cnt, 0) AS likes,
+				cr.created_at
+		 FROM challenge_responses cr
+		 JOIN users u ON cr.responder_id = u.id
+		 LEFT JOIN (SELECT response_id, COUNT(*) AS cnt FROM challenge_response_likes GROUP BY response_id) lc ON lc.response_id = cr.id
+		 WHERE cr.challenge_id = $1
+		 ORDER BY cr.created_at ASC`, cid,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var result []ChallengeResponse
+	for rows.Next() {
+		var id, chalID, respID, views, likes int
+		var username, league, videoURL, thumbURL string
+		var createdAt time.Time
+		if rows.Scan(&id, &chalID, &respID, &username, &league,
+			&videoURL, &thumbURL, &views, &likes, &createdAt) == nil {
+			result = append(result, ChallengeResponse{
+				ID:                strconv.Itoa(id),
+				ChallengeID:       strconv.Itoa(chalID),
+				ResponderID:       strconv.Itoa(respID),
+				ResponderUsername: username,
+				ResponderLeague:   league,
+				VideoURL:          videoURL,
+				ThumbnailURL:      thumbURL,
+				Views:             views,
+				Likes:             likes,
+				CreatedAt:         createdAt.UTC().Format(time.RFC3339),
+			})
+		}
+	}
+	return result
+}
+
+// AcceptChallenge inserts a response and updates challenge status.
+func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) {
+	cid, err1 := strconv.Atoi(payload.ChallengeID)
+	rid, err2 := strconv.Atoi(payload.ResponderID)
+	if err1 != nil || err2 != nil {
+		return ChallengeResponse{}, fmt.Errorf("'invalid IDs")
+	}
+
+	var id int
+	var createdAt time.Time
+	err := db.QueryRow(
+		`INSERT INTOchallenge_responses (challenge_id, responder_id, video_url, thumbnail_url)
+		 VALUES ($1,$2,$3,$4) RETURNING id, created_at`,
+		cid, rid, payload.VideoURL, payload.ThumbnailURL,
+	).Scan(&id, &createdAt)
+	if err != nil {
+		return ChallengeResponse{}, err
+	}
+
+	// Update challenge status to "active".
+	db.Exec(`UPDATE challenges SET status = 'active' WHERE id = $1 AND status = 'open'`, cid)
+
+	responder, _ := GetUserByID(payload.ResponderID)
+
+	return ChallengeResponse{
+		ID:                strconv.Itoa(id),
+		ChallengeID:       payload.ChallengeID,
+		ResponderID:       payload.ResponderID,
+		ResponderUsername: responder.Username,
+		ResponderLeague:   responder.League,
+		VideoURL:          payload.VideoURL,
+		ThumbnailURL:      payload.ThumbnailURL,
+		CreatedAt:         createdAt.UTC().Format(time.RFC3339),
+	}, nil
+}
+
+// ToggleChallengeLike toggles a like on a challenge.
+func ToggleChallengeLike(challengeID, userID string) (bool, int) {
+	cid, e1 := strconv.Atoi(challengeID)
+	uid, e2 := strconv.Atoi(userID)
+	if e1 != nil || e2 != nil {
+		return false, 0
+	}
+
+	var exists bool
+	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM challenge_likes WHERE challenge_id=$1 AND user_id=$2)`, cid, uid).Scan(&exists)
+
+	if exists {
+		db.Exec(`DELETE FROM challenge_likes WHERE challenge_id=$1 AND user_id=$2`, cid, uid)
+	} else {
+		db.Exec(`INSERT INTO challenge_likes (challenge_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, cid, uid)
+	}
+
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM challenge_likes WHERE challenge_id=$1`, cid).Scan(&count)
+	return !exists, count
+}
+
+// IncrementChallengeViews bumps the view count for a challenge.
+func IncrementChallengeViews(challengeID string) {
+	cid, err := strconv.Atoi(challengeID)
+	if err == nil {
+		db.Exec(`UPDATE challenges SET views = views + 1 WHERE id = $1`, cid)
+	}
+}
+
+// --------------------------------------------------------------------------------
+// Seed challenges (sample data)
+// --------------------------------------------------------------------------------
+
+func seedChallenges() {
+	type sc struct {
+		creatorID          int
+		videoURL, thumbURL string
+		prefix, subject    string
+		visibility, status string
+		views              int
+		createdAt          string
+	}
+	data := []sc{
+		{2, "https://cdn.pixabay.com/video/2026/02/09/333600_small.mp4", "https://cdn.pixabay.com/video/2026/02/09/333600_small.jpg", "Who is better", "Gamer", "arena", "open", 3200, "2026-03-10T14:00:00Z"},
+		{7, "", "", "Which is best", "Combo Move", "arena", "open", 1800, "2026-03-10T12:00:00Z"},
+		{1, "https://cdn.pixabay.com/video/2026/02/15/334716_small.mp4", "https://cdn.pixabay.com/video/2026/02/15/334716 small.jpg", "Who can beat", "This Record", "arena", "open", 950, "2026-03-09T20:00:00Z"},
+		{4, "", "", "Who has better", "Strategy", "arena", "active", 4500, "2026-03-09T16:00:00Z"},
+		{10, "", "", "Who is the real", "Champion", "arena", "open", 2100, "2026-03-08T10:00:00Z"},
+		{6, "", "", "Which is best", "Setup", "friends", "open", 600, "2026-03-10T08:00:00Z"},
+		{2, "https://cdn.pixabay.com/video/2026/01/09/326739_small.mp4", "https://cdn.pixabay.com/video/2026/01/09/326739_small.jpg", "Who is better", "Sniper", "friends", "open", 400, "2026-03-09T18:00:00Z"},
+		{5, "", "", "Who can do better", "Trick Shot", "arena", "open", 1500, "2026-03-08T22:00:00Z"},
+	}
+	for _, c := range data {
+		t, _ := time.Parse(time.RFC3339, c.createdAt)
+		db.Exec(
+			`INSERT INTO challenges (creator_id, video_url, thumbnail_url, prefix, subject, visibility, status, views, created_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+			c.creatorID, c.videoURL, c.thumbURL, c.prefix, c.subject, c.visibility, c.status, c.views, t,
+		)
+	}
+
+	// Seed some challenge likes.
+	challengeLikes := [][2]int{{1, 1}, {1, 3}, {1, 5}, {1, 7}, {2, 2}, {2, 4}, {3, 1}, {3, 2}, {4, 1}, {4, 3}, {4, 6}, {4, 7}, {4, 9}, {5, 2}, {5, 7}, {8, 1}, {8, 4}}
+	for _, cl := range challengeLikes {
+		db.Exec(`INSERT INTO challenge_likes (challenge_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, cl[0], cl[1])
+	}
+
+	// Seed a response for challenge 4 (status = active).
+	t, _ := time.Parse(time.RFC3339, "2026-03-09T17:30:00Z")
+	db.Exec(
+		`INSERT INTO challenge_responses (challenge_id, responder_id, video_url, thumbnail_url, views, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6)`,
+		4, 2, "https://cdn.pixabay.com/video/2026/02/15/334716_small.mp4", "https://cdn.pixabay.com/video/2026/02/15/334716_small.jpg", 3100, t,
+	)
 }
