@@ -721,8 +721,7 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 		Subject:         payload.Subject,
 		Visibility:      payload.Visibility,
 		Status:          "open",
-		CreatedAt:       createdAt.UTC().Format(time.RFC3339),
-	}, nil
+		CreatedAt:       createdAt.UTC().Format(time.RFC3339), ExpiresAt: createdAt.Add(24 * time.Hour).UTC().Format(time.RFC3339)}, nil
 }
 
 // challengeBaseQuery is the common SELECT for challenges.
@@ -774,15 +773,19 @@ func queryChallenges(query string, args ...interface{}) []Challenge {
 				Likes:           likes,
 				ResponseCount:   respCount,
 				CreatedAt:       createdAt.UTC().Format(time.RFC3339),
+				ExpiresAt:       createdAt.Add(24 * time.Hour).UTC().Format(time.RFC3339),
 			})
 		}
 	}
 	return result
 }
 
-// GetArenaChallenges returns all challenges visible to everyone (arena).
+// GetArenaChallenges returns all non-expired open arena challenges (within 24h).
 func GetArenaChallenges() []Challenge {
-	return queryChallenges(challengeBaseQuery + `WHERE c.visibility ='arena' ORDER BY c.created_at DESC`)
+	return queryChallenges(challengeBaseQuery + `
+	  WHERE c.visibility = 'arena' 
+	  	AND (c.status IN ('active','completed') OR (c.status = 'open' AND c.created_at > NOW() - INTERVAL '24 hours'))
+	  ORDER BY c.created_at DESC`)
 }
 
 // GetFriendsChallenges returns challenges visible to a specific user (friends-only).
@@ -800,6 +803,7 @@ func GetFriendsChallenges(userID string) []Challenge {
 		NOT EXISTS (SELECT 1 FROM challenge_visible_to WHERE challenge_id = c.id)
 		OR c.id IN (SELECT challenge_id FROM challenge_visible_to WHERE user_id = $1)
 	  )
+	  AND (c.status IN ('active','completed') OR (c.status = 'open' AND c.created_at > NOW() - INTERVAL '24 hours'))
 	ORDER BY c.created_at DESC`
 	return queryChallenges(query, uid)
 }
@@ -930,6 +934,36 @@ func IncrementChallengeViews(challengeID string) {
 	if err == nil {
 		db.Exec(`UPDATE challenges SET views = views + 1 WHERE id = $1`, cid)
 	}
+}
+
+// GetHomeFeed returns a mixed feed: 3 challenges then 1 post, repeating.
+// Includes all active/open challenges and all posts, newest first.
+func GetHomeFeed() []HomeFeedItem {
+	// Fetch all displayable challenges (not expired if open).
+	challenges := queryChallenges(challengeBaseQuery + `
+	  Where (c.status IN ('active','completed') OR (c.status = 'open' AND c.created_at > NOW() - INTERVAL '24 hours'))
+      ORDER BY c.created_at DESC`)
+
+	// Fetch all posts newest first.
+	posts, _ := GetPostsPaginated(1, 100)
+
+	var result []HomeFeedItem
+	ci, pi := 0, 0
+	for ci < len(challenges) || pi < len(posts) {
+		// Add up to 3 challenges.
+		for j := 0; j < 3 && ci < len(challenges); j++ {
+			c := challenges[ci]
+			result = append(result, HomeFeedItem{Type: "challenge", Challenge: &c})
+			ci++
+		}
+		// Add 1 post.
+		if pi < len(posts) {
+			p := posts[pi]
+			result = append(result, HomeFeedItem{Type: "post", Post: &p})
+			pi++
+		}
+	}
+	return result
 }
 
 // --------------------------------------------------------------------------------

@@ -108,6 +108,7 @@ func main() {
 	api.HandleFunc("/follow", HandleFollowEvent).Methods("POST", "OPTIONS")
 	api.HandleFunc("/unfollow", HandleUnfollowEvent).Methods("POST", "OPTIONS")
 	api.HandleFunc("/feed", FeedHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/home", HomeFeedHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/posts/{userId}", UserPostsHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/like", HandleLikeEvent).Methods("POST", "OPTIONS")
 	api.HandleFunc("/comments", HandleCommentEvent).Methods("POST", "OPTIONS")

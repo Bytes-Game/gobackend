@@ -111,11 +111,19 @@ type Challenge struct {
 	Subject         string   `json:"subject"`             // "Dancer", "Painting", etc.
 	Visibility      string   `json:"visibility"`          // "arena" or "friends"
 	VisibleTo       []string `json:"visibleTo,omitempty"` // friends IDs (empty = all friends)
-	Status          string   `json:"status"`              // "open", "active", "completed"
+	Status          string   `json:"status"`              // "open", "active", "completed", "expired"
 	Likes           int      `json:"likes"`
 	Views           int      `json:"views"`
 	CreatedAt       string   `json:"createdAt"`
+	ExpiresAt       string   `json:"expiresAt"`
 	ResponseCount   int      `json:"responseCount"`
+}
+
+// HomeFeedItem wraps a post or challenge for the mixed home feed.
+type HomeFeedItem struct {
+	Type      string     `json:"type"` // "challenge" or "post"
+	Challenge *Challenge `json:"challenge,omitempty"`
+	Post      *Post      `json:"post,omitempty"`
 }
 
 // ChallengeResponse represents someone accepting and responding to a challenge.

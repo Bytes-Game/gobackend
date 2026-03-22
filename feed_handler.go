@@ -52,3 +52,15 @@ func UserPostsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(userPosts)
 }
+
+// HomeFeedHandler returns the mixed home feed (3 challenges + 1 post repeating).
+//
+// GET / api/v1/home
+func HomeFeedHandler(w http.ResponseWriter, r *http.Request) {
+	items := GetHomeFeed()
+	if items == nil {
+		items = []HomeFeedItem{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(items)
+}
