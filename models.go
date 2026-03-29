@@ -15,9 +15,10 @@ type User struct {
 	League        string   `json:"league"`
 }
 
-// SearchResponse is a temporary struct for the search handler.
+// SearchResponse wraps search results with total count for pagination.
 type SearchResponse struct {
 	Results []User `json:"results"`
+	Total   int    `json:"total"`
 }
 
 // Represents the incoming payload for a /follow request
@@ -159,8 +160,73 @@ type AcceptChallengePayload struct {
 	ThumbnailURL string `json:"thumbnailUrl"`
 }
 
+// ChallengeVotePayload is the request body for voting on a challenge response.
+type ChallengeVotePayload struct {
+	ChallengeID string `json:"challengeId"`
+	ResponseID  string `json:"responseId"` // the response being voted for
+	VoterID     string `json:"voterId"`
+}
+
+// ChallengeVote represents a user's vote on a challenge matchup.
+type ChallengeVote struct {
+	ID          string `json:"id"`
+	ChallengeID string `json:"challengeId"`
+	ResponseID  string `json:"responseId"`
+	VoterID     string `json:"voterId"`
+	CreatedAt   string `json:"createdAt"`
+}
+
+// VoteSummary holds vote counts for the challenge detail view.
+type VoteSummary struct {
+	ResponseID string `json:"responseId"`
+	Username   string `json:"username"`
+	Votes      int    `json:"votes"`
+}
+
+// WatchEvent tracks how long a user watched a post or challenge response.
+type WatchEvent struct {
+	ID         string `json:"id"`
+	UserID     string `json:"userId"`
+	ContentID  string `json:"contentId"`
+	ContentType string `json:"contentType"` // "post", "challenge", "response"
+	WatchTime  int    `json:"watchTime"`    // milliseconds
+	Completed  bool   `json:"completed"`    // watched to end
+	CreatedAt  string `json:"createdAt"`
+}
+
+// WatchEventPayload is the request body for recording a watch event.
+type WatchEventPayload struct {
+	UserID      string `json:"userId"`
+	ContentID   string `json:"contentId"`
+	ContentType string `json:"contentType"`
+	WatchTime   int    `json:"watchTime"`
+	Completed   bool   `json:"completed"`
+}
+
+// Report represents a user report on content or another user.
+type Report struct {
+	ID           string `json:"id"`
+	ReporterID   string `json:"reporterId"`
+	TargetID     string `json:"targetId"`
+	TargetType   string `json:"targetType"` // "post", "challenge", "response", "user"
+	Reason       string `json:"reason"`
+	Description  string `json:"description"`
+	Status       string `json:"status"` // "pending", "reviewed", "resolved"
+	CreatedAt    string `json:"createdAt"`
+}
+
+// ReportPayload is the request body for creating a report.
+type ReportPayload struct {
+	ReporterID  string `json:"reporterId"`
+	TargetID    string `json:"targetId"`
+	TargetType  string `json:"targetType"`
+	Reason      string `json:"reason"`
+	Description string `json:"description"`
+}
+
 // ChallengeDetailResponse bundles the challenge + all responses for the detail view.
 type ChallengeDetailResponse struct {
 	Challenge Challenge           `json:"challenge"`
 	Responses []ChallengeResponse `json:"responses"`
+	Votes     []VoteSummary       `json:"votes,omitempty"`
 }

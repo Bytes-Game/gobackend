@@ -39,15 +39,22 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 		return scoredUsers[i].Score > scoredUsers[j].Score
 	})
 
+	total := len(scoredUsers)
+
+	// Cap results to top 20
+	if len(scoredUsers) > 20 {
+		scoredUsers = scoredUsers[:20]
+	}
+
 	// Extract the User objects from the sorted list for the response.
 	resultUsers := make([]User, len(scoredUsers))
 	for i, su := range scoredUsers {
 		resultUsers[i] = su.User
 	}
 
-	// The SearchResponse struct is defined in models.go
 	response := SearchResponse{
 		Results: resultUsers,
+		Total:   total,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -139,8 +146,21 @@ func calculateScore(user User, query string) float64 {
 		score += 15.0
 	}
 
-	// —— 6. Follower bonus ——
+	// —— 6. Follower bonus (popularity signal) ——
 	score += float64(user.Followers) * 0.01
+
+	// —— 7. Win-rate bonus (competitive ranking signal) ——
+	totalGames := user.Wins + user.Losses
+	if totalGames > 0 {
+		winRate := float64(user.Wins) / float64(totalGames)
+		score += winRate * 5.0
+		// Activity volume bonus: more games = more relevant
+		if totalGames > 50 {
+			score += 3.0
+		} else if totalGames > 20 {
+			score += 1.5
+		}
+	}
 
 	return score
 }

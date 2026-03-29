@@ -90,9 +90,15 @@ func GetChallengeDetailHandler(w http.ResponseWriter, r *http.Request) {
 		responses = []ChallengeResponse{}
 	}
 
+	votes := GetVoteSummary(id)
+	if votes == nil {
+		votes = []VoteSummary{}
+	}
+
 	resp := ChallengeDetailResponse{
 		Challenge: challenge,
 		Responses: responses,
+		Votes:     votes,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -124,6 +130,57 @@ func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(response)
+}
+
+// VoteChallengeHandler lets a user vote for a challenge response.
+// POST /api/v1/challenges/vote body:{ challengeId, responseId, voterId }
+func VoteChallengeHandler(w http.ResponseWriter, r *http.Request) {
+	var payload ChallengeVotePayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if payload.ChallengeID == "" || payload.ResponseID == "" || payload.VoterID == "" {
+		http.Error(w, "challengeId, responseId, and voterId are required", http.StatusBadRequest)
+		return
+	}
+
+	voted, err := CastVote(payload)
+	if err != nil {
+		http.Error(w, "Failed to cast vote: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Get updated vote summary
+	votes := GetVoteSummary(payload.ChallengeID)
+	if votes == nil {
+		votes = []VoteSummary{}
+	}
+
+	// Send vote notification to the response owner
+	go SendVoteNotification(payload)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"voted": voted,
+		"votes": votes,
+	})
+}
+
+// GetVoteResultsHandler returns vote counts for a challenge.
+// GET /api/v1/challenges/{id}/votes
+func GetVoteResultsHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	votes := GetVoteSummary(id)
+	if votes == nil {
+		votes = []VoteSummary{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(votes)
 }
 
 // LikeChallengeHandler toggles a like on a challenge.

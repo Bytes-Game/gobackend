@@ -102,6 +102,34 @@ func SendChallengeAcceptedNotification(responderUsername, challengerUsername, ch
 	deliverNotification(challengerUsername, notification)
 }
 
+// SendVoteNotification notifies the response owner that someone voted for them.
+func SendVoteNotification(payload ChallengeVotePayload) {
+	// Get the response to find the owner
+	challenge, found := GetChallengeByID(payload.ChallengeID)
+	if !found {
+		return
+	}
+
+	voter, found := GetUserByID(payload.VoterID)
+	if !found {
+		return
+	}
+
+	// Find the response owner from the responses list
+	responses := GetChallengeResponses(payload.ChallengeID)
+	for _, resp := range responses {
+		if resp.ID == payload.ResponseID && resp.ResponderID != payload.VoterID {
+			notification := Notification{
+				Type:      "vote",
+				Message:   fmt.Sprintf("%s voted for you in \"%s %s\"", voter.Username, challenge.Prefix, challenge.Subject),
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			}
+			deliverNotification(resp.ResponderUsername, notification)
+			break
+		}
+	}
+}
+
 // deliverNotification is a helper that sends a notification to a user
 // (directly if online, stored for later if offline).
 func deliverNotification(recipientUsername string, notification Notification) {

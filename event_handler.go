@@ -131,3 +131,52 @@ func GetCommentsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(comments)
 }
+
+// HandleWatchEvent records a watch event for analytics.
+// POST /api/v1/watch
+func HandleWatchEvent(w http.ResponseWriter, r *http.Request) {
+	var payload WatchEventPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if payload.ContentType == "" || payload.ContentID == "" || payload.UserID == "" {
+		http.Error(w, "userId, contentId, and contentType are required", http.StatusBadRequest)
+		return
+	}
+
+	if err := RecordWatchEvent(payload); err != nil {
+		http.Error(w, "Failed to record watch event: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Watch event recorded"})
+}
+
+// HandleReportEvent creates a new report.
+// POST /api/v1/report
+func HandleReportEvent(w http.ResponseWriter, r *http.Request) {
+	var payload ReportPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if payload.ReporterID == "" || payload.TargetID == "" || payload.Reason == "" {
+		http.Error(w, "reporterId, targetId, and reason are required", http.StatusBadRequest)
+		return
+	}
+
+	report, err := CreateReport(payload)
+	if err != nil {
+		http.Error(w, "Failed to create report: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(report)
+}

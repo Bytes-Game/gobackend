@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -36,20 +41,17 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch all users for the search/discovery feature.
-	allUsers := GetAllUsers()
-
-	// Create the response payload that the Flutter client expects.
+	// Create the response payload — no longer sending all users for security.
 	response := map[string]interface{}{
 		"user":     user,
-		"allUsers": allUsers,
+		"allUsers": []User{},
 	}
 
 	// Send the successful response.
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
-	log.Printf("User %s logged in successfully. Sent user profile and all users list.", creds.Username)
+	log.Printf("User %s logged in successfully.", creds.Username)
 }
 
 // GetAllUsersHandler returns a list of all users.
@@ -79,12 +81,12 @@ func GetUserHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // corsMiddleware adds CORS headers to every response so the Flutter app
-// (web or mobile) can reach the backend without cross-origin errors
+// (web or mobile) can reach the backend without cross-origin errors.
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,_ Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -95,12 +97,79 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// ---------------------------------------------------------------------------
+// In-memory token-bucket rate limiter
+// ---------------------------------------------------------------------------
+
+type rateLimiter struct {
+	mu       sync.Mutex
+	buckets  map[string]*bucket
+	rate     float64 // tokens per second
+	capacity int
+}
+
+type bucket struct {
+	tokens    float64
+	lastCheck time.Time
+}
+
+func newRateLimiter(rps float64, burst int) *rateLimiter {
+	return &rateLimiter{
+		buckets:  make(map[string]*bucket),
+		rate:     rps,
+		capacity: burst,
+	}
+}
+
+func (rl *rateLimiter) allow(key string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	b, exists := rl.buckets[key]
+	now := time.Now()
+
+	if !exists {
+		rl.buckets[key] = &bucket{tokens: float64(rl.capacity) - 1, lastCheck: now}
+		return true
+	}
+
+	elapsed := now.Sub(b.lastCheck).Seconds()
+	b.tokens += elapsed * rl.rate
+	if b.tokens > float64(rl.capacity) {
+		b.tokens = float64(rl.capacity)
+	}
+	b.lastCheck = now
+
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+func rateLimitMiddleware(limiter *rateLimiter) mux.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := r.RemoteAddr
+			if !limiter.allow(ip) {
+				http.Error(w, "Too many requests", http.StatusTooManyRequests)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // main is the entry point for the application.
 func main() {
 	InitDatabase()
 	InitRedis()
 
 	r := mux.NewRouter()
+
+	// Apply rate limiting: 10 requests/sec with burst of 20 per IP
+	limiter := newRateLimiter(10, 20)
+	r.Use(rateLimitMiddleware(limiter))
 
 	api := r.PathPrefix("/api/v1").Subrouter()
 	api.HandleFunc("/users", GetAllUsersHandler).Methods("GET", "OPTIONS")
@@ -118,7 +187,11 @@ func main() {
 	api.HandleFunc("/challenges/friends", GetFriendsChallengesHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/accept", AcceptChallengeHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/like", LikeChallengeHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/challenges/vote", VoteChallengeHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/challenges/{id}/votes", GetVoteResultsHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/{id}", GetChallengeDetailHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/watch", HandleWatchEvent).Methods("POST", "OPTIONS")
+	api.HandleFunc("/report", HandleReportEvent).Methods("POST", "OPTIONS")
 
 	r.HandleFunc("/login", LoginHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
@@ -128,8 +201,32 @@ func main() {
 	if port == "" {
 		port = "8081"
 	}
-	log.Printf("Starting server on :%s...\n", port)
-	if err := http.ListenAndServe(":"+port, corsMiddleware(r)); err != nil {
-		log.Fatalf("Could not start server: %s\n", err)
+
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      corsMiddleware(r),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
+
+	// Graceful shutdown
+	go func() {
+		log.Printf("Starting server on :%s...\n", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Could not start server: %s\n", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatalf("Server forced to shutdown: %v", err)
+	}
+	log.Println("Server exited gracefully")
 }

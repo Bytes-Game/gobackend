@@ -133,11 +133,64 @@ func runMigrations() {
 		created_at    TIMESTAMPTZ DEFAULT NOW(),
 		PRIMARY KEY (response_id, user_id)
 	);
+
+	CREATE TABLE IF NOT EXISTS challenge_votes (
+		id            SERIAL PRIMARY KEY,
+		challenge_id  INT NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+		response_id   INT NOT NULL REFERENCES challenge_responses(id) ON DELETE CASCADE,
+		voter_id      INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		created_at    TIMESTAMPTZ DEFAULT NOW(),
+		UNIQUE (challenge_id, voter_id)
+	);
+
+	CREATE TABLE IF NOT EXISTS watch_events (
+		id            SERIAL PRIMARY KEY,
+		user_id       INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		content_id    INT NOT NULL,
+		content_type  VARCHAR(20) NOT NULL,
+		watch_time    INT NOT NULL DEFAULT 0,
+		completed     BOOLEAN DEFAULT FALSE,
+		created_at    TIMESTAMPTZ DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS reports (
+		id            SERIAL PRIMARY KEY,
+		reporter_id   INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		target_id     INT NOT NULL,
+		target_type   VARCHAR(20) NOT NULL,
+		reason        VARCHAR(100) NOT NULL,
+		description   TEXT DEFAULT '',
+		status        VARCHAR(20) NOT NULL DEFAULT 'pending',
+		created_at    TIMESTAMPTZ DEFAULT NOW()
+	);
 	`
 
 	if _, err := db.Exec(schema); err != nil {
 		log.Fatalf("Migration failed: %v", err)
 	}
+
+	// Performance indexes
+	indexes := `
+	CREATE INDEX IF NOT EXISTS idx_posts_author_id ON posts(author_id);
+	CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_follows_follower_id ON follows(follower_id);
+	CREATE INDEX IF NOT EXISTS idx_follows_following_id ON follows(following_id);
+	CREATE INDEX IF NOT EXISTS idx_comments_post_id ON comments(post_id);
+	CREATE INDEX IF NOT EXISTS idx_post_likes_post_id ON post_likes(post_id);
+	CREATE INDEX IF NOT EXISTS idx_challenges_visibility ON challenges(visibility);
+	CREATE INDEX IF NOT EXISTS idx_challenges_status ON challenges(status);
+	CREATE INDEX IF NOT EXISTS idx_challenges_created_at ON challenges(created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_challenge_responses_challenge_id ON challenge_responses(challenge_id);
+	CREATE INDEX IF NOT EXISTS idx_challenge_votes_challenge_id ON challenge_votes(challenge_id);
+	CREATE INDEX IF NOT EXISTS idx_watch_events_user_id ON watch_events(user_id);
+	CREATE INDEX IF NOT EXISTS idx_watch_events_content ON watch_events(content_id, content_type);
+	CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status);
+	CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+	`
+	if _, err := db.Exec(indexes); err != nil {
+		log.Printf("Warning: index creation issue: %v", err)
+	}
+
 	log.Println("Database migrations completed")
 }
 
@@ -881,7 +934,7 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 	var id int
 	var createdAt time.Time
 	err := db.QueryRow(
-		`INSERT INTOchallenge_responses (challenge_id, responder_id, video_url, thumbnail_url)
+		`INSERT INTO challenge_responses (challenge_id, responder_id, video_url, thumbnail_url)
 		 VALUES ($1,$2,$3,$4) RETURNING id, created_at`,
 		cid, rid, payload.VideoURL, payload.ThumbnailURL,
 	).Scan(&id, &createdAt)
@@ -964,6 +1017,136 @@ func GetHomeFeed() []HomeFeedItem {
 		}
 	}
 	return result
+}
+
+// ---------------------------------------------------------------------------
+// Watch Events CRUD
+// ---------------------------------------------------------------------------
+
+// RecordWatchEvent inserts a watch event for analytics.
+func RecordWatchEvent(payload WatchEventPayload) error {
+	uid, err := strconv.Atoi(payload.UserID)
+	if err != nil {
+		return fmt.Errorf("invalid user ID")
+	}
+	cid, err := strconv.Atoi(payload.ContentID)
+	if err != nil {
+		return fmt.Errorf("invalid content ID")
+	}
+
+	_, err = db.Exec(
+		`INSERT INTO watch_events (user_id, content_id, content_type, watch_time, completed)
+		 VALUES ($1,$2,$3,$4,$5)`,
+		uid, cid, payload.ContentType, payload.WatchTime, payload.Completed,
+	)
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// Challenge Votes CRUD
+// ---------------------------------------------------------------------------
+
+// CastVote records a user's vote on a challenge response. One vote per user per challenge.
+func CastVote(payload ChallengeVotePayload) (bool, error) {
+	cid, err := strconv.Atoi(payload.ChallengeID)
+	if err != nil {
+		return false, fmt.Errorf("invalid challenge ID")
+	}
+	rid, err := strconv.Atoi(payload.ResponseID)
+	if err != nil {
+		return false, fmt.Errorf("invalid response ID")
+	}
+	vid, err := strconv.Atoi(payload.VoterID)
+	if err != nil {
+		return false, fmt.Errorf("invalid voter ID")
+	}
+
+	// Upsert: if user already voted, update their vote
+	_, err = db.Exec(
+		`INSERT INTO challenge_votes (challenge_id, response_id, voter_id)
+		 VALUES ($1,$2,$3)
+		 ON CONFLICT (challenge_id, voter_id)
+		 DO UPDATE SET response_id = $2`,
+		cid, rid, vid,
+	)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// GetVoteSummary returns vote counts per response for a challenge.
+func GetVoteSummary(challengeID string) []VoteSummary {
+	cid, err := strconv.Atoi(challengeID)
+	if err != nil {
+		return nil
+	}
+
+	rows, err := db.Query(
+		`SELECT cv.response_id, u.username, COUNT(*) AS votes
+		 FROM challenge_votes cv
+		 JOIN challenge_responses cr ON cv.response_id = cr.id
+		 JOIN users u ON cr.responder_id = u.id
+		 WHERE cv.challenge_id = $1
+		 GROUP BY cv.response_id, u.username
+		 ORDER BY votes DESC`, cid,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var result []VoteSummary
+	for rows.Next() {
+		var respID, votes int
+		var username string
+		if rows.Scan(&respID, &username, &votes) == nil {
+			result = append(result, VoteSummary{
+				ResponseID: strconv.Itoa(respID),
+				Username:   username,
+				Votes:      votes,
+			})
+		}
+	}
+	return result
+}
+
+// ---------------------------------------------------------------------------
+// Reports CRUD
+// ---------------------------------------------------------------------------
+
+// CreateReport inserts a new content/user report.
+func CreateReport(payload ReportPayload) (Report, error) {
+	reporterID, err := strconv.Atoi(payload.ReporterID)
+	if err != nil {
+		return Report{}, fmt.Errorf("invalid reporter ID")
+	}
+	targetID, err := strconv.Atoi(payload.TargetID)
+	if err != nil {
+		return Report{}, fmt.Errorf("invalid target ID")
+	}
+
+	var id int
+	var createdAt time.Time
+	err = db.QueryRow(
+		`INSERT INTO reports (reporter_id, target_id, target_type, reason, description)
+		 VALUES ($1,$2,$3,$4,$5) RETURNING id, created_at`,
+		reporterID, targetID, payload.TargetType, payload.Reason, payload.Description,
+	).Scan(&id, &createdAt)
+	if err != nil {
+		return Report{}, err
+	}
+
+	return Report{
+		ID:          strconv.Itoa(id),
+		ReporterID:  payload.ReporterID,
+		TargetID:    payload.TargetID,
+		TargetType:  payload.TargetType,
+		Reason:      payload.Reason,
+		Description: payload.Description,
+		Status:      "pending",
+		CreatedAt:   createdAt.UTC().Format(time.RFC3339),
+	}, nil
 }
 
 // --------------------------------------------------------------------------------

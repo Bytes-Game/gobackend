@@ -10,7 +10,7 @@ import (
 func resolveUserID(idStr, username string) (int, error) {
 	if idStr != "" {
 		id, err := strconv.Atoi(idStr)
-		if err != nil {
+		if err == nil {
 			var exists bool
 			db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, id).Scan(&exists)
 			if exists {
