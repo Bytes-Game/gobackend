@@ -54,6 +54,13 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("User %s logged in successfully.", creds.Username)
 }
 
+// ReseedHandler drops all data and reseeds the database.
+func ReseedHandler(w http.ResponseWriter, r *http.Request) {
+	ReseedDatabase()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "reseeded"})
+}
+
 // GetAllUsersHandler returns a list of all users.
 func GetAllUsersHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -192,6 +199,7 @@ func main() {
 	api.HandleFunc("/challenges/{id}", GetChallengeDetailHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/watch", HandleWatchEvent).Methods("POST", "OPTIONS")
 	api.HandleFunc("/report", HandleReportEvent).Methods("POST", "OPTIONS")
+	api.HandleFunc("/admin/reseed", ReseedHandler).Methods("POST", "OPTIONS")
 
 	r.HandleFunc("/login", LoginHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")

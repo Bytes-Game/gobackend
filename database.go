@@ -609,6 +609,29 @@ func seedIfEmpty() {
 	log.Println("Seeding complete")
 }
 
+// ReseedDatabase drops all data and re-seeds from scratch.
+func ReseedDatabase() {
+	log.Println("Reseeding database...")
+	tables := []string{
+		"challenge_votes", "challenge_likes", "challenge_responses", "challenges",
+		"comments", "likes", "posts", "follows", "watch_events", "reports",
+		"notifications", "users",
+	}
+	for _, t := range tables {
+		db.Exec("DELETE FROM " + t)
+	}
+	// Reset sequences so IDs start from 1 again
+	for _, t := range tables {
+		db.Exec("ALTER SEQUENCE IF EXISTS " + t + "_id_seq RESTART WITH 1")
+	}
+	seedUsers()
+	seedFollows()
+	seedPosts()
+	seedComments()
+	seedChallenges()
+	log.Println("Reseed complete")
+}
+
 func seedUsers() {
 	type su struct {
 		username, password, fullName, league string
@@ -1162,16 +1185,50 @@ func seedChallenges() {
 		views              int
 		createdAt          string
 	}
+
+	// Free sample video URLs from pixabay/pexels (all public domain)
+	v1 := "https://cdn.pixabay.com/video/2024/06/12/216475_small.mp4"
+	v2 := "https://cdn.pixabay.com/video/2024/05/31/214978_small.mp4"
+	v3 := "https://cdn.pixabay.com/video/2023/09/20/181651_small.mp4"
+	v4 := "https://cdn.pixabay.com/video/2024/04/21/209380_small.mp4"
+	v5 := "https://cdn.pixabay.com/video/2024/01/26/198350_small.mp4"
+	v6 := "https://cdn.pixabay.com/video/2023/10/31/187457_small.mp4"
+	v7 := "https://cdn.pixabay.com/video/2023/08/28/178294_small.mp4"
+	v8 := "https://cdn.pixabay.com/video/2024/03/05/203261_small.mp4"
+	v9 := "https://cdn.pixabay.com/video/2024/02/14/200868_small.mp4"
+	v10 := "https://cdn.pixabay.com/video/2023/07/28/173863_small.mp4"
+	v11 := "https://cdn.pixabay.com/video/2024/08/02/224022_small.mp4"
+	v12 := "https://cdn.pixabay.com/video/2024/07/18/221697_small.mp4"
+	v13 := "https://cdn.pixabay.com/video/2023/12/16/194523_small.mp4"
+	v14 := "https://cdn.pixabay.com/video/2024/09/15/231127_small.mp4"
+	v15 := "https://cdn.pixabay.com/video/2023/11/15/189678_small.mp4"
+
 	data := []sc{
-		{2, "https://cdn.pixabay.com/video/2026/02/09/333600_small.mp4", "https://cdn.pixabay.com/video/2026/02/09/333600_small.jpg", "Who is better", "Gamer", "arena", "open", 3200, "2026-03-10T14:00:00Z"},
-		{7, "", "", "Which is best", "Combo Move", "arena", "open", 1800, "2026-03-10T12:00:00Z"},
-		{1, "https://cdn.pixabay.com/video/2026/02/15/334716_small.mp4", "https://cdn.pixabay.com/video/2026/02/15/334716 small.jpg", "Who can beat", "This Record", "arena", "open", 950, "2026-03-09T20:00:00Z"},
-		{4, "", "", "Who has better", "Strategy", "arena", "active", 4500, "2026-03-09T16:00:00Z"},
-		{10, "", "", "Who is the real", "Champion", "arena", "open", 2100, "2026-03-08T10:00:00Z"},
-		{6, "", "", "Which is best", "Setup", "friends", "open", 600, "2026-03-10T08:00:00Z"},
-		{2, "https://cdn.pixabay.com/video/2026/01/09/326739_small.mp4", "https://cdn.pixabay.com/video/2026/01/09/326739_small.jpg", "Who is better", "Sniper", "friends", "open", 400, "2026-03-09T18:00:00Z"},
-		{5, "", "", "Who can do better", "Trick Shot", "arena", "open", 1500, "2026-03-08T22:00:00Z"},
+		// === SHORTS (open, no one accepted — single video) ===
+		{2, v1, "", "Who is better at", "Dance Moves", "arena", "open", 3200, "2026-03-28T14:00:00Z"},
+		{7, v2, "", "Which is the best", "Gaming Setup", "arena", "open", 1800, "2026-03-28T12:00:00Z"},
+		{1, v3, "", "Who can beat", "This Record", "arena", "open", 950, "2026-03-27T20:00:00Z"},
+		{10, v4, "", "Who is the real", "Champion", "arena", "open", 2100, "2026-03-27T10:00:00Z"},
+		{5, v5, "", "Who can do better", "Trick Shot", "arena", "open", 1500, "2026-03-26T22:00:00Z"},
+		{3, v6, "", "Who has the best", "Cooking Skills", "arena", "open", 4200, "2026-03-28T09:00:00Z"},
+		{8, v7, "", "Which is more", "Creative Art", "arena", "open", 890, "2026-03-26T15:00:00Z"},
+		{9, v8, "", "Who can nail", "This Comedy Bit", "arena", "open", 6700, "2026-03-28T18:00:00Z"},
+		{6, v9, "", "Who has better", "Fashion Style", "arena", "open", 3400, "2026-03-27T11:00:00Z"},
+		{1, v10, "", "Who is faster at", "Speed Run", "arena", "open", 1200, "2026-03-25T14:00:00Z"},
+		{4, v11, "", "Which is the best", "Music Cover", "arena", "open", 5600, "2026-03-28T20:00:00Z"},
+		{2, v12, "", "Who can do a better", "Freestyle Rap", "arena", "open", 2800, "2026-03-27T16:00:00Z"},
+		{7, v13, "", "Who has the better", "Sports Move", "arena", "open", 1900, "2026-03-26T08:00:00Z"},
+
+		// === BATTLES (accepted — both challenger and opponent have videos) ===
+		{4, v14, "", "Who has better", "Strategy", "arena", "active", 4500, "2026-03-27T16:00:00Z"},     // challenge 14 — battle
+		{6, v15, "", "Who dances better", "Salsa", "arena", "active", 7200, "2026-03-28T10:00:00Z"},     // challenge 15 — battle
+		{10, v1, "", "Who sings better", "Pop Song", "arena", "active", 3100, "2026-03-26T19:00:00Z"},   // challenge 16 — battle
+
+		// === FRIENDS-ONLY (some open, some battles) ===
+		{2, v5, "", "Who is better", "Sniper", "friends", "open", 400, "2026-03-27T18:00:00Z"},
+		{8, v8, "", "Who cooks better", "Pasta", "friends", "active", 560, "2026-03-28T07:00:00Z"},       // challenge 18 — battle
 	}
+
 	for _, c := range data {
 		t, _ := time.Parse(time.RFC3339, c.createdAt)
 		db.Exec(
@@ -1181,17 +1238,66 @@ func seedChallenges() {
 		)
 	}
 
-	// Seed some challenge likes.
-	challengeLikes := [][2]int{{1, 1}, {1, 3}, {1, 5}, {1, 7}, {2, 2}, {2, 4}, {3, 1}, {3, 2}, {4, 1}, {4, 3}, {4, 6}, {4, 7}, {4, 9}, {5, 2}, {5, 7}, {8, 1}, {8, 4}}
+	// Seed challenge likes — spread across many challenges.
+	challengeLikes := [][2]int{
+		{1, 1}, {1, 3}, {1, 5}, {1, 7}, {1, 9},
+		{2, 2}, {2, 4}, {2, 6}, {2, 8},
+		{3, 1}, {3, 2}, {3, 10},
+		{4, 1}, {4, 3}, {4, 6}, {4, 7}, {4, 9},
+		{5, 2}, {5, 7}, {5, 4},
+		{6, 1}, {6, 3}, {6, 5}, {6, 8}, {6, 10},
+		{7, 2}, {7, 6},
+		{8, 1}, {8, 4}, {8, 7},
+		{9, 1}, {9, 2}, {9, 3}, {9, 5}, {9, 8}, {9, 10},
+		{10, 4}, {10, 7},
+		{11, 1}, {11, 2}, {11, 3}, {11, 5}, {11, 6}, {11, 9}, {11, 10},
+		{12, 1}, {12, 4}, {12, 8},
+		{13, 2}, {13, 7},
+		{14, 1}, {14, 3}, {14, 5}, {14, 7}, {14, 9}, {14, 10},
+		{15, 2}, {15, 4}, {15, 6}, {15, 8}, {15, 1}, {15, 3}, {15, 9},
+		{16, 1}, {16, 5}, {16, 7},
+	}
 	for _, cl := range challengeLikes {
 		db.Exec(`INSERT INTO challenge_likes (challenge_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, cl[0], cl[1])
 	}
 
-	// Seed a response for challenge 4 (status = active).
-	t, _ := time.Parse(time.RFC3339, "2026-03-09T17:30:00Z")
-	db.Exec(
-		`INSERT INTO challenge_responses (challenge_id, responder_id, video_url, thumbnail_url, views, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6)`,
-		4, 2, "https://cdn.pixabay.com/video/2026/02/15/334716_small.mp4", "https://cdn.pixabay.com/video/2026/02/15/334716_small.jpg", 3100, t,
-	)
+	// Seed responses for battle challenges (14, 15, 16, 18).
+	type sr struct {
+		challengeID, responderID int
+		videoURL, thumbURL       string
+		views                    int
+		createdAt                string
+	}
+	responses := []sr{
+		{14, 2, v2, "", 3100, "2026-03-27T17:30:00Z"},    // player2 responds to challenge 14
+		{15, 9, v7, "", 5800, "2026-03-28T11:30:00Z"},    // thunderbolt responds to challenge 15
+		{16, 3, v10, "", 2200, "2026-03-26T21:00:00Z"},   // player3 responds to challenge 16
+		{18, 1, v3, "", 340, "2026-03-28T08:00:00Z"},     // player1 responds to challenge 18
+	}
+	for _, r := range responses {
+		rt, _ := time.Parse(time.RFC3339, r.createdAt)
+		db.Exec(
+			`INSERT INTO challenge_responses (challenge_id, responder_id, video_url, thumbnail_url, views, created_at)
+			 VALUES ($1,$2,$3,$4,$5,$6)`,
+			r.challengeID, r.responderID, r.videoURL, r.thumbURL, r.views, rt,
+		)
+	}
+
+	// Seed some votes on battle challenges.
+	type sv struct {
+		challengeID, responseID, voterID int
+	}
+	votes := []sv{
+		{14, 1, 1}, {14, 1, 5}, {14, 1, 8},   // 3 votes for challenge 14, response 1
+		{14, 1, 3}, {14, 1, 10},                // 2 more
+		{15, 2, 1}, {15, 2, 4}, {15, 2, 7}, {15, 2, 10}, // 4 votes for challenge 15, response 2
+		{15, 2, 2}, {15, 2, 5},                  // 2 more
+		{16, 3, 2}, {16, 3, 6},                  // 2 votes for challenge 16, response 3
+	}
+	for _, v := range votes {
+		db.Exec(
+			`INSERT INTO challenge_votes (challenge_id, response_id, voter_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+			v.challengeID, v.responseID, v.voterID,
+		)
+	}
 }
