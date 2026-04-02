@@ -613,9 +613,10 @@ func seedIfEmpty() {
 func ReseedDatabase() {
 	log.Println("Reseeding database...")
 	tables := []string{
-		"challenge_votes", "challenge_likes", "challenge_responses", "challenges",
-		"comments", "likes", "posts", "follows", "watch_events", "reports",
-		"notifications", "users",
+		"challenge_votes", "challenge_response_likes", "challenge_likes", "challenge_responses",
+		"challenge_visible_to", "challenges",
+		"comments", "post_likes", "posts", "follows", "watch_events", "reports",
+		"users",
 	}
 	for _, t := range tables {
 		db.Exec("DELETE FROM " + t)
@@ -1205,28 +1206,66 @@ func seedChallenges() {
 
 	data := []sc{
 		// === SHORTS (open, no one accepted — single video) ===
-		{2, v1, "", "Who is better at", "Dance Moves", "arena", "open", 3200, "2026-03-28T14:00:00Z"},
-		{7, v2, "", "Which is the best", "Gaming Setup", "arena", "open", 1800, "2026-03-28T12:00:00Z"},
+		// -- player1 (id 1) --
 		{1, v3, "", "Who can beat", "This Record", "arena", "open", 950, "2026-03-27T20:00:00Z"},
-		{10, v4, "", "Who is the real", "Champion", "arena", "open", 2100, "2026-03-27T10:00:00Z"},
-		{5, v5, "", "Who can do better", "Trick Shot", "arena", "open", 1500, "2026-03-26T22:00:00Z"},
-		{3, v6, "", "Who has the best", "Cooking Skills", "arena", "open", 4200, "2026-03-28T09:00:00Z"},
-		{8, v7, "", "Which is more", "Creative Art", "arena", "open", 890, "2026-03-26T15:00:00Z"},
-		{9, v8, "", "Who can nail", "This Comedy Bit", "arena", "open", 6700, "2026-03-28T18:00:00Z"},
-		{6, v9, "", "Who has better", "Fashion Style", "arena", "open", 3400, "2026-03-27T11:00:00Z"},
 		{1, v10, "", "Who is faster at", "Speed Run", "arena", "open", 1200, "2026-03-25T14:00:00Z"},
-		{4, v11, "", "Which is the best", "Music Cover", "arena", "open", 5600, "2026-03-28T20:00:00Z"},
+		{1, v7, "", "Who has the best", "Morning Routine", "arena", "open", 2400, "2026-03-30T07:00:00Z"},
+
+		// -- player2 (id 2) --
+		{2, v1, "", "Who is better at", "Dance Moves", "arena", "open", 3200, "2026-03-28T14:00:00Z"},
 		{2, v12, "", "Who can do a better", "Freestyle Rap", "arena", "open", 2800, "2026-03-27T16:00:00Z"},
+		{2, v9, "", "Who can pull off", "This Look", "arena", "open", 1700, "2026-03-30T13:00:00Z"},
+
+		// -- player3 (id 3) --
+		{3, v6, "", "Who has the best", "Cooking Skills", "arena", "open", 4200, "2026-03-28T09:00:00Z"},
+		{3, v11, "", "Who plays better", "Guitar Solo", "arena", "open", 1300, "2026-03-29T16:00:00Z"},
+
+		// -- shadowstrike (id 4) --
+		{4, v11, "", "Which is the best", "Music Cover", "arena", "open", 5600, "2026-03-28T20:00:00Z"},
+		{4, v4, "", "Who has better", "Reflexes", "arena", "open", 3900, "2026-03-30T22:00:00Z"},
+		{4, v15, "", "Who can land", "This Combo", "arena", "open", 2100, "2026-03-31T10:00:00Z"},
+
+		// -- blazerunner (id 5) --
+		{5, v5, "", "Who can do better", "Trick Shot", "arena", "open", 1500, "2026-03-26T22:00:00Z"},
+		{5, v8, "", "Who is funnier", "Stand Up Bit", "arena", "open", 4100, "2026-03-29T20:00:00Z"},
+		{5, v14, "", "Who runs faster", "Sprint Challenge", "arena", "open", 2600, "2026-03-31T08:00:00Z"},
+
+		// -- stormchaser (id 6) --
+		{6, v9, "", "Who has better", "Fashion Style", "arena", "open", 3400, "2026-03-27T11:00:00Z"},
+		{6, v2, "", "Who has the cooler", "Room Tour", "arena", "open", 1800, "2026-03-30T15:00:00Z"},
+
+		// -- frostbyte (id 7) --
+		{7, v2, "", "Which is the best", "Gaming Setup", "arena", "open", 1800, "2026-03-28T12:00:00Z"},
 		{7, v13, "", "Who has the better", "Sports Move", "arena", "open", 1900, "2026-03-26T08:00:00Z"},
+		{7, v6, "", "Who cooks better", "Ramen Bowl", "arena", "open", 3500, "2026-03-31T12:00:00Z"},
+
+		// -- nightowl (id 8) --
+		{8, v7, "", "Which is more", "Creative Art", "arena", "open", 890, "2026-03-26T15:00:00Z"},
+		{8, v12, "", "Who draws better", "Anime Character", "arena", "open", 1100, "2026-03-29T23:00:00Z"},
+		{8, v3, "", "Who has better", "Night Photography", "arena", "open", 750, "2026-03-31T02:00:00Z"},
+
+		// -- thunderbolt (id 9) --
+		{9, v8, "", "Who can nail", "This Comedy Bit", "arena", "open", 6700, "2026-03-28T18:00:00Z"},
+		{9, v14, "", "Who throws better", "Javelin Throw", "arena", "open", 2200, "2026-03-30T09:00:00Z"},
+		{9, v1, "", "Who has the better", "Dance Routine", "arena", "open", 3800, "2026-03-31T18:00:00Z"},
+
+		// -- cyberking (id 10) --
+		{10, v4, "", "Who is the real", "Champion", "arena", "open", 2100, "2026-03-27T10:00:00Z"},
+		{10, v10, "", "Who builds faster", "PC Build Race", "arena", "open", 5200, "2026-03-29T14:00:00Z"},
+		{10, v15, "", "Who codes faster", "Bug Fix Race", "arena", "open", 4400, "2026-03-31T20:00:00Z"},
 
 		// === BATTLES (accepted — both challenger and opponent have videos) ===
-		{4, v14, "", "Who has better", "Strategy", "arena", "active", 4500, "2026-03-27T16:00:00Z"},     // challenge 14 — battle
-		{6, v15, "", "Who dances better", "Salsa", "arena", "active", 7200, "2026-03-28T10:00:00Z"},     // challenge 15 — battle
-		{10, v1, "", "Who sings better", "Pop Song", "arena", "active", 3100, "2026-03-26T19:00:00Z"},   // challenge 16 — battle
+		{4, v14, "", "Who has better", "Strategy", "arena", "active", 4500, "2026-03-27T16:00:00Z"},      // challenge 31 — battle
+		{6, v15, "", "Who dances better", "Salsa", "arena", "active", 7200, "2026-03-28T10:00:00Z"},      // challenge 32 — battle
+		{10, v1, "", "Who sings better", "Pop Song", "arena", "active", 3100, "2026-03-26T19:00:00Z"},    // challenge 33 — battle
+		{1, v5, "", "Who flips better", "Pancake Flip", "arena", "active", 2900, "2026-03-30T08:00:00Z"}, // challenge 34 — battle
+		{9, v11, "", "Who plays better", "Drum Solo", "arena", "active", 5100, "2026-03-31T14:00:00Z"},   // challenge 35 — battle
+		{5, v3, "", "Who skates better", "Kickflip", "arena", "active", 6300, "2026-03-29T17:00:00Z"},    // challenge 36 — battle
+		{7, v9, "", "Who styles better", "Outfit Check", "arena", "active", 4700, "2026-03-30T19:00:00Z"},// challenge 37 — battle
 
 		// === FRIENDS-ONLY (some open, some battles) ===
 		{2, v5, "", "Who is better", "Sniper", "friends", "open", 400, "2026-03-27T18:00:00Z"},
-		{8, v8, "", "Who cooks better", "Pasta", "friends", "active", 560, "2026-03-28T07:00:00Z"},       // challenge 18 — battle
+		{8, v8, "", "Who cooks better", "Pasta", "friends", "active", 560, "2026-03-28T07:00:00Z"},        // challenge 39 — battle
 	}
 
 	for _, c := range data {
@@ -1238,30 +1277,54 @@ func seedChallenges() {
 		)
 	}
 
-	// Seed challenge likes — spread across many challenges.
+	// Seed challenge likes — spread across all challenges.
+	// {challengeID, userID}
 	challengeLikes := [][2]int{
-		{1, 1}, {1, 3}, {1, 5}, {1, 7}, {1, 9},
-		{2, 2}, {2, 4}, {2, 6}, {2, 8},
-		{3, 1}, {3, 2}, {3, 10},
-		{4, 1}, {4, 3}, {4, 6}, {4, 7}, {4, 9},
-		{5, 2}, {5, 7}, {5, 4},
-		{6, 1}, {6, 3}, {6, 5}, {6, 8}, {6, 10},
-		{7, 2}, {7, 6},
-		{8, 1}, {8, 4}, {8, 7},
-		{9, 1}, {9, 2}, {9, 3}, {9, 5}, {9, 8}, {9, 10},
-		{10, 4}, {10, 7},
-		{11, 1}, {11, 2}, {11, 3}, {11, 5}, {11, 6}, {11, 9}, {11, 10},
-		{12, 1}, {12, 4}, {12, 8},
-		{13, 2}, {13, 7},
-		{14, 1}, {14, 3}, {14, 5}, {14, 7}, {14, 9}, {14, 10},
-		{15, 2}, {15, 4}, {15, 6}, {15, 8}, {15, 1}, {15, 3}, {15, 9},
-		{16, 1}, {16, 5}, {16, 7},
+		// shorts likes
+		{1, 2}, {1, 4}, {1, 6}, {1, 8}, {1, 10},
+		{2, 3}, {2, 5}, {2, 7}, {2, 9},
+		{3, 1}, {3, 4}, {3, 6},
+		{4, 1}, {4, 3}, {4, 5}, {4, 7}, {4, 9}, {4, 10},
+		{5, 2}, {5, 6}, {5, 8},
+		{6, 1}, {6, 4}, {6, 7}, {6, 9},
+		{7, 2}, {7, 5}, {7, 8}, {7, 10},
+		{8, 1}, {8, 3}, {8, 6},
+		{9, 2}, {9, 4}, {9, 7}, {9, 8}, {9, 10},
+		{10, 1}, {10, 3}, {10, 5}, {10, 9},
+		{11, 2}, {11, 6}, {11, 7},
+		{12, 1}, {12, 3}, {12, 8}, {12, 10},
+		{13, 4}, {13, 5}, {13, 9},
+		{14, 1}, {14, 2}, {14, 7},
+		{15, 3}, {15, 6}, {15, 10},
+		{16, 1}, {16, 4}, {16, 8},
+		{17, 2}, {17, 5}, {17, 9}, {17, 10},
+		{18, 1}, {18, 3}, {18, 6}, {18, 7},
+		{19, 2}, {19, 4}, {19, 8}, {19, 9}, {19, 10},
+		{20, 1}, {20, 5}, {20, 7},
+		{21, 3}, {21, 6}, {21, 9},
+		{22, 2}, {22, 4}, {22, 10},
+		{23, 1}, {23, 5}, {23, 8},
+		{24, 3}, {24, 7}, {24, 9}, {24, 10},
+		{25, 1}, {25, 2}, {25, 4}, {25, 6},
+		{26, 3}, {26, 5}, {26, 8},
+		{27, 1}, {27, 7}, {27, 9},
+		{28, 2}, {28, 4}, {28, 6}, {28, 10},
+		{29, 1}, {29, 3}, {29, 5}, {29, 8},
+		{30, 2}, {30, 7}, {30, 9}, {30, 10},
+		// battle likes
+		{31, 1}, {31, 3}, {31, 5}, {31, 7}, {31, 9}, {31, 10},
+		{32, 2}, {32, 4}, {32, 6}, {32, 8}, {32, 1}, {32, 3}, {32, 9},
+		{33, 1}, {33, 5}, {33, 7},
+		{34, 2}, {34, 4}, {34, 6}, {34, 8}, {34, 10},
+		{35, 1}, {35, 3}, {35, 5}, {35, 7},
+		{36, 2}, {36, 4}, {36, 6}, {36, 8}, {36, 9}, {36, 10},
+		{37, 1}, {37, 3}, {37, 5}, {37, 8},
 	}
 	for _, cl := range challengeLikes {
 		db.Exec(`INSERT INTO challenge_likes (challenge_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, cl[0], cl[1])
 	}
 
-	// Seed responses for battle challenges (14, 15, 16, 18).
+	// Seed responses for battle challenges (31-37, 39).
 	type sr struct {
 		challengeID, responderID int
 		videoURL, thumbURL       string
@@ -1269,10 +1332,14 @@ func seedChallenges() {
 		createdAt                string
 	}
 	responses := []sr{
-		{14, 2, v2, "", 3100, "2026-03-27T17:30:00Z"},    // player2 responds to challenge 14
-		{15, 9, v7, "", 5800, "2026-03-28T11:30:00Z"},    // thunderbolt responds to challenge 15
-		{16, 3, v10, "", 2200, "2026-03-26T21:00:00Z"},   // player3 responds to challenge 16
-		{18, 1, v3, "", 340, "2026-03-28T08:00:00Z"},     // player1 responds to challenge 18
+		{31, 2, v2, "", 3100, "2026-03-27T17:30:00Z"},    // player2 responds to shadowstrike
+		{32, 9, v7, "", 5800, "2026-03-28T11:30:00Z"},    // thunderbolt responds to stormchaser
+		{33, 3, v10, "", 2200, "2026-03-26T21:00:00Z"},   // player3 responds to cyberking
+		{34, 7, v12, "", 2700, "2026-03-30T10:00:00Z"},   // frostbyte responds to player1
+		{35, 4, v6, "", 4200, "2026-03-31T16:00:00Z"},    // shadowstrike responds to thunderbolt
+		{36, 10, v15, "", 5100, "2026-03-29T19:00:00Z"},  // cyberking responds to blazerunner
+		{37, 2, v4, "", 3900, "2026-03-30T21:00:00Z"},    // player2 responds to frostbyte
+		{39, 1, v3, "", 340, "2026-03-28T08:00:00Z"},     // player1 responds to nightowl
 	}
 	for _, r := range responses {
 		rt, _ := time.Parse(time.RFC3339, r.createdAt)
@@ -1283,16 +1350,18 @@ func seedChallenges() {
 		)
 	}
 
-	// Seed some votes on battle challenges.
+	// Seed votes on battle challenges.
 	type sv struct {
 		challengeID, responseID, voterID int
 	}
 	votes := []sv{
-		{14, 1, 1}, {14, 1, 5}, {14, 1, 8},   // 3 votes for challenge 14, response 1
-		{14, 1, 3}, {14, 1, 10},                // 2 more
-		{15, 2, 1}, {15, 2, 4}, {15, 2, 7}, {15, 2, 10}, // 4 votes for challenge 15, response 2
-		{15, 2, 2}, {15, 2, 5},                  // 2 more
-		{16, 3, 2}, {16, 3, 6},                  // 2 votes for challenge 16, response 3
+		{31, 1, 1}, {31, 1, 5}, {31, 1, 8}, {31, 1, 3}, {31, 1, 10},
+		{32, 2, 1}, {32, 2, 4}, {32, 2, 7}, {32, 2, 10}, {32, 2, 2}, {32, 2, 5},
+		{33, 3, 2}, {33, 3, 6},
+		{34, 4, 3}, {34, 4, 5}, {34, 4, 9},
+		{35, 5, 1}, {35, 5, 2}, {35, 5, 6}, {35, 5, 8}, {35, 5, 10},
+		{36, 6, 1}, {36, 6, 3}, {36, 6, 7}, {36, 6, 9},
+		{37, 7, 1}, {37, 7, 4}, {37, 7, 6}, {37, 7, 10},
 	}
 	for _, v := range votes {
 		db.Exec(
