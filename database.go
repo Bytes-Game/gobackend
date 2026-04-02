@@ -1303,22 +1303,21 @@ func seedChallenges() {
 		{26, 3}, {26, 5}, {26, 8},
 		{27, 1}, {27, 7}, {27, 9},
 		{28, 2}, {28, 4}, {28, 6}, {28, 10},
-		{29, 1}, {29, 3}, {29, 5}, {29, 8},
-		{30, 2}, {30, 7}, {30, 9}, {30, 10},
-		// battle likes
-		{31, 1}, {31, 3}, {31, 5}, {31, 7}, {31, 9}, {31, 10},
-		{32, 2}, {32, 4}, {32, 6}, {32, 8}, {32, 1}, {32, 3}, {32, 9},
-		{33, 1}, {33, 5}, {33, 7},
-		{34, 2}, {34, 4}, {34, 6}, {34, 8}, {34, 10},
-		{35, 1}, {35, 3}, {35, 5}, {35, 7},
-		{36, 2}, {36, 4}, {36, 6}, {36, 8}, {36, 9}, {36, 10},
-		{37, 1}, {37, 3}, {37, 5}, {37, 8},
+		// battle likes (battles are IDs 29-35, friends 36-37)
+		{29, 1}, {29, 3}, {29, 5}, {29, 7}, {29, 9}, {29, 10},
+		{30, 2}, {30, 4}, {30, 6}, {30, 8}, {30, 1}, {30, 3}, {30, 9},
+		{31, 1}, {31, 5}, {31, 7},
+		{32, 2}, {32, 4}, {32, 6}, {32, 8}, {32, 10},
+		{33, 1}, {33, 3}, {33, 5}, {33, 7},
+		{34, 2}, {34, 4}, {34, 6}, {34, 8}, {34, 9}, {34, 10},
+		{35, 1}, {35, 3}, {35, 5}, {35, 8},
 	}
 	for _, cl := range challengeLikes {
 		db.Exec(`INSERT INTO challenge_likes (challenge_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, cl[0], cl[1])
 	}
 
-	// Seed responses for battle challenges (31-37, 39).
+	// Seed responses for battle challenges.
+	// 28 shorts (IDs 1-28), 7 battles (IDs 29-35), 2 friends (IDs 36-37).
 	type sr struct {
 		challengeID, responderID int
 		videoURL, thumbURL       string
@@ -1326,14 +1325,14 @@ func seedChallenges() {
 		createdAt                string
 	}
 	responses := []sr{
-		{31, 2, v2, "", 3100, "2026-03-27T17:30:00Z"},    // player2 responds to shadowstrike
-		{32, 9, v7, "", 5800, "2026-03-28T11:30:00Z"},    // thunderbolt responds to stormchaser
-		{33, 3, v10, "", 2200, "2026-03-26T21:00:00Z"},   // player3 responds to cyberking
-		{34, 7, v12, "", 2700, "2026-03-30T10:00:00Z"},   // frostbyte responds to player1
-		{35, 4, v6, "", 4200, "2026-03-31T16:00:00Z"},    // shadowstrike responds to thunderbolt
-		{36, 10, v15, "", 5100, "2026-03-29T19:00:00Z"},  // cyberking responds to blazerunner
-		{37, 2, v4, "", 3900, "2026-03-30T21:00:00Z"},    // player2 responds to frostbyte
-		{39, 1, v3, "", 340, "2026-03-28T08:00:00Z"},     // player1 responds to nightowl
+		{29, 2, v2, "", 3100, "2026-03-27T17:30:00Z"},    // player2 responds to shadowstrike
+		{30, 9, v7, "", 5800, "2026-03-28T11:30:00Z"},    // thunderbolt responds to stormchaser
+		{31, 3, v10, "", 2200, "2026-03-26T21:00:00Z"},   // player3 responds to cyberking
+		{32, 7, v12, "", 2700, "2026-03-30T10:00:00Z"},   // frostbyte responds to player1
+		{33, 4, v6, "", 4200, "2026-03-31T16:00:00Z"},    // shadowstrike responds to thunderbolt
+		{34, 10, v15, "", 5100, "2026-03-29T19:00:00Z"},  // cyberking responds to blazerunner
+		{35, 2, v4, "", 3900, "2026-03-30T21:00:00Z"},    // player2 responds to frostbyte
+		{37, 1, v3, "", 340, "2026-03-28T08:00:00Z"},     // player1 responds to nightowl (friends battle)
 	}
 	for _, r := range responses {
 		rt, _ := time.Parse(time.RFC3339, r.createdAt)
@@ -1349,13 +1348,13 @@ func seedChallenges() {
 		challengeID, responseID, voterID int
 	}
 	votes := []sv{
-		{31, 1, 1}, {31, 1, 5}, {31, 1, 8}, {31, 1, 3}, {31, 1, 10},
-		{32, 2, 1}, {32, 2, 4}, {32, 2, 7}, {32, 2, 10}, {32, 2, 2}, {32, 2, 5},
-		{33, 3, 2}, {33, 3, 6},
-		{34, 4, 3}, {34, 4, 5}, {34, 4, 9},
-		{35, 5, 1}, {35, 5, 2}, {35, 5, 6}, {35, 5, 8}, {35, 5, 10},
-		{36, 6, 1}, {36, 6, 3}, {36, 6, 7}, {36, 6, 9},
-		{37, 7, 1}, {37, 7, 4}, {37, 7, 6}, {37, 7, 10},
+		{29, 1, 1}, {29, 1, 5}, {29, 1, 8}, {29, 1, 3}, {29, 1, 10},
+		{30, 2, 1}, {30, 2, 4}, {30, 2, 7}, {30, 2, 10}, {30, 2, 2}, {30, 2, 5},
+		{31, 3, 2}, {31, 3, 6},
+		{32, 4, 3}, {32, 4, 5}, {32, 4, 9},
+		{33, 5, 1}, {33, 5, 2}, {33, 5, 6}, {33, 5, 8}, {33, 5, 10},
+		{34, 6, 1}, {34, 6, 3}, {34, 6, 7}, {34, 6, 9},
+		{35, 7, 1}, {35, 7, 4}, {35, 7, 6}, {35, 7, 10},
 	}
 	for _, v := range votes {
 		db.Exec(
