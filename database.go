@@ -1187,22 +1187,22 @@ func seedChallenges() {
 		createdAt          string
 	}
 
-	// Free sample video URLs from pixabay/pexels (all public domain)
+	// Public sample video URLs (all verified accessible)
 	v1 := "https://cdn.pixabay.com/video/2024/06/12/216475_small.mp4"
-	v2 := "https://cdn.pixabay.com/video/2024/05/31/214978_small.mp4"
-	v3 := "https://cdn.pixabay.com/video/2023/09/20/181651_small.mp4"
-	v4 := "https://cdn.pixabay.com/video/2024/04/21/209380_small.mp4"
-	v5 := "https://cdn.pixabay.com/video/2024/01/26/198350_small.mp4"
-	v6 := "https://cdn.pixabay.com/video/2023/10/31/187457_small.mp4"
-	v7 := "https://cdn.pixabay.com/video/2023/08/28/178294_small.mp4"
-	v8 := "https://cdn.pixabay.com/video/2024/03/05/203261_small.mp4"
-	v9 := "https://cdn.pixabay.com/video/2024/02/14/200868_small.mp4"
-	v10 := "https://cdn.pixabay.com/video/2023/07/28/173863_small.mp4"
-	v11 := "https://cdn.pixabay.com/video/2024/08/02/224022_small.mp4"
-	v12 := "https://cdn.pixabay.com/video/2024/07/18/221697_small.mp4"
-	v13 := "https://cdn.pixabay.com/video/2023/12/16/194523_small.mp4"
-	v14 := "https://cdn.pixabay.com/video/2024/09/15/231127_small.mp4"
-	v15 := "https://cdn.pixabay.com/video/2023/11/15/189678_small.mp4"
+	v2 := "https://flutter.github.io/assets-for-api-docs/assets/videos/butterfly.mp4"
+	v3 := "https://flutter.github.io/assets-for-api-docs/assets/videos/bee.mp4"
+	v4 := "https://media.w3.org/2010/05/sintel/trailer.mp4"
+	v5 := "https://media.w3.org/2010/05/bunny/trailer.mp4"
+	v6 := "https://media.w3.org/2010/05/bunny/movie.mp4"
+	v7 := "https://media.w3.org/2010/05/video/movie_300.mp4"
+	v8 := "https://www.w3schools.com/html/mov_bbb.mp4"
+	v9 := "https://cdn.plyr.io/static/demo/View_From_A_Blue_Moon_Trailer-720p.mp4"
+	v10 := "https://storage.googleapis.com/exoplayer-test-media-0/BigBuckBunny_320x180.mp4"
+	v11 := "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4"
+	v12 := "https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_1MB.mp4"
+	v13 := "https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_1MB.mp4"
+	v14 := "https://filesamples.com/samples/video/mp4/sample_640x360.mp4"
+	v15 := "https://media.w3.org/2010/05/sintel/trailer.mp4"
 
 	data := []sc{
 		// === SHORTS (open, no one accepted — single video) ===
