@@ -1207,52 +1207,52 @@ func seedChallenges() {
 	data := []sc{
 		// === SHORTS (open, no one accepted — single video) ===
 		// -- player1 (id 1) --
-		{1, v3, "", "Who can beat", "This Record", "arena", "open", 950, "2026-03-27T20:00:00Z"},
-		{1, v10, "", "Who is faster at", "Speed Run", "arena", "open", 1200, "2026-03-25T14:00:00Z"},
-		{1, v7, "", "Who has the best", "Morning Routine", "arena", "open", 2400, "2026-03-30T07:00:00Z"},
+		{1, v3, "", "Who can beat", "This Record", "arena", "open", 950, "2026-04-02T06:00:00Z"},
+		{1, v10, "", "Who is faster at", "Speed Run", "arena", "open", 1200, "2026-04-02T07:00:00Z"},
+		{1, v7, "", "Who has the best", "Morning Routine", "arena", "open", 2400, "2026-04-02T08:00:00Z"},
 
 		// -- player2 (id 2) --
-		{2, v1, "", "Who is better at", "Dance Moves", "arena", "open", 3200, "2026-03-28T14:00:00Z"},
-		{2, v12, "", "Who can do a better", "Freestyle Rap", "arena", "open", 2800, "2026-03-27T16:00:00Z"},
-		{2, v9, "", "Who can pull off", "This Look", "arena", "open", 1700, "2026-03-30T13:00:00Z"},
+		{2, v1, "", "Who is better at", "Dance Moves", "arena", "open", 3200, "2026-04-02T09:00:00Z"},
+		{2, v12, "", "Who can do a better", "Freestyle Rap", "arena", "open", 2800, "2026-04-02T10:00:00Z"},
+		{2, v9, "", "Who can pull off", "This Look", "arena", "open", 1700, "2026-04-02T11:00:00Z"},
 
 		// -- player3 (id 3) --
-		{3, v6, "", "Who has the best", "Cooking Skills", "arena", "open", 4200, "2026-03-28T09:00:00Z"},
-		{3, v11, "", "Who plays better", "Guitar Solo", "arena", "open", 1300, "2026-03-29T16:00:00Z"},
+		{3, v6, "", "Who has the best", "Cooking Skills", "arena", "open", 4200, "2026-04-02T12:00:00Z"},
+		{3, v11, "", "Who plays better", "Guitar Solo", "arena", "open", 1300, "2026-04-02T13:00:00Z"},
 
 		// -- shadowstrike (id 4) --
-		{4, v11, "", "Which is the best", "Music Cover", "arena", "open", 5600, "2026-03-28T20:00:00Z"},
-		{4, v4, "", "Who has better", "Reflexes", "arena", "open", 3900, "2026-03-30T22:00:00Z"},
-		{4, v15, "", "Who can land", "This Combo", "arena", "open", 2100, "2026-03-31T10:00:00Z"},
+		{4, v11, "", "Which is the best", "Music Cover", "arena", "open", 5600, "2026-04-02T06:30:00Z"},
+		{4, v4, "", "Who has better", "Reflexes", "arena", "open", 3900, "2026-04-02T07:30:00Z"},
+		{4, v15, "", "Who can land", "This Combo", "arena", "open", 2100, "2026-04-02T08:30:00Z"},
 
 		// -- blazerunner (id 5) --
-		{5, v5, "", "Who can do better", "Trick Shot", "arena", "open", 1500, "2026-03-26T22:00:00Z"},
-		{5, v8, "", "Who is funnier", "Stand Up Bit", "arena", "open", 4100, "2026-03-29T20:00:00Z"},
-		{5, v14, "", "Who runs faster", "Sprint Challenge", "arena", "open", 2600, "2026-03-31T08:00:00Z"},
+		{5, v5, "", "Who can do better", "Trick Shot", "arena", "open", 1500, "2026-04-02T09:30:00Z"},
+		{5, v8, "", "Who is funnier", "Stand Up Bit", "arena", "open", 4100, "2026-04-02T10:30:00Z"},
+		{5, v14, "", "Who runs faster", "Sprint Challenge", "arena", "open", 2600, "2026-04-02T11:30:00Z"},
 
 		// -- stormchaser (id 6) --
-		{6, v9, "", "Who has better", "Fashion Style", "arena", "open", 3400, "2026-03-27T11:00:00Z"},
-		{6, v2, "", "Who has the cooler", "Room Tour", "arena", "open", 1800, "2026-03-30T15:00:00Z"},
+		{6, v9, "", "Who has better", "Fashion Style", "arena", "open", 3400, "2026-04-02T12:30:00Z"},
+		{6, v2, "", "Who has the cooler", "Room Tour", "arena", "open", 1800, "2026-04-02T13:30:00Z"},
 
 		// -- frostbyte (id 7) --
-		{7, v2, "", "Which is the best", "Gaming Setup", "arena", "open", 1800, "2026-03-28T12:00:00Z"},
-		{7, v13, "", "Who has the better", "Sports Move", "arena", "open", 1900, "2026-03-26T08:00:00Z"},
-		{7, v6, "", "Who cooks better", "Ramen Bowl", "arena", "open", 3500, "2026-03-31T12:00:00Z"},
+		{7, v2, "", "Which is the best", "Gaming Setup", "arena", "open", 1800, "2026-04-02T06:15:00Z"},
+		{7, v13, "", "Who has the better", "Sports Move", "arena", "open", 1900, "2026-04-02T07:15:00Z"},
+		{7, v6, "", "Who cooks better", "Ramen Bowl", "arena", "open", 3500, "2026-04-02T08:15:00Z"},
 
 		// -- nightowl (id 8) --
-		{8, v7, "", "Which is more", "Creative Art", "arena", "open", 890, "2026-03-26T15:00:00Z"},
-		{8, v12, "", "Who draws better", "Anime Character", "arena", "open", 1100, "2026-03-29T23:00:00Z"},
-		{8, v3, "", "Who has better", "Night Photography", "arena", "open", 750, "2026-03-31T02:00:00Z"},
+		{8, v7, "", "Which is more", "Creative Art", "arena", "open", 890, "2026-04-02T09:15:00Z"},
+		{8, v12, "", "Who draws better", "Anime Character", "arena", "open", 1100, "2026-04-02T10:15:00Z"},
+		{8, v3, "", "Who has better", "Night Photography", "arena", "open", 750, "2026-04-02T11:15:00Z"},
 
 		// -- thunderbolt (id 9) --
-		{9, v8, "", "Who can nail", "This Comedy Bit", "arena", "open", 6700, "2026-03-28T18:00:00Z"},
-		{9, v14, "", "Who throws better", "Javelin Throw", "arena", "open", 2200, "2026-03-30T09:00:00Z"},
-		{9, v1, "", "Who has the better", "Dance Routine", "arena", "open", 3800, "2026-03-31T18:00:00Z"},
+		{9, v8, "", "Who can nail", "This Comedy Bit", "arena", "open", 6700, "2026-04-02T12:15:00Z"},
+		{9, v14, "", "Who throws better", "Javelin Throw", "arena", "open", 2200, "2026-04-02T13:15:00Z"},
+		{9, v1, "", "Who has the better", "Dance Routine", "arena", "open", 3800, "2026-04-02T06:45:00Z"},
 
 		// -- cyberking (id 10) --
-		{10, v4, "", "Who is the real", "Champion", "arena", "open", 2100, "2026-03-27T10:00:00Z"},
-		{10, v10, "", "Who builds faster", "PC Build Race", "arena", "open", 5200, "2026-03-29T14:00:00Z"},
-		{10, v15, "", "Who codes faster", "Bug Fix Race", "arena", "open", 4400, "2026-03-31T20:00:00Z"},
+		{10, v4, "", "Who is the real", "Champion", "arena", "open", 2100, "2026-04-02T07:45:00Z"},
+		{10, v10, "", "Who builds faster", "PC Build Race", "arena", "open", 5200, "2026-04-02T08:45:00Z"},
+		{10, v15, "", "Who codes faster", "Bug Fix Race", "arena", "open", 4400, "2026-04-02T09:45:00Z"},
 
 		// === BATTLES (accepted — both challenger and opponent have videos) ===
 		{4, v14, "", "Who has better", "Strategy", "arena", "active", 4500, "2026-03-27T16:00:00Z"},      // challenge 31 — battle
