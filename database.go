@@ -612,19 +612,13 @@ func seedIfEmpty() {
 // ReseedDatabase drops all data and re-seeds from scratch.
 func ReseedDatabase() {
 	log.Println("Reseeding database...")
-	tables := []string{
-		"challenge_votes", "challenge_response_likes", "challenge_likes", "challenge_responses",
-		"challenge_visible_to", "challenges",
-		"comments", "post_likes", "posts", "follows", "watch_events", "reports",
-		"users",
-	}
-	for _, t := range tables {
-		db.Exec("DELETE FROM " + t)
-	}
-	// Reset sequences so IDs start from 1 again
-	for _, t := range tables {
-		db.Exec("ALTER SEQUENCE IF EXISTS " + t + "_id_seq RESTART WITH 1")
-	}
+	// TRUNCATE with RESTART IDENTITY resets all SERIAL counters to 1
+	db.Exec(`TRUNCATE TABLE
+		challenge_votes, challenge_response_likes, challenge_likes, challenge_responses,
+		challenge_visible_to, challenges,
+		comments, post_likes, posts, follows, watch_events, reports,
+		users
+		RESTART IDENTITY CASCADE`)
 	seedUsers()
 	seedFollows()
 	seedPosts()
@@ -1188,21 +1182,21 @@ func seedChallenges() {
 	}
 
 	// Public sample video URLs (all verified accessible)
-	v1 := "https://cdn.pixabay.com/video/2024/06/12/216475_small.mp4"
-	v2 := "https://flutter.github.io/assets-for-api-docs/assets/videos/butterfly.mp4"
-	v3 := "https://flutter.github.io/assets-for-api-docs/assets/videos/bee.mp4"
-	v4 := "https://media.w3.org/2010/05/sintel/trailer.mp4"
-	v5 := "https://media.w3.org/2010/05/bunny/trailer.mp4"
-	v6 := "https://media.w3.org/2010/05/bunny/movie.mp4"
-	v7 := "https://media.w3.org/2010/05/video/movie_300.mp4"
-	v8 := "https://www.w3schools.com/html/mov_bbb.mp4"
-	v9 := "https://cdn.plyr.io/static/demo/View_From_A_Blue_Moon_Trailer-720p.mp4"
-	v10 := "https://storage.googleapis.com/exoplayer-test-media-0/BigBuckBunny_320x180.mp4"
-	v11 := "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4"
-	v12 := "https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_1MB.mp4"
-	v13 := "https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_1MB.mp4"
-	v14 := "https://filesamples.com/samples/video/mp4/sample_640x360.mp4"
-	v15 := "https://media.w3.org/2010/05/sintel/trailer.mp4"
+	v1 := "https://cdn.pixabay.com/video/2026/01/28/331030_medium.mp4"
+	v2 := "https://cdn.pixabay.com/video/2021/06/06/76681-559745365_medium.mp4"
+	v3 := "https://cdn.pixabay.com/video/2026/02/17/335040_medium.mp4"
+	v4 := "https://cdn.pixabay.com/video/2026/02/10/333819_medium.mp4"
+	v5 := "https://cdn.pixabay.com/video/2026/01/05/326081_medium.mp4"
+	v6 := "https://flutter.github.io/assets-for-api-docs/assets/videos/butterfly.mp4"
+	v7 := "https://flutter.github.io/assets-for-api-docs/assets/videos/bee.mp4"
+	v8 := "https://media.w3.org/2010/05/sintel/trailer.mp4"
+	v9 := "https://media.w3.org/2010/05/bunny/trailer.mp4"
+	v10 := "https://media.w3.org/2010/05/bunny/movie.mp4"
+	v11 := "https://cdn.plyr.io/static/demo/View_From_A_Blue_Moon_Trailer-720p.mp4"
+	v12 := "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4"
+	v13 := "https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_1MB.mp4"
+	v14 := "https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_1MB.mp4"
+	v15 := "https://www.w3schools.com/html/mov_bbb.mp4"
 
 	data := []sc{
 		// === SHORTS (open, no one accepted — single video) ===
