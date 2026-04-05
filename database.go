@@ -172,6 +172,14 @@ func runMigrations() {
 		is_read       BOOLEAN DEFAULT FALSE,
 		created_at    TIMESTAMPTZ DEFAULT NOW()
 	);
+
+	CREATE TABLE IF NOT EXISTS challenge_comments (
+		id            SERIAL PRIMARY KEY,
+		challenge_id  INT NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+		author_id     INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		text          TEXT NOT NULL,
+		created_at    TIMESTAMPTZ DEFAULT NOW()
+	);
 	`
 
 	if _, err := db.Exec(schema); err != nil {
@@ -198,6 +206,7 @@ func runMigrations() {
 	CREATE INDEX IF NOT EXISTS idx_chat_messages_sender ON chat_messages(sender_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_chat_messages_receiver ON chat_messages(receiver_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_chat_messages_pair ON chat_messages(sender_id, receiver_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_challenge_comments_challenge_id ON challenge_comments(challenge_id, created_at ASC);
 	`
 	if _, err := db.Exec(indexes); err != nil {
 		log.Printf("Warning: index creation issue: %v", err)
@@ -1480,6 +1489,80 @@ func GetConversations(userID int) []Conversation {
 				LastMessage:  lastMsg,
 				LastTime:     lastTime.UTC().Format(time.RFC3339),
 				UnreadCount: unread,
+			})
+		}
+	}
+	return result
+}
+
+// ---------------------------------------------------------------------------
+// Challenge Comments CRUD
+// ---------------------------------------------------------------------------
+
+// AddChallengeComment inserts a new comment on a challenge.
+func AddChallengeComment(challengeID, authorID, authorUsername, text string) (ChallengeComment, error) {
+	cid, err := strconv.Atoi(challengeID)
+	if err != nil {
+		return ChallengeComment{}, fmt.Errorf("invalid challenge ID")
+	}
+	aid, err := strconv.Atoi(authorID)
+	if err != nil {
+		return ChallengeComment{}, fmt.Errorf("invalid author ID")
+	}
+
+	var id int
+	var createdAt time.Time
+	err = db.QueryRow(
+		`INSERT INTO challenge_comments (challenge_id, author_id, text)
+		 VALUES ($1,$2,$3) RETURNING id, created_at`,
+		cid, aid, text,
+	).Scan(&id, &createdAt)
+	if err != nil {
+		return ChallengeComment{}, err
+	}
+
+	return ChallengeComment{
+		ID:             strconv.Itoa(id),
+		ChallengeID:    challengeID,
+		AuthorID:       authorID,
+		AuthorUsername: authorUsername,
+		Text:           text,
+		CreatedAt:      createdAt.UTC().Format(time.RFC3339),
+	}, nil
+}
+
+// GetChallengeComments fetches all comments for a challenge, oldest first.
+func GetChallengeComments(challengeID string) []ChallengeComment {
+	cid, err := strconv.Atoi(challengeID)
+	if err != nil {
+		return nil
+	}
+
+	rows, err := db.Query(
+		`SELECT cc.id, cc.challenge_id, cc.author_id, u.username, cc.text, cc.created_at
+		 FROM challenge_comments cc
+		 JOIN users u ON cc.author_id = u.id
+		 WHERE cc.challenge_id = $1
+		 ORDER BY cc.created_at ASC`, cid,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var result []ChallengeComment
+	for rows.Next() {
+		var commentID, challengeIDInt, authorID int
+		var username, text string
+		var createdAt time.Time
+		if rows.Scan(&commentID, &challengeIDInt, &authorID, &username, &text, &createdAt) == nil {
+			result = append(result, ChallengeComment{
+				ID:             strconv.Itoa(commentID),
+				ChallengeID:    strconv.Itoa(challengeIDInt),
+				AuthorID:       strconv.Itoa(authorID),
+				AuthorUsername: username,
+				Text:           text,
+				CreatedAt:      createdAt.UTC().Format(time.RFC3339),
 			})
 		}
 	}

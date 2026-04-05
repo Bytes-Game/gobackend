@@ -246,6 +246,24 @@ type ReportPayload struct {
 	Description string `json:"description"`
 }
 
+// ChallengeComment represents a comment on a challenge.
+type ChallengeComment struct {
+	ID             string `json:"id"`
+	ChallengeID    string `json:"challengeId"`
+	AuthorID       string `json:"authorId"`
+	AuthorUsername string `json:"authorUsername"`
+	Text           string `json:"text"`
+	CreatedAt      string `json:"createdAt"`
+}
+
+// ChallengeCommentPayload is the request body for adding a challenge comment.
+type ChallengeCommentPayload struct {
+	ChallengeID string `json:"challengeId"`
+	UserID      string `json:"userId"`
+	Username    string `json:"username"`
+	Text        string `json:"text"`
+}
+
 // ChallengeDetailResponse bundles the challenge + all responses for the detail view.
 type ChallengeDetailResponse struct {
 	Challenge Challenge           `json:"challenge"`

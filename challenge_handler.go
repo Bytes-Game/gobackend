@@ -183,6 +183,45 @@ func GetVoteResultsHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(votes)
 }
 
+// AddChallengeCommentHandler adds a comment to a challenge.
+// POST /api/v1/challenges/comments body:{ challengeId, userId, username, text }
+func AddChallengeCommentHandler(w http.ResponseWriter, r *http.Request) {
+	var payload ChallengeCommentPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if payload.Text == "" {
+		http.Error(w, "text is required", http.StatusBadRequest)
+		return
+	}
+
+	comment, err := AddChallengeComment(payload.ChallengeID, payload.UserID, payload.Username, payload.Text)
+	if err != nil {
+		http.Error(w, "Failed to add comment: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(comment)
+}
+
+// GetChallengeCommentsHandler returns all comments for a challenge.
+// GET /api/v1/challenges/{id}/comments
+func GetChallengeCommentsHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	comments := GetChallengeComments(id)
+	if comments == nil {
+		comments = []ChallengeComment{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(comments)
+}
+
 // LikeChallengeHandler toggles a like on a challenge.
 // POST /api/v1/challenges/like body:{ challengeId, userId }
 func LikeChallengeHandler(w http.ResponseWriter, r *http.Request) {
