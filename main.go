@@ -200,6 +200,10 @@ func main() {
 	api.HandleFunc("/watch", HandleWatchEvent).Methods("POST", "OPTIONS")
 	api.HandleFunc("/report", HandleReportEvent).Methods("POST", "OPTIONS")
 	api.HandleFunc("/admin/reseed", ReseedHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/chat/send", SendMessageHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/chat/conversations/{userId}", GetConversationsHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/chat/messages/{userId}/{otherUserId}", GetMessagesHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/chat/read", MarkReadHandler).Methods("POST", "OPTIONS")
 
 	r.HandleFunc("/login", LoginHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")

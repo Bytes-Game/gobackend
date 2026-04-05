@@ -163,6 +163,15 @@ func runMigrations() {
 		status        VARCHAR(20) NOT NULL DEFAULT 'pending',
 		created_at    TIMESTAMPTZ DEFAULT NOW()
 	);
+
+	CREATE TABLE IF NOT EXISTS chat_messages (
+		id            SERIAL PRIMARY KEY,
+		sender_id     INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		receiver_id   INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		message       TEXT NOT NULL,
+		is_read       BOOLEAN DEFAULT FALSE,
+		created_at    TIMESTAMPTZ DEFAULT NOW()
+	);
 	`
 
 	if _, err := db.Exec(schema); err != nil {
@@ -186,6 +195,9 @@ func runMigrations() {
 	CREATE INDEX IF NOT EXISTS idx_watch_events_content ON watch_events(content_id, content_type);
 	CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status);
 	CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+	CREATE INDEX IF NOT EXISTS idx_chat_messages_sender ON chat_messages(sender_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_chat_messages_receiver ON chat_messages(receiver_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_chat_messages_pair ON chat_messages(sender_id, receiver_id, created_at DESC);
 	`
 	if _, err := db.Exec(indexes); err != nil {
 		log.Printf("Warning: index creation issue: %v", err)
@@ -614,6 +626,7 @@ func ReseedDatabase() {
 	log.Println("Reseeding database...")
 	// TRUNCATE with RESTART IDENTITY resets all SERIAL counters to 1
 	db.Exec(`TRUNCATE TABLE
+		chat_messages,
 		challenge_votes, challenge_response_likes, challenge_likes, challenge_responses,
 		challenge_visible_to, challenges,
 		comments, post_likes, posts, follows, watch_events, reports,
@@ -1362,4 +1375,113 @@ func seedChallenges() {
 			v.challengeID, v.responseID, v.voterID,
 		)
 	}
+}
+
+// --------------------------------------------------------------------------
+// Chat
+// --------------------------------------------------------------------------
+
+// SendChatMessage inserts a message and returns its ID.
+func SendChatMessage(senderID, receiverID int, message string) (int, error) {
+	var id int
+	err := db.QueryRow(
+		`INSERT INTO chat_messages (sender_id, receiver_id, message)
+		 VALUES ($1, $2, $3) RETURNING id`,
+		senderID, receiverID, message,
+	).Scan(&id)
+	return id, err
+}
+
+// GetChatMessages returns messages between two users, newest first.
+func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
+	rows, err := db.Query(
+		`SELECT m.id, m.sender_id, s.username, m.receiver_id, r.username,
+				m.message, m.is_read, m.created_at
+		 FROM chat_messages m
+		 JOIN users s ON m.sender_id = s.id
+		 JOIN users r ON m.receiver_id = r.id
+		 WHERE (m.sender_id = $1 AND m.receiver_id = $2)
+		    OR (m.sender_id = $2 AND m.receiver_id = $1)
+		 ORDER BY m.created_at DESC
+		 LIMIT $3 OFFSET $4`,
+		userA, userB, limit, offset,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var result []ChatMessage
+	for rows.Next() {
+		var id, sID, rID int
+		var sName, rName, msg string
+		var isRead bool
+		var createdAt time.Time
+		if rows.Scan(&id, &sID, &sName, &rID, &rName, &msg, &isRead, &createdAt) == nil {
+			result = append(result, ChatMessage{
+				ID:              strconv.Itoa(id),
+				SenderID:        strconv.Itoa(sID),
+				SenderUsername:   sName,
+				ReceiverID:      strconv.Itoa(rID),
+				ReceiverUsername: rName,
+				Message:         msg,
+				IsRead:          isRead,
+				CreatedAt:       createdAt.UTC().Format(time.RFC3339),
+			})
+		}
+	}
+	return result
+}
+
+// MarkMessagesRead marks all messages from sender to receiver as read.
+func MarkMessagesRead(senderID, receiverID int) {
+	db.Exec(
+		`UPDATE chat_messages SET is_read = TRUE
+		 WHERE sender_id = $1 AND receiver_id = $2 AND is_read = FALSE`,
+		senderID, receiverID,
+	)
+}
+
+// GetConversations returns the list of users the given user has chatted with.
+func GetConversations(userID int) []Conversation {
+	rows, err := db.Query(
+		`SELECT
+			CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END AS other_id,
+			u.username, u.league,
+			(SELECT message FROM chat_messages m2
+			 WHERE (m2.sender_id = $1 AND m2.receiver_id = CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END)
+			    OR (m2.receiver_id = $1 AND m2.sender_id = CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END)
+			 ORDER BY m2.created_at DESC LIMIT 1) AS last_msg,
+			MAX(m.created_at) AS last_time,
+			COUNT(*) FILTER (WHERE m.receiver_id = $1 AND m.is_read = FALSE AND m.sender_id != $1) AS unread
+		 FROM chat_messages m
+		 JOIN users u ON u.id = CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END
+		 WHERE m.sender_id = $1 OR m.receiver_id = $1
+		 GROUP BY other_id, u.username, u.league
+		 ORDER BY last_time DESC`,
+		userID,
+	)
+	if err != nil {
+		log.Printf("GetConversations error: %v", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var result []Conversation
+	for rows.Next() {
+		var otherID, unread int
+		var username, league, lastMsg string
+		var lastTime time.Time
+		if rows.Scan(&otherID, &username, &league, &lastMsg, &lastTime, &unread) == nil {
+			result = append(result, Conversation{
+				UserID:      strconv.Itoa(otherID),
+				Username:    username,
+				League:      league,
+				LastMessage:  lastMsg,
+				LastTime:     lastTime.UTC().Format(time.RFC3339),
+				UnreadCount: unread,
+			})
+		}
+	}
+	return result
 }

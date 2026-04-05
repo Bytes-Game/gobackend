@@ -46,6 +46,28 @@ type Notification struct {
 	Timestamp string `json:"timestamp"`
 }
 
+// ChatMessage represents a direct message between two users.
+type ChatMessage struct {
+	ID             string `json:"id"`
+	SenderID       string `json:"senderId"`
+	SenderUsername string `json:"senderUsername"`
+	ReceiverID     string `json:"receiverId"`
+	ReceiverUsername string `json:"receiverUsername"`
+	Message        string `json:"message"`
+	IsRead         bool   `json:"isRead"`
+	CreatedAt      string `json:"createdAt"`
+}
+
+// Conversation represents a chat thread between two users (for the list view).
+type Conversation struct {
+	UserID       string `json:"userId"`
+	Username     string `json:"username"`
+	League       string `json:"league"`
+	LastMessage  string `json:"lastMessage"`
+	LastTime     string `json:"lastTime"`
+	UnreadCount  int    `json:"unreadCount"`
+}
+
 // Post represents a piece of content (video/image short) uploaded by a user.
 type Post struct {
 	ID             string   `json:"id"`
