@@ -1494,21 +1494,26 @@ func MarkMessagesRead(senderID, receiverID int) {
 // GetConversations returns the list of users the given user has chatted with.
 func GetConversations(userID int) []Conversation {
 	rows, err := db.Query(
-		`SELECT
-			CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END AS other_id,
-			u.username, u.league,
-			(SELECT CASE WHEN COALESCE(m2.is_deleted, FALSE) THEN 'This message was deleted' ELSE m2.message END
-			 FROM chat_messages m2
-			 WHERE (m2.sender_id = $1 AND m2.receiver_id = CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END)
-			    OR (m2.receiver_id = $1 AND m2.sender_id = CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END)
+		`WITH convos AS (
+			SELECT
+				CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END AS other_id,
+				MAX(m.created_at) AS last_time,
+				COUNT(*) FILTER (WHERE m.receiver_id = $1 AND m.is_read = FALSE) AS unread
+			FROM chat_messages m
+			WHERE m.sender_id = $1 OR m.receiver_id = $1
+			GROUP BY other_id
+		)
+		SELECT
+			c.other_id, u.username, u.league,
+			(SELECT m2.message FROM chat_messages m2
+			 WHERE (m2.sender_id = $1 AND m2.receiver_id = c.other_id)
+			    OR (m2.sender_id = c.other_id AND m2.receiver_id = $1)
 			 ORDER BY m2.created_at DESC LIMIT 1) AS last_msg,
-			MAX(m.created_at) AS last_time,
-			COUNT(*) FILTER (WHERE m.receiver_id = $1 AND m.is_read = FALSE AND m.sender_id != $1) AS unread
-		 FROM chat_messages m
-		 JOIN users u ON u.id = CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END
-		 WHERE m.sender_id = $1 OR m.receiver_id = $1
-		 GROUP BY other_id, u.username, u.league
-		 ORDER BY last_time DESC`,
+			c.last_time,
+			c.unread
+		FROM convos c
+		JOIN users u ON u.id = c.other_id
+		ORDER BY c.last_time DESC`,
 		userID,
 	)
 	if err != nil {
