@@ -1493,58 +1493,79 @@ func MarkMessagesRead(senderID, receiverID int) {
 
 // GetConversations returns the list of users the given user has chatted with.
 func GetConversations(userID int) []Conversation {
-	rows, err := db.Query(
-		`WITH convos AS (
-			SELECT
-				CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END AS other_id,
-				MAX(m.created_at) AS last_time,
-				COUNT(*) FILTER (WHERE m.receiver_id = $1 AND m.is_read = FALSE) AS unread
-			FROM chat_messages m
-			WHERE m.sender_id = $1 OR m.receiver_id = $1
-			GROUP BY other_id
-		)
-		SELECT
-			c.other_id, u.username, u.league,
-			(SELECT m2.message FROM chat_messages m2
-			 WHERE (m2.sender_id = $1 AND m2.receiver_id = c.other_id)
-			    OR (m2.sender_id = c.other_id AND m2.receiver_id = $1)
-			 ORDER BY m2.created_at DESC LIMIT 1) AS last_msg,
-			c.last_time,
-			c.unread
-		FROM convos c
-		JOIN users u ON u.id = c.other_id
-		ORDER BY c.last_time DESC`,
+	// Step 1: Find all unique conversation partners
+	partnerRows, err := db.Query(
+		`SELECT DISTINCT
+			CASE WHEN sender_id = $1 THEN receiver_id ELSE sender_id END AS other_id
+		 FROM chat_messages
+		 WHERE sender_id = $1 OR receiver_id = $1`,
 		userID,
 	)
 	if err != nil {
-		log.Printf("GetConversations error: %v", err)
+		log.Printf("GetConversations partners error: %v", err)
 		return nil
 	}
-	defer rows.Close()
+	defer partnerRows.Close()
 
+	var partnerIDs []int
+	for partnerRows.Next() {
+		var pid int
+		if partnerRows.Scan(&pid) == nil {
+			partnerIDs = append(partnerIDs, pid)
+		}
+	}
+
+	if len(partnerIDs) == 0 {
+		return []Conversation{}
+	}
+
+	// Step 2: For each partner, get their info, last message, and unread count
 	var result []Conversation
-	for rows.Next() {
-		var otherID, unread int
+	for _, pid := range partnerIDs {
 		var username, league string
-		var lastMsg *string
-		var lastTime time.Time
-		if err := rows.Scan(&otherID, &username, &league, &lastMsg, &lastTime, &unread); err != nil {
-			log.Printf("GetConversations scan error: %v", err)
+		err := db.QueryRow(`SELECT username, league FROM users WHERE id=$1`, pid).Scan(&username, &league)
+		if err != nil {
 			continue
 		}
-		lm := ""
-		if lastMsg != nil {
-			lm = *lastMsg
+
+		var lastMsg string
+		var lastTime time.Time
+		err = db.QueryRow(
+			`SELECT message, created_at FROM chat_messages
+			 WHERE (sender_id=$1 AND receiver_id=$2) OR (sender_id=$2 AND receiver_id=$1)
+			 ORDER BY created_at DESC LIMIT 1`,
+			userID, pid,
+		).Scan(&lastMsg, &lastTime)
+		if err != nil {
+			continue
 		}
+
+		var unread int
+		db.QueryRow(
+			`SELECT COUNT(*) FROM chat_messages
+			 WHERE sender_id=$1 AND receiver_id=$2 AND is_read=FALSE`,
+			pid, userID,
+		).Scan(&unread)
+
 		result = append(result, Conversation{
-			UserID:      strconv.Itoa(otherID),
+			UserID:      strconv.Itoa(pid),
 			Username:    username,
 			League:      league,
-			LastMessage:  lm,
+			LastMessage:  lastMsg,
 			LastTime:     lastTime.UTC().Format(time.RFC3339),
 			UnreadCount: unread,
 		})
 	}
+
+	// Sort by last_time descending
+	for i := 0; i < len(result); i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].LastTime > result[i].LastTime {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+
 	return result
 }
 
