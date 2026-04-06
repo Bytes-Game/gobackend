@@ -1497,7 +1497,7 @@ func GetConversations(userID int) []Conversation {
 		`SELECT
 			CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END AS other_id,
 			u.username, u.league,
-			(SELECT CASE WHEN m2.is_deleted THEN 'This message was deleted' ELSE m2.message END
+			(SELECT CASE WHEN COALESCE(m2.is_deleted, FALSE) THEN 'This message was deleted' ELSE m2.message END
 			 FROM chat_messages m2
 			 WHERE (m2.sender_id = $1 AND m2.receiver_id = CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END)
 			    OR (m2.receiver_id = $1 AND m2.sender_id = CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END)
@@ -1520,18 +1520,25 @@ func GetConversations(userID int) []Conversation {
 	var result []Conversation
 	for rows.Next() {
 		var otherID, unread int
-		var username, league, lastMsg string
+		var username, league string
+		var lastMsg *string
 		var lastTime time.Time
-		if rows.Scan(&otherID, &username, &league, &lastMsg, &lastTime, &unread) == nil {
-			result = append(result, Conversation{
-				UserID:      strconv.Itoa(otherID),
-				Username:    username,
-				League:      league,
-				LastMessage:  lastMsg,
-				LastTime:     lastTime.UTC().Format(time.RFC3339),
-				UnreadCount: unread,
-			})
+		if err := rows.Scan(&otherID, &username, &league, &lastMsg, &lastTime, &unread); err != nil {
+			log.Printf("GetConversations scan error: %v", err)
+			continue
 		}
+		lm := ""
+		if lastMsg != nil {
+			lm = *lastMsg
+		}
+		result = append(result, Conversation{
+			UserID:      strconv.Itoa(otherID),
+			Username:    username,
+			League:      league,
+			LastMessage:  lm,
+			LastTime:     lastTime.UTC().Format(time.RFC3339),
+			UnreadCount: unread,
+		})
 	}
 	return result
 }
@@ -1683,11 +1690,12 @@ func GetSavedChallenges(userID string) []Challenge {
 // Chat Message Operations
 // ---------------------------------------------------------------------------
 
-// EditChatMessage updates the text of a message (only by sender).
+// EditChatMessage updates the text of a message (only by sender, within 15 minutes).
 func EditChatMessage(msgID int, senderID int, newText string) error {
 	result, err := db.Exec(
 		`UPDATE chat_messages SET message=$1, is_edited=TRUE, edited_at=NOW()
-		 WHERE id=$2 AND sender_id=$3 AND is_deleted=FALSE`,
+		 WHERE id=$2 AND sender_id=$3 AND is_deleted=FALSE
+		   AND created_at > NOW() - INTERVAL '15 minutes'`,
 		newText, msgID, senderID,
 	)
 	if err != nil {
@@ -1695,7 +1703,7 @@ func EditChatMessage(msgID int, senderID int, newText string) error {
 	}
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
-		return fmt.Errorf("message not found or not yours")
+		return fmt.Errorf("message not found, not yours, or edit window expired (15 min)")
 	}
 	return nil
 }
