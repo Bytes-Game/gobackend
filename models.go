@@ -48,14 +48,19 @@ type Notification struct {
 
 // ChatMessage represents a direct message between two users.
 type ChatMessage struct {
-	ID             string `json:"id"`
-	SenderID       string `json:"senderId"`
-	SenderUsername string `json:"senderUsername"`
-	ReceiverID     string `json:"receiverId"`
+	ID              string `json:"id"`
+	SenderID        string `json:"senderId"`
+	SenderUsername  string `json:"senderUsername"`
+	ReceiverID      string `json:"receiverId"`
 	ReceiverUsername string `json:"receiverUsername"`
-	Message        string `json:"message"`
-	IsRead         bool   `json:"isRead"`
-	CreatedAt      string `json:"createdAt"`
+	Message         string `json:"message"`
+	IsRead          bool   `json:"isRead"`
+	Status          string `json:"status"`
+	ReplyToID       string `json:"replyToId,omitempty"`
+	ReplyToText     string `json:"replyToText,omitempty"`
+	IsEdited        bool   `json:"isEdited"`
+	IsDeleted       bool   `json:"isDeleted"`
+	CreatedAt       string `json:"createdAt"`
 }
 
 // Conversation represents a chat thread between two users (for the list view).

@@ -37,6 +37,9 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		go SendChallengeNotification(creator.Username, payload.Prefix+" "+payload.Subject, payload.VisibleTo)
 	}
 
+	// Index in Meilisearch
+	go IndexChallenge(challenge)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(challenge)

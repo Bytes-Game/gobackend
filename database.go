@@ -180,10 +180,30 @@ func runMigrations() {
 		text          TEXT NOT NULL,
 		created_at    TIMESTAMPTZ DEFAULT NOW()
 	);
+
+	CREATE TABLE IF NOT EXISTS saved_challenges (
+		user_id       INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		challenge_id  INT NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+		created_at    TIMESTAMPTZ DEFAULT NOW(),
+		PRIMARY KEY (user_id, challenge_id)
+	);
 	`
 
 	if _, err := db.Exec(schema); err != nil {
 		log.Fatalf("Migration failed: %v", err)
+	}
+
+	// Add new columns to existing tables safely
+	alterStmts := `
+	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN status VARCHAR(20) DEFAULT 'sent'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN reply_to_id INT REFERENCES chat_messages(id) ON DELETE SET NULL; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN is_edited BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN edited_at TIMESTAMPTZ; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE users ADD COLUMN last_seen TIMESTAMPTZ DEFAULT NOW(); EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	`
+	if _, err := db.Exec(alterStmts); err != nil {
+		log.Printf("Warning: alter table issue: %v", err)
 	}
 
 	// Performance indexes
@@ -207,6 +227,7 @@ func runMigrations() {
 	CREATE INDEX IF NOT EXISTS idx_chat_messages_receiver ON chat_messages(receiver_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_chat_messages_pair ON chat_messages(sender_id, receiver_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_challenge_comments_challenge_id ON challenge_comments(challenge_id, created_at ASC);
+	CREATE INDEX IF NOT EXISTS idx_saved_challenges_user ON saved_challenges(user_id, created_at DESC);
 	`
 	if _, err := db.Exec(indexes); err != nil {
 		log.Printf("Warning: index creation issue: %v", err)
@@ -1567,4 +1588,126 @@ func GetChallengeComments(challengeID string) []ChallengeComment {
 		}
 	}
 	return result
+}
+
+// ---------------------------------------------------------------------------
+// Saved Challenges
+// ---------------------------------------------------------------------------
+
+// ToggleSaveChallenge saves or unsaves a challenge for a user. Returns (saved, error).
+func ToggleSaveChallenge(userID, challengeID string) (bool, error) {
+	uid, err := strconv.Atoi(userID)
+	if err != nil {
+		return false, fmt.Errorf("invalid user ID")
+	}
+	cid, err := strconv.Atoi(challengeID)
+	if err != nil {
+		return false, fmt.Errorf("invalid challenge ID")
+	}
+
+	var exists bool
+	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM saved_challenges WHERE user_id=$1 AND challenge_id=$2)`, uid, cid).Scan(&exists)
+
+	if exists {
+		db.Exec(`DELETE FROM saved_challenges WHERE user_id=$1 AND challenge_id=$2`, uid, cid)
+		return false, nil
+	}
+	_, err = db.Exec(`INSERT INTO saved_challenges (user_id, challenge_id) VALUES ($1,$2)`, uid, cid)
+	return true, err
+}
+
+// GetSavedChallenges returns all saved challenges for a user.
+func GetSavedChallenges(userID string) []Challenge {
+	uid, err := strconv.Atoi(userID)
+	if err != nil {
+		return nil
+	}
+
+	rows, err := db.Query(
+		`SELECT c.id, c.creator_id, u.username, u.league, c.video_url, c.thumbnail_url,
+		        c.prefix, c.subject, c.visibility, c.status, c.views, c.created_at,
+		        (SELECT COUNT(*) FROM challenge_likes WHERE challenge_id=c.id) AS likes,
+		        (SELECT COUNT(*) FROM challenge_responses WHERE challenge_id=c.id) AS response_count
+		 FROM saved_challenges sc
+		 JOIN challenges c ON sc.challenge_id = c.id
+		 JOIN users u ON c.creator_id = u.id
+		 WHERE sc.user_id = $1
+		 ORDER BY sc.created_at DESC`, uid,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var result []Challenge
+	for rows.Next() {
+		var c Challenge
+		var cid, creatorID, views, likes, respCount int
+		var createdAt time.Time
+		if rows.Scan(&cid, &creatorID, &c.CreatorUsername, &c.CreatorLeague,
+			&c.VideoURL, &c.ThumbnailURL, &c.Prefix, &c.Subject,
+			&c.Visibility, &c.Status, &views, &createdAt, &likes, &respCount) == nil {
+			c.ID = strconv.Itoa(cid)
+			c.CreatorID = strconv.Itoa(creatorID)
+			c.Views = views
+			c.Likes = likes
+			c.ResponseCount = respCount
+			c.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+			result = append(result, c)
+		}
+	}
+	return result
+}
+
+// ---------------------------------------------------------------------------
+// Chat Message Operations
+// ---------------------------------------------------------------------------
+
+// EditChatMessage updates the text of a message (only by sender).
+func EditChatMessage(msgID int, senderID int, newText string) error {
+	result, err := db.Exec(
+		`UPDATE chat_messages SET message=$1, is_edited=TRUE, edited_at=NOW()
+		 WHERE id=$2 AND sender_id=$3 AND is_deleted=FALSE`,
+		newText, msgID, senderID,
+	)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("message not found or not yours")
+	}
+	return nil
+}
+
+// DeleteChatMessage soft-deletes a message (unsend for everyone).
+func DeleteChatMessage(msgID int, senderID int) error {
+	result, err := db.Exec(
+		`UPDATE chat_messages SET is_deleted=TRUE, message='This message was deleted'
+		 WHERE id=$1 AND sender_id=$2`,
+		msgID, senderID,
+	)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("message not found or not yours")
+	}
+	return nil
+}
+
+// UpdateUserLastSeen updates the user's last_seen timestamp.
+func UpdateUserLastSeen(username string) {
+	db.Exec(`UPDATE users SET last_seen=NOW() WHERE username=$1`, username)
+}
+
+// GetUserLastSeen returns the last_seen timestamp for a user.
+func GetUserLastSeen(username string) string {
+	var lastSeen time.Time
+	err := db.QueryRow(`SELECT COALESCE(last_seen, NOW()) FROM users WHERE username=$1`, username).Scan(&lastSeen)
+	if err != nil {
+		return ""
+	}
+	return lastSeen.UTC().Format(time.RFC3339)
 }

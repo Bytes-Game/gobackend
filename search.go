@@ -4,28 +4,97 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 )
 
-// scoreduser is a helper struct just for sorting users with their search score.
-// It is not exported and only used within this file.
+// scoredUser is a helper struct just for sorting users with their search score.
 type scoredUser struct {
 	User  User
 	Score float64
 }
 
+// UnifiedSearchResponse wraps search results for challenges and users.
+type UnifiedSearchResponse struct {
+	Challenges []Challenge `json:"challenges"`
+	Users      []User      `json:"users"`
+}
+
 // SearchHandler handles requests to the /search endpoint.
+// Supports ?q=query&type=all|users|challenges
 func SearchHandler(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
+	searchType := r.URL.Query().Get("type") // "all", "users", "challenges"
 
 	if query == "" {
 		http.Error(w, "Missing search query parameter 'q'", http.StatusBadRequest)
 		return
 	}
 
-	var scoredUsers []scoredUser
+	if searchType == "" {
+		searchType = "all"
+	}
 
-	// Fetch all users from the database
+	// Try Meilisearch first
+	if meili != nil {
+		meiliResults := MeiliSearchAll(query, searchType)
+		if meiliResults != nil {
+			var challenges []Challenge
+			var users []User
+
+			for _, doc := range meiliResults {
+				docType, _ := doc["_type"].(string)
+				if docType == "challenge" {
+					challenges = append(challenges, meiliDocToChallenge(doc))
+				} else if docType == "user" {
+					users = append(users, meiliDocToUser(doc))
+				}
+			}
+
+			if challenges == nil {
+				challenges = []Challenge{}
+			}
+			if users == nil {
+				users = []User{}
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(UnifiedSearchResponse{
+				Challenges: challenges,
+				Users:      users,
+			})
+			return
+		}
+	}
+
+	// Fallback: PostgreSQL search
+	var challenges []Challenge
+	var users []User
+
+	if searchType == "all" || searchType == "users" {
+		users = searchUsersFallback(query)
+	}
+	if searchType == "all" || searchType == "challenges" {
+		challenges = searchChallengesFallback(query)
+	}
+
+	if challenges == nil {
+		challenges = []Challenge{}
+	}
+	if users == nil {
+		users = []User{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(UnifiedSearchResponse{
+		Challenges: challenges,
+		Users:      users,
+	})
+}
+
+// searchUsersFallback uses the existing Levenshtein-based user search.
+func searchUsersFallback(query string) []User {
+	var scoredUsers []scoredUser
 	allUsers := GetAllUsers()
 	for _, user := range allUsers {
 		score := calculateScore(user, query)
@@ -34,36 +103,106 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Sort users based on their score in descending order.
 	sort.Slice(scoredUsers, func(i, j int) bool {
 		return scoredUsers[i].Score > scoredUsers[j].Score
 	})
 
-	total := len(scoredUsers)
-
-	// Cap results to top 20
 	if len(scoredUsers) > 20 {
 		scoredUsers = scoredUsers[:20]
 	}
 
-	// Extract the User objects from the sorted list for the response.
-	resultUsers := make([]User, len(scoredUsers))
+	result := make([]User, len(scoredUsers))
 	for i, su := range scoredUsers {
-		resultUsers[i] = su.User
+		result[i] = su.User
 	}
-
-	response := SearchResponse{
-		Results: resultUsers,
-		Total:   total,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	return result
 }
 
-// calculatescore calculates a relevance score for a user based on a search query.
-// It uses exact matching, prefix matching, contains matching, Levenshtein distance
-// for typo tolerance, and league matching.
+// searchChallengesFallback searches challenges by title/creator using simple substring matching.
+func searchChallengesFallback(query string) []Challenge {
+	q := strings.ToLower(strings.TrimSpace(query))
+	allChallenges := GetArenaChallenges()
+	var results []Challenge
+
+	for _, c := range allChallenges {
+		title := strings.ToLower(c.Prefix + " " + c.Subject)
+		creator := strings.ToLower(c.CreatorUsername)
+		if strings.Contains(title, q) || strings.Contains(creator, q) {
+			results = append(results, c)
+		}
+	}
+
+	if len(results) > 20 {
+		results = results[:20]
+	}
+	return results
+}
+
+// meiliDocToChallenge converts a Meilisearch hit to a Challenge.
+func meiliDocToChallenge(doc map[string]interface{}) Challenge {
+	return Challenge{
+		ID:              toString(doc["id"]),
+		CreatorID:       toString(doc["creatorId"]),
+		CreatorUsername:  toString(doc["creatorUsername"]),
+		CreatorLeague:   toString(doc["creatorLeague"]),
+		Prefix:          toString(doc["prefix"]),
+		Subject:         toString(doc["subject"]),
+		Visibility:      toString(doc["visibility"]),
+		Status:          toString(doc["status"]),
+		Likes:           toInt(doc["likes"]),
+		Views:           toInt(doc["views"]),
+		ResponseCount:   toInt(doc["responseCount"]),
+		VideoURL:        toString(doc["videoUrl"]),
+		ThumbnailURL:    toString(doc["thumbnailUrl"]),
+		CreatedAt:       toString(doc["createdAt"]),
+	}
+}
+
+// meiliDocToUser converts a Meilisearch hit to a User.
+func meiliDocToUser(doc map[string]interface{}) User {
+	return User{
+		ID:       toString(doc["id"]),
+		Username: toString(doc["username"]),
+		FullName: toString(doc["fullName"]),
+		League:   toString(doc["league"]),
+		Followers: toInt(doc["followers"]),
+		Wins:     toInt(doc["wins"]),
+		Losses:   toInt(doc["losses"]),
+	}
+}
+
+func toString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch val := v.(type) {
+	case string:
+		return val
+	case float64:
+		if val == float64(int(val)) {
+			return strconv.Itoa(int(val))
+		}
+		return strconv.FormatFloat(val, 'f', -1, 64)
+	default:
+		return ""
+	}
+}
+
+func toInt(v interface{}) int {
+	if v == nil {
+		return 0
+	}
+	switch val := v.(type) {
+	case float64:
+		return int(val)
+	case int:
+		return val
+	default:
+		return 0
+	}
+}
+
+// calculateScore calculates a relevance score for a user based on a search query.
 func calculateScore(user User, query string) float64 {
 	var score float64
 	lowerQuery := strings.ToLower(strings.TrimSpace(query))
@@ -71,17 +210,13 @@ func calculateScore(user User, query string) float64 {
 	lowerFullName := strings.ToLower(user.FullName)
 	lowerLeague := strings.ToLower(user.League)
 
-	// ——1. Exact username match (highest priority) ——
 	if lowerUsername == lowerQuery {
 		score += 100.0
 	}
-
-	// ——2. Prefix match on username (e.g.,"play"→"player1") ——
 	if strings.HasPrefix(lowerUsername, lowerQuery) {
 		score += 50.0
 	}
 
-	// ——3. Fuzzy match on full username via Levenshtein distance ——
 	dist := levenshteinDistance(lowerQuery, lowerUsername)
 	maxLen := len(lowerQuery)
 	if len(lowerUsername) > maxLen {
@@ -89,29 +224,23 @@ func calculateScore(user User, query string) float64 {
 	}
 	if maxLen > 0 {
 		similarity := 1.0 - float64(dist)/float64(maxLen)
-		if similarity >= 0.45 { // tolerant threshold for typos
+		if similarity >= 0.45 {
 			score += similarity * 35.0
 		}
 	}
 
-	// —— 4. Token-based matching ——
 	queryTokens := strings.Fields(lowerQuery)
-
 	for _, token := range queryTokens {
-		// Direct substring in username
 		if strings.Contains(lowerUsername, token) {
 			score += 10.0
 		}
-		// Direct substring in full name
 		if strings.Contains(lowerFullName, token) {
 			score += 5.0
 		}
-		// Direct substring in league
 		if strings.Contains(lowerLeague, token) {
 			score += 3.0
 		}
 
-		// Fuzzy match each query token against individual name tokens
 		nameTokens := strings.Fields(lowerFullName)
 		for _, nameToken := range nameTokens {
 			tokenDist := levenshteinDistance(token, nameToken)
@@ -121,13 +250,12 @@ func calculateScore(user User, query string) float64 {
 			}
 			if tokenMaxLen > 0 {
 				sim := 1.0 - float64(tokenDist)/float64(tokenMaxLen)
-				if sim >= 0.55 { // e.g."playr" vs "player"≈ 0.83
+				if sim >= 0.55 {
 					score += sim * 8.0
 				}
 			}
 		}
 
-		// Fuzzy token vs username
 		tokenDistU := levenshteinDistance(token, lowerUsername)
 		tokenMaxU := len(token)
 		if len(lowerUsername) > tokenMaxU {
@@ -141,20 +269,16 @@ func calculateScore(user User, query string) float64 {
 		}
 	}
 
-	// —— 5. Prefix match on full name ——
 	if strings.HasPrefix(lowerFullName, lowerQuery) {
 		score += 15.0
 	}
 
-	// —— 6. Follower bonus (popularity signal) ——
 	score += float64(user.Followers) * 0.01
 
-	// —— 7. Win-rate bonus (competitive ranking signal) ——
 	totalGames := user.Wins + user.Losses
 	if totalGames > 0 {
 		winRate := float64(user.Wins) / float64(totalGames)
 		score += winRate * 5.0
-		// Activity volume bonus: more games = more relevant
 		if totalGames > 50 {
 			score += 3.0
 		} else if totalGames > 20 {
@@ -165,8 +289,7 @@ func calculateScore(user User, query string) float64 {
 	return score
 }
 
-// levenshteinDistance computes the minimum edit distance between two strings
-// This allows the search to tolerate typos (e.g."playar" still matches "player").
+// levenshteinDistance computes the minimum edit distance between two strings.
 func levenshteinDistance(a, b string) int {
 	la, lb := len(a), len(b)
 	if la == 0 {

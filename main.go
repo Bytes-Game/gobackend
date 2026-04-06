@@ -171,6 +171,7 @@ func rateLimitMiddleware(limiter *rateLimiter) mux.MiddlewareFunc {
 func main() {
 	InitDatabase()
 	InitRedis()
+	InitMeilisearch()
 
 	r := mux.NewRouter()
 
@@ -206,6 +207,12 @@ func main() {
 	api.HandleFunc("/chat/conversations/{userId}", GetConversationsHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/chat/messages/{userId}/{otherUserId}", GetMessagesHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/chat/read", MarkReadHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/chat/edit", EditMessageHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/chat/delete", DeleteMessageHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/chat/forward", ForwardMessageHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/chat/online/{username}", OnlineStatusHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/save", SaveChallengeHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/saved/{userId}", GetSavedChallengesHandler).Methods("GET", "OPTIONS")
 
 	r.HandleFunc("/login", LoginHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")

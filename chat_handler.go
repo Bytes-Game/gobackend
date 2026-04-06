@@ -124,6 +124,148 @@ func MarkReadHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, `{"ok":true}`)
 }
 
+// EditMessageHandler handles POST /api/v1/chat/edit body:{ messageId, senderId, text }
+func EditMessageHandler(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		MessageID string `json:"messageId"`
+		SenderID  string `json:"senderId"`
+		Text      string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid body", http.StatusBadRequest)
+		return
+	}
+	msgID, _ := strconv.Atoi(payload.MessageID)
+	senderID, _ := strconv.Atoi(payload.SenderID)
+	if msgID == 0 || senderID == 0 || payload.Text == "" {
+		http.Error(w, "messageId, senderId, and text required", http.StatusBadRequest)
+		return
+	}
+	if err := EditChatMessage(msgID, senderID, payload.Text); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprint(w, `{"ok":true}`)
+}
+
+// DeleteMessageHandler handles POST /api/v1/chat/delete body:{ messageId, senderId }
+func DeleteMessageHandler(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		MessageID string `json:"messageId"`
+		SenderID  string `json:"senderId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid body", http.StatusBadRequest)
+		return
+	}
+	msgID, _ := strconv.Atoi(payload.MessageID)
+	senderID, _ := strconv.Atoi(payload.SenderID)
+	if msgID == 0 || senderID == 0 {
+		http.Error(w, "messageId and senderId required", http.StatusBadRequest)
+		return
+	}
+	if err := DeleteChatMessage(msgID, senderID); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprint(w, `{"ok":true}`)
+}
+
+// ForwardMessageHandler forwards a message to another user.
+// POST /api/v1/chat/forward body:{ messageId, senderId, receiverId }
+func ForwardMessageHandler(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		MessageID  string `json:"messageId"`
+		SenderID   string `json:"senderId"`
+		ReceiverID string `json:"receiverId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid body", http.StatusBadRequest)
+		return
+	}
+	msgID, _ := strconv.Atoi(payload.MessageID)
+	senderID, _ := strconv.Atoi(payload.SenderID)
+	receiverID, _ := strconv.Atoi(payload.ReceiverID)
+	if msgID == 0 || senderID == 0 || receiverID == 0 {
+		http.Error(w, "messageId, senderId, and receiverId required", http.StatusBadRequest)
+		return
+	}
+
+	// Get original message text
+	var originalText string
+	err := db.QueryRow(`SELECT message FROM chat_messages WHERE id=$1`, msgID).Scan(&originalText)
+	if err != nil {
+		http.Error(w, "Message not found", http.StatusNotFound)
+		return
+	}
+
+	// Send as a new message
+	newMsgID, err := SendChatMessage(senderID, receiverID, originalText)
+	if err != nil {
+		http.Error(w, "Failed to forward", http.StatusInternalServerError)
+		return
+	}
+
+	sender, _ := GetUserByID(payload.SenderID)
+	receiver, _ := GetUserByID(payload.ReceiverID)
+
+	msg := ChatMessage{
+		ID:              strconv.Itoa(newMsgID),
+		SenderID:        payload.SenderID,
+		SenderUsername:   sender.Username,
+		ReceiverID:      payload.ReceiverID,
+		ReceiverUsername: receiver.Username,
+		Message:         originalText,
+		Status:          "sent",
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+	}
+
+	go deliverChatMessage(receiver.Username, msg)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(msg)
+}
+
+// SaveChallengeHandler toggles save on a challenge.
+// POST /api/v1/save body:{ userId, challengeId }
+func SaveChallengeHandler(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		UserID      string `json:"userId"`
+		ChallengeID string `json:"challengeId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid body", http.StatusBadRequest)
+		return
+	}
+	saved, err := ToggleSaveChallenge(payload.UserID, payload.ChallengeID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"saved":       saved,
+		"challengeId": payload.ChallengeID,
+	})
+}
+
+// GetSavedChallengesHandler returns saved challenges for a user.
+// GET /api/v1/saved/{userId}
+func GetSavedChallengesHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	userID := vars["userId"]
+
+	challenges := GetSavedChallenges(userID)
+	if challenges == nil {
+		challenges = []Challenge{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(challenges)
+}
+
 // deliverChatMessage sends a chat message to a user via WebSocket.
 func deliverChatMessage(recipientUsername string, msg ChatMessage) {
 	conn, isOnline := IsUserOnline(recipientUsername)
