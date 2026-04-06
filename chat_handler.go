@@ -16,6 +16,7 @@ type SendMessagePayload struct {
 	SenderID   string `json:"senderId"`
 	ReceiverID string `json:"receiverId"`
 	Message    string `json:"message"`
+	ReplyToID  string `json:"replyToId,omitempty"`
 }
 
 // SendMessageHandler handles POST /api/v1/chat/send
@@ -33,7 +34,14 @@ func SendMessageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msgID, err := SendChatMessage(senderID, receiverID, payload.Message)
+	var replyToID *int
+	if payload.ReplyToID != "" {
+		if rid, err := strconv.Atoi(payload.ReplyToID); err == nil && rid > 0 {
+			replyToID = &rid
+		}
+	}
+
+	msgID, err := SendChatMessage(senderID, receiverID, payload.Message, replyToID)
 	if err != nil {
 		log.Printf("SendChatMessage error: %v", err)
 		http.Error(w, "Failed to send message", http.StatusInternalServerError)
@@ -52,6 +60,8 @@ func SendMessageHandler(w http.ResponseWriter, r *http.Request) {
 		ReceiverUsername: receiver.Username,
 		Message:         payload.Message,
 		IsRead:          false,
+		Status:          "sent",
+		ReplyToID:       payload.ReplyToID,
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
 
@@ -201,8 +211,8 @@ func ForwardMessageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send as a new message
-	newMsgID, err := SendChatMessage(senderID, receiverID, originalText)
+	// Send as a new message (no reply reference for forwards)
+	newMsgID, err := SendChatMessage(senderID, receiverID, originalText, nil)
 	if err != nil {
 		http.Error(w, "Failed to forward", http.StatusInternalServerError)
 		return

@@ -1412,12 +1412,12 @@ func seedChallenges() {
 // --------------------------------------------------------------------------
 
 // SendChatMessage inserts a message and returns its ID.
-func SendChatMessage(senderID, receiverID int, message string) (int, error) {
+func SendChatMessage(senderID, receiverID int, message string, replyToID *int) (int, error) {
 	var id int
 	err := db.QueryRow(
-		`INSERT INTO chat_messages (sender_id, receiver_id, message)
-		 VALUES ($1, $2, $3) RETURNING id`,
-		senderID, receiverID, message,
+		`INSERT INTO chat_messages (sender_id, receiver_id, message, reply_to_id)
+		 VALUES ($1, $2, $3, $4) RETURNING id`,
+		senderID, receiverID, message, replyToID,
 	).Scan(&id)
 	return id, err
 }
@@ -1426,7 +1426,13 @@ func SendChatMessage(senderID, receiverID int, message string) (int, error) {
 func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 	rows, err := db.Query(
 		`SELECT m.id, m.sender_id, s.username, m.receiver_id, r.username,
-				m.message, m.is_read, m.created_at
+				m.message, m.is_read,
+				COALESCE(m.status, 'sent') AS status,
+				COALESCE(m.is_edited, FALSE) AS is_edited,
+				COALESCE(m.is_deleted, FALSE) AS is_deleted,
+				m.reply_to_id,
+				(SELECT m2.message FROM chat_messages m2 WHERE m2.id = m.reply_to_id) AS reply_to_text,
+				m.created_at
 		 FROM chat_messages m
 		 JOIN users s ON m.sender_id = s.id
 		 JOIN users r ON m.receiver_id = r.id
@@ -1444,11 +1450,14 @@ func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 	var result []ChatMessage
 	for rows.Next() {
 		var id, sID, rID int
-		var sName, rName, msg string
-		var isRead bool
+		var sName, rName, msg, status string
+		var isRead, isEdited, isDeleted bool
+		var replyToID *int
+		var replyToText *string
 		var createdAt time.Time
-		if rows.Scan(&id, &sID, &sName, &rID, &rName, &msg, &isRead, &createdAt) == nil {
-			result = append(result, ChatMessage{
+		if rows.Scan(&id, &sID, &sName, &rID, &rName, &msg, &isRead,
+			&status, &isEdited, &isDeleted, &replyToID, &replyToText, &createdAt) == nil {
+			cm := ChatMessage{
 				ID:              strconv.Itoa(id),
 				SenderID:        strconv.Itoa(sID),
 				SenderUsername:   sName,
@@ -1456,8 +1465,18 @@ func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 				ReceiverUsername: rName,
 				Message:         msg,
 				IsRead:          isRead,
+				Status:          status,
+				IsEdited:        isEdited,
+				IsDeleted:       isDeleted,
 				CreatedAt:       createdAt.UTC().Format(time.RFC3339),
-			})
+			}
+			if replyToID != nil {
+				cm.ReplyToID = strconv.Itoa(*replyToID)
+			}
+			if replyToText != nil {
+				cm.ReplyToText = *replyToText
+			}
+			result = append(result, cm)
 		}
 	}
 	return result
@@ -1478,7 +1497,8 @@ func GetConversations(userID int) []Conversation {
 		`SELECT
 			CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END AS other_id,
 			u.username, u.league,
-			(SELECT message FROM chat_messages m2
+			(SELECT CASE WHEN m2.is_deleted THEN 'This message was deleted' ELSE m2.message END
+			 FROM chat_messages m2
 			 WHERE (m2.sender_id = $1 AND m2.receiver_id = CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END)
 			    OR (m2.receiver_id = $1 AND m2.sender_id = CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END)
 			 ORDER BY m2.created_at DESC LIMIT 1) AS last_msg,
