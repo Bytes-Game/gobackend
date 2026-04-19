@@ -132,6 +132,11 @@ func runAnalyticsBatch() {
 		recordJobResult(name, users, err, time.Since(t0))
 		if err != nil {
 			log.Printf("[analytics] %s failed: %v", name, err)
+			if metricAnalyticsJob != nil {
+				metricAnalyticsJob.WithLabelValues(name, "error").Inc()
+			}
+		} else if metricAnalyticsJob != nil {
+			metricAnalyticsJob.WithLabelValues(name, "ok").Inc()
 		}
 	}
 

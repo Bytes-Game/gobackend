@@ -172,6 +172,7 @@ func main() {
 	InitDatabase()
 	InitRedis()
 	InitMeilisearch()
+	registerMetrics()
 	startSimilarityWorker()
 	startImpressionAggregator()
 	startAnalyticsScheduler()
@@ -182,6 +183,7 @@ func main() {
 	// Apply rate limiting: 10 requests/sec with burst of 20 per IP
 	limiter := newRateLimiter(10, 20)
 	r.Use(rateLimitMiddleware(limiter))
+	r.Use(metricsMiddleware)
 
 	api := r.PathPrefix("/api/v1").Subrouter()
 	api.HandleFunc("/users", GetAllUsersHandler).Methods("GET", "OPTIONS")
@@ -239,6 +241,9 @@ func main() {
 	r.HandleFunc("/login", LoginHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
 	r.HandleFunc("/search", SearchHandler).Methods("GET", "OPTIONS")
+
+	// Prometheus metrics endpoint — scrape target.
+	r.Handle("/metrics", MetricsHandler()).Methods("GET")
 
 	// Health check endpoint for Render and uptime monitors
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

@@ -260,10 +260,21 @@ func ltrFlush() {
 	ltr.mu.Unlock()
 
 	for c, m := range snapshots {
+		ok := false
 		if js, err := json.Marshal(m); err == nil {
-			_ = rdb.Set(rctx, ltrRedisKey+string(c), js, 0).Err()
-		} else {
-			_ = fmt.Errorf("%v", err) // keep linter quiet
+			if err := rdb.Set(rctx, ltrRedisKey+string(c), js, 0).Err(); err == nil {
+				ok = true
+			}
+		}
+		if metricLTRFlushes != nil {
+			if ok {
+				metricLTRFlushes.WithLabelValues("ok").Inc()
+			} else {
+				metricLTRFlushes.WithLabelValues("error").Inc()
+			}
+		}
+		if metricLTRUpdates != nil {
+			metricLTRUpdates.WithLabelValues(string(c)).Set(float64(m.Updates))
 		}
 	}
 }

@@ -50,6 +50,9 @@ func MarkBlocked(userID, creatorID string) {
 	if err := rdb.SAdd(rctx, "blocked_creators:"+userID, creatorID).Err(); err != nil {
 		// non-fatal: user will still be safe because the event is also in feed_events
 	}
+	if metricSignalCapture != nil {
+		metricSignalCapture.WithLabelValues("block").Inc()
+	}
 }
 
 // UnmarkBlocked reverses MarkBlocked.
@@ -70,6 +73,9 @@ func MarkUnfollowed(userID, creatorID string) {
 	_ = rdb.ZAdd(rctx, "unfollowed:"+userID, redis.Z{Score: now, Member: creatorID}).Err()
 	// Keep the key fresh for at least the penalty window.
 	_ = rdb.Expire(rctx, "unfollowed:"+userID, unfollowPenaltyWindow+24*time.Hour).Err()
+	if metricSignalCapture != nil {
+		metricSignalCapture.WithLabelValues("unfollow").Inc()
+	}
 }
 
 // MarkBounce records a <1s dismissal of a specific piece of content — a much
@@ -81,6 +87,9 @@ func MarkBounce(userID, contentID string) {
 	now := float64(time.Now().Unix())
 	_ = rdb.ZAdd(rctx, "recent_bounces:"+userID, redis.Z{Score: now, Member: contentID}).Err()
 	_ = rdb.Expire(rctx, "recent_bounces:"+userID, bounceWindow+time.Hour).Err()
+	if metricSignalCapture != nil {
+		metricSignalCapture.WithLabelValues("bounce").Inc()
+	}
 }
 
 // RecordSearchQuery pushes a normalized query onto the user's recent-search
@@ -97,6 +106,9 @@ func RecordSearchQuery(userID, query string) {
 	_ = rdb.LPush(rctx, key, q).Err()
 	_ = rdb.LTrim(rctx, key, 0, recentSearchCap-1).Err()
 	_ = rdb.Expire(rctx, key, searchWindow).Err()
+	if metricSignalCapture != nil {
+		metricSignalCapture.WithLabelValues("search").Inc()
+	}
 }
 
 // RecordSessionEnd stamps when the user last ended a session. Ranker reads
@@ -107,6 +119,9 @@ func RecordSessionEnd(userID string) {
 		return
 	}
 	_ = rdb.Set(rctx, "last_session_end:"+userID, fmt.Sprintf("%d", time.Now().Unix()), sessionEndTTL).Err()
+	if metricSignalCapture != nil {
+		metricSignalCapture.WithLabelValues("session_end").Inc()
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

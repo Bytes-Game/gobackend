@@ -148,9 +148,16 @@ func (b *bandit) updateArm(userID, strat string, reward float64) {
 	b.mu.Unlock()
 
 	key := "bandit:" + userID
-	_ = rdb.HSet(rctx, key, strat+"_a", fmt.Sprintf("%.3f", saveA)).Err()
-	_ = rdb.HSet(rctx, key, strat+"_b", fmt.Sprintf("%.3f", saveB)).Err()
+	errA := rdb.HSet(rctx, key, strat+"_a", fmt.Sprintf("%.3f", saveA)).Err()
+	errB := rdb.HSet(rctx, key, strat+"_b", fmt.Sprintf("%.3f", saveB)).Err()
 	_ = rdb.Expire(rctx, key, 90*24*time.Hour).Err() // long retention; bandit state is cheap
+	if metricBanditWrites != nil {
+		if errA != nil || errB != nil {
+			metricBanditWrites.WithLabelValues("error").Inc()
+		} else {
+			metricBanditWrites.WithLabelValues("ok").Inc()
+		}
+	}
 }
 
 // betaSample draws one value from Beta(alpha, beta). For alpha,beta in the
