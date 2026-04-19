@@ -1,0 +1,29 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    service: devf-backend
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+scrape_configs:
+  - job_name: devf-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          # In docker-compose, resolve the backend by service name.
+          - backend:8081
+        labels:
+          env: local
+
+  # Self-scrape so the 'up' alert has a baseline target.
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]

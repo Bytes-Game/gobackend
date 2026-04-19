@@ -159,6 +159,20 @@ func AdminGoldenHourHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// AdminOnlineUsersHandler lists usernames currently holding an open websocket.
+// Useful for on-call verification that push delivery is reaching active
+// sessions and for manual sampling during incident triage.
+//
+// Response: {"count": 12, "usernames": ["alice","bob",...]}
+func AdminOnlineUsersHandler(w http.ResponseWriter, r *http.Request) {
+	names := GetOnlineUsernames()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"count":     len(names),
+		"usernames": names,
+	})
+}
+
 // AdminDashboardHandler serves an inline HTML page that fetches the JSON
 // endpoints and renders them as tables. Kept inline so deployment stays a
 // single binary with no separate static assets to serve.

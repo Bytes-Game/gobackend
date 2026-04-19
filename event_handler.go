@@ -202,6 +202,27 @@ func HandleReportEvent(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(report)
 }
 
+// HandleUnblockEvent reverses a previous block so the creator can re-appear
+// in the user's feed. POST /api/v1/unblock { userId, creatorId }.
+func HandleUnblockEvent(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		UserID    string `json:"userId"`
+		CreatorID string `json:"creatorId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if payload.UserID == "" || payload.CreatorID == "" {
+		http.Error(w, "userId and creatorId are required", http.StatusBadRequest)
+		return
+	}
+	go UnmarkBlocked(payload.UserID, payload.CreatorID)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
 // isHardBlockReason decides whether a report reason is severe enough that the
 // reporter should have the target creator hidden from their feed immediately.
 // Matches on a small set of known-severe reasons; everything else is soft.

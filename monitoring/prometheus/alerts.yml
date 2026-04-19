@@ -1,0 +1,135 @@
+groups:
+  - name: devf_backend_slo
+    interval: 30s
+    rules:
+      # ─── Availability / error rate ──────────────────────────────────────
+      - alert: BackendHigh5xxRate
+        expr: |
+          sum(rate(devf_http_requests_total{status="5xx"}[5m]))
+            /
+          sum(rate(devf_http_requests_total[5m]))
+          > 0.01
+        for: 5m
+        labels:
+          severity: page
+          team: backend
+        annotations:
+          summary: "5xx rate exceeds 1% for 5 minutes"
+          description: |
+            Backend is returning server errors for more than 1% of traffic.
+            Current rate: {{ $value | humanizePercentage }}.
+            Check /metrics for which path/method is regressing.
+
+      - alert: BackendHigh4xxBurst
+        expr: |
+          sum(rate(devf_http_requests_total{status="4xx"}[5m]))
+            /
+          sum(rate(devf_http_requests_total[5m]))
+          > 0.20
+        for: 10m
+        labels:
+          severity: warn
+          team: backend
+        annotations:
+          summary: "4xx rate unusually high"
+          description: "Clients may be mis-calling the API or auth is broken."
+
+      # ─── Latency SLO ────────────────────────────────────────────────────
+      - alert: FeedSmartP95LatencyBreach
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(devf_feed_latency_seconds_bucket{endpoint="/api/v1/feed/smart"}[5m]))
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: page
+          team: ranker
+        annotations:
+          summary: "feed/smart p95 > 500ms"
+          description: |
+            Smart feed latency p95 is {{ $value }}s (SLO: <500ms).
+            Check Redis/Postgres latency and candidate-set size.
+
+      - alert: FeedSmartP99LatencyBreach
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(devf_feed_latency_seconds_bucket{endpoint="/api/v1/feed/smart"}[5m]))
+          ) > 1.5
+        for: 10m
+        labels:
+          severity: warn
+          team: ranker
+        annotations:
+          summary: "feed/smart p99 > 1.5s"
+
+      # ─── Background jobs ────────────────────────────────────────────────
+      - alert: AnalyticsJobFailing
+        expr: |
+          sum(rate(devf_analytics_job_total{outcome!="ok"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: warn
+          team: ranker
+        annotations:
+          summary: "Analytics job is failing"
+          description: "Job: {{ $labels.job }} — see server logs for panic/SQL error."
+
+      - alert: AnalyticsJobStalled
+        expr: |
+          sum(increase(devf_analytics_job_total[90m])) == 0
+        for: 30m
+        labels:
+          severity: page
+          team: ranker
+        annotations:
+          summary: "No analytics job has run in 90 minutes"
+          description: |
+            Scheduler expected to run every 15m. Complete absence of ticks
+            means the goroutine panicked or the scheduler never started.
+
+      - alert: LTRFlushFailing
+        expr: |
+          sum(rate(devf_ltr_flushes_total{outcome!="ok"}[10m])) > 0
+        for: 10m
+        labels:
+          severity: warn
+          team: ranker
+        annotations:
+          summary: "LTR weight flush is failing — learned weights not persisting"
+
+      - alert: BanditWritesFailing
+        expr: |
+          sum(rate(devf_bandit_writes_total{outcome!="ok"}[10m]))
+            /
+          sum(rate(devf_bandit_writes_total[10m]))
+          > 0.05
+        for: 10m
+        labels:
+          severity: warn
+          team: ranker
+        annotations:
+          summary: "Bandit Redis writes failing >5% — exploration/exploitation degrading"
+
+      # ─── Signal capture ────────────────────────────────────────────────
+      - alert: SignalCaptureSilent
+        expr: |
+          sum(rate(devf_signal_capture_total[30m])) == 0
+        for: 30m
+        labels:
+          severity: warn
+          team: backend
+        annotations:
+          summary: "No negative signals captured in 30 minutes"
+          description: |
+            Expect a steady trickle of block/unfollow/bounce/search events.
+            Silence usually means ingest is broken upstream of signal capture.
+
+      # ─── Scrape health ─────────────────────────────────────────────────
+      - alert: BackendMetricsDown
+        expr: up{job="devf-backend"} == 0
+        for: 2m
+        labels:
+          severity: page
+          team: backend
+        annotations:
+          summary: "Prometheus cannot scrape the backend /metrics endpoint"

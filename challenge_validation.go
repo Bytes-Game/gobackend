@@ -102,6 +102,15 @@ func validateChallengeResponseSubmission(payload AcceptChallengePayload, challen
 		return fmt.Errorf("you have already responded to this challenge")
 	}
 
+	// --- Repeat-offender gate ---
+	// If >40% of this user's past responses have been community-hidden as
+	// off-topic, reject further submissions outright until a human reviews.
+	// Protects the challenge feed from well-tested bad actors without
+	// needing an explicit ban list.
+	if rate := userOffTopicRate(payload.ResponderID); rate > 0.4 {
+		return fmt.Errorf("too many of your past responses were flagged off-topic — contact support")
+	}
+
 	// --- Per-user rate limit (Redis sliding-hour counter) ---
 	if err := enforceResponseRateLimit(payload.ResponderID); err != nil {
 		return err

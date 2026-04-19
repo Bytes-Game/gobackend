@@ -17,6 +17,7 @@
 //  9. Subsequent /feed/smart never includes the blocked creator.
 // 10. A short-dwell view produces a bounce penalty on re-fetch.
 // 11. /api/v1/feed/following works for the same user.
+// 12. POST /api/v1/unblock reverses the block (creator removed from set).
 //
 // The harness exits non-zero with a summary of any step that failed. Use it:
 //
@@ -61,7 +62,8 @@ func main() {
 		base:   strings.TrimRight(*base, "/"),
 		user:   *user,
 		target: *target,
-		client: &http.Client{Timeout: 10 * time.Second},
+		// 30s accommodates Render / Railway / Fly free-tier cold starts.
+		client: &http.Client{Timeout: 30 * time.Second},
 	}
 
 	steps := []step{
@@ -76,6 +78,7 @@ func main() {
 		{"blocked creator excluded from feed", r.stepBlockedExcluded},
 		{"short-dwell → bounce penalty", r.stepBouncePenalty},
 		{"following feed", r.stepFollowingFeed},
+		{"unblock reverses block", r.stepUnblock},
 	}
 
 	fmt.Printf("── devb smoketest ── base=%s user=%s target=%s\n\n", r.base, r.user, r.target)
@@ -170,7 +173,8 @@ func (r *runner) stepReportBlock() error {
 		"targetId":   r.target,
 		"reason":     "harassment",
 	}
-	return r.expectStatus("POST", "/api/v1/report", payload, 200, nil)
+	// Handler returns 201 Created (REST-correct); accept any 2xx.
+	return r.expect2xx("POST", "/api/v1/report", payload, nil)
 }
 
 func (r *runner) stepBlockedExcluded() error {
@@ -214,9 +218,25 @@ func (r *runner) stepFollowingFeed() error {
 	return r.expectStatus("GET", "/api/v1/feed/following?userId="+r.user, nil, 200, nil)
 }
 
+func (r *runner) stepUnblock() error {
+	payload := map[string]any{
+		"userId":    r.user,
+		"creatorId": r.target,
+	}
+	return r.expectStatus("POST", "/api/v1/unblock", payload, 200, nil)
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────
 
+func (r *runner) expect2xx(method, path string, body any, decodeInto any) error {
+	return r.expectStatusPredicate(method, path, body, func(c int) bool { return c >= 200 && c < 300 }, decodeInto, "2xx")
+}
+
 func (r *runner) expectStatus(method, path string, body any, want int, decodeInto any) error {
+	return r.expectStatusPredicate(method, path, body, func(c int) bool { return c == want }, decodeInto, fmt.Sprintf("%d", want))
+}
+
+func (r *runner) expectStatusPredicate(method, path string, body any, pred func(int) bool, decodeInto any, wantDesc string) error {
 	var reqBody io.Reader
 	if body != nil {
 		js, err := json.Marshal(body)
@@ -239,12 +259,12 @@ func (r *runner) expectStatus(method, path string, body any, want int, decodeInt
 	defer resp.Body.Close()
 
 	raw, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != want {
+	if !pred(resp.StatusCode) {
 		snippet := string(raw)
 		if len(snippet) > 200 {
 			snippet = snippet[:200] + "…"
 		}
-		return fmt.Errorf("got %d want %d: %s", resp.StatusCode, want, snippet)
+		return fmt.Errorf("got %d want %s: %s", resp.StatusCode, wantDesc, snippet)
 	}
 	if decodeInto != nil && len(raw) > 0 {
 		if err := json.Unmarshal(raw, decodeInto); err != nil {

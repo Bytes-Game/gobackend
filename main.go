@@ -226,6 +226,8 @@ func main() {
 	api.HandleFunc("/admin/errors", adminOnly(AdminErrorsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/health", adminOnly(AdminHealthHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/golden_hour", adminOnly(AdminGoldenHourHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/admin/online", adminOnly(AdminOnlineUsersHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/unblock", HandleUnblockEvent).Methods("POST", "OPTIONS")
 	r.HandleFunc("/admin", adminOnly(AdminDashboardHandler)).Methods("GET")
 	api.HandleFunc("/chat/send", SendMessageHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/chat/conversations/{userId}", GetConversationsHandler).Methods("GET", "OPTIONS")

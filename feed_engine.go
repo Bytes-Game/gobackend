@@ -266,9 +266,6 @@ const (
 	defaultPageSize = 20
 	maxPageSize     = 50
 	candidateMultiplier = 5 // Fetch 5x page size as candidates, then score & filter
-
-	// === Cold start content test audience ===
-	coldContentTestSize = 50 // Show new content to ~50 random users to measure response
 )
 
 // Feed slot types — define what KIND of content goes in each position.
@@ -733,9 +730,7 @@ func updateSessionFromEvent(event FeedEvent) {
 	if event.EventType == "view" && event.CompletionRate > 0.5 {
 		// Only track emotions for content they actually watched
 		emotions := getContentEmotions(event.ContentID, event.ContentType)
-		for _, e := range emotions {
-			state.LastEmotions = append(state.LastEmotions, e)
-		}
+		state.LastEmotions = append(state.LastEmotions, emotions...)
 		// Keep only last 10 emotions
 		if len(state.LastEmotions) > 10 {
 			state.LastEmotions = state.LastEmotions[len(state.LastEmotions)-10:]
@@ -2246,8 +2241,14 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// High SocialDrive users benefit more from social signal and tie-strength;
 	// low-SocialDrive users get a flatter blend (they prefer stranger content).
 	// SocialDrive is written to user_profiles by computeSocialDrive() so
-	// profile.SocialDrive is already the fresh value.
-	socialWeightMult := 0.7 + 0.6*profile.SocialDrive // range 0.7 .. 1.3
+	// profile.SocialDrive is already the fresh value; if the analytics job
+	// hasn't produced one yet, fall back to the precomputed cache (seeded
+	// from realtime events) before defaulting to the neutral midpoint.
+	sd := profile.SocialDrive
+	if sd == 0 {
+		sd = getSocialDriveFallback(profile.UserID)
+	}
+	socialWeightMult := 0.7 + 0.6*sd // range 0.7 .. 1.3
 	breakdown["socialDriveMult"] = socialWeightMult
 
 	// ── SEARCH-INTENT BOOST (Tier 1.4) ──
@@ -2258,13 +2259,28 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	searchTerm := searchB * wSearch * cw.Search
 	breakdown["searchBoost"] = searchTerm
 
-	// ── BASE SCORE (cohort-weighted) ──
-	baseScore := social*wSocial*socialWeightMult*cw.Social +
-		freshness*wFreshness*cw.Freshness +
-		energyFit*wEnergyFit*cw.EnergyFit +
-		relevance*wRelevance*cw.Relevance +
-		quality*wQuality*cw.Quality +
-		novelty*wNovelty*cw.Novelty +
+	// ── EXPERIMENT WEIGHT OVERRIDES ──
+	// If an A/B test is active for this user, its variant config supplies
+	// per-dimension multipliers (defaults to 1.0). This lets us ship ranker
+	// changes behind a variant without redeploying.
+	expCfg := getExperimentConfig(profile.UserID)
+	xw := func(name string) float64 {
+		if expCfg == nil {
+			return 1.0
+		}
+		if m, ok := expCfg[name]; ok {
+			return m
+		}
+		return 1.0
+	}
+
+	// ── BASE SCORE (cohort-weighted, experiment-scaled) ──
+	baseScore := social*wSocial*socialWeightMult*cw.Social*xw("social") +
+		freshness*wFreshness*cw.Freshness*xw("freshness") +
+		energyFit*wEnergyFit*cw.EnergyFit*xw("energyFit") +
+		relevance*wRelevance*cw.Relevance*xw("relevance") +
+		quality*wQuality*cw.Quality*xw("quality") +
+		novelty*wNovelty*cw.Novelty*xw("novelty") +
 		tieBoost*cw.Tie +
 		creatorAffinityBoost*cw.Affinity +
 		dwellBoost +

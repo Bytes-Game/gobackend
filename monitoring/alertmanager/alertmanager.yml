@@ -1,0 +1,32 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default
+  group_by: ['alertname', 'team']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: [severity="page"]
+      receiver: oncall
+      continue: true
+
+receivers:
+  - name: default
+    # Replace with your real webhook — Slack, Discord, Teams, etc.
+    webhook_configs:
+      - url: http://localhost:5001/alerts
+        send_resolved: true
+
+  - name: oncall
+    # Wire to PagerDuty / Opsgenie / whatever your paging provider is.
+    webhook_configs:
+      - url: http://localhost:5001/page
+        send_resolved: true
+
+inhibit_rules:
+  # If the whole backend is down, don't also spam latency/error alerts.
+  - source_matchers: [alertname="BackendMetricsDown"]
+    target_matchers: [team="backend"]
+    equal: [service]

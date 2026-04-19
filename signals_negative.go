@@ -61,6 +61,9 @@ func UnmarkBlocked(userID, creatorID string) {
 		return
 	}
 	_ = rdb.SRem(rctx, "blocked_creators:"+userID, creatorID).Err()
+	if metricSignalCapture != nil {
+		metricSignalCapture.WithLabelValues("unblock").Inc()
+	}
 }
 
 // MarkUnfollowed records a soft negative that decays over 7 days. Uses a ZSET
