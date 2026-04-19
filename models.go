@@ -89,6 +89,10 @@ type Post struct {
 	CreatedAt      string   `json:"createdAt"`
 	IsLiked        bool     `json:"isLiked"`
 	LikedBy        []string `json:"likedBy,omitempty"`
+	// Content understanding fields
+	Category       string   `json:"category"`              // Primary category
+	EmotionTags    []string `json:"emotionTags,omitempty"`  // Emotion labels
+	EnergyLevel    string   `json:"energyLevel"`            // "low","medium","high"
 }
 
 // FeedResponse wraps the paginated feed.
@@ -145,6 +149,10 @@ type Challenge struct {
 	CreatedAt       string   `json:"createdAt"`
 	ExpiresAt       string   `json:"expiresAt"`
 	ResponseCount   int      `json:"responseCount"`
+	// Content understanding fields (creator-declared + system-inferred)
+	Category        string   `json:"category"`             // Primary: "comedy","motivation","sports","dance","music",etc.
+	EmotionTags     []string `json:"emotionTags,omitempty"` // ["happy","intense","inspiring"]
+	EnergyLevel     string   `json:"energyLevel"`           // "low","medium","high"
 }
 
 // HomeFeedItem wraps a post or challenge for the mixed home feed.
@@ -156,16 +164,22 @@ type HomeFeedItem struct {
 
 // ChallengeResponse represents someone accepting and responding to a challenge.
 type ChallengeResponse struct {
-	ID                string `json:"id"`
-	ChallengeID       string `json:"challengeId"`
-	ResponderID       string `json:"responderld"`
-	ResponderUsername string `json:"responderUsername"`
-	ResponderLeague   string `json:"responderLeague"`
-	VideoURL          string `json:"videoUrl"`
-	ThumbnailURL      string `json:"thumbnailUrl,omitempty"`
-	Likes             int    `json:"likes"`
-	Views             int    `json:"views"`
-	CreatedAt         string `json:"createdAt"`
+	ID                string  `json:"id"`
+	ChallengeID       string  `json:"challengeId"`
+	ResponderID       string  `json:"responderld"`
+	ResponderUsername string  `json:"responderUsername"`
+	ResponderLeague   string  `json:"responderLeague"`
+	VideoURL          string  `json:"videoUrl"`
+	ThumbnailURL      string  `json:"thumbnailUrl,omitempty"`
+	Likes             int     `json:"likes"`
+	Views             int     `json:"views"`
+	CreatedAt         string  `json:"createdAt"`
+	// Validation + community moderation fields
+	DurationMs        int     `json:"durationMs,omitempty"`
+	Caption           string  `json:"caption,omitempty"`
+	RelevanceScore    float64 `json:"relevanceScore,omitempty"`
+	OffTopicFlags     int     `json:"offTopicFlags,omitempty"`
+	IsHidden          bool    `json:"isHidden,omitempty"`
 }
 
 // CreateChallengePayload is the request body for creating a challenge.
@@ -175,8 +189,98 @@ type CreateChallengePayload struct {
 	ThumbnailURL string   `json:"thumbnailUrl"`
 	Prefix       string   `json:"prefix"`
 	Subject      string   `json:"subject"`
-	Visibility   string   `json:"visibility"` // "arena" or "friends'
-	VisibleTo    []string `json:"visibleTo"`  // friend IDs (empty = all)
+	Visibility   string   `json:"visibility"`   // "arena" or "friends"
+	VisibleTo    []string `json:"visibleTo"`    // friend IDs (empty = all)
+	Category     string   `json:"category"`     // "comedy","motivation","sports","dance",etc.
+	EmotionTags  []string `json:"emotionTags"`  // ["happy","intense","inspiring"]
+	EnergyLevel  string   `json:"energyLevel"`  // "low","medium","high"
+}
+
+// ContentCategory defines the available categories for content.
+// Categories help the recommendation engine understand what kind of content
+// a video is, so it can match it to users who enjoy that type.
+var ContentCategories = []string{
+	"comedy",       // Funny, humor, roasts, pranks, memes
+	"motivation",   // Inspirational, discipline, success, hustle
+	"sports",       // Athletic skills, sports challenges, fitness
+	"dance",        // Choreography, dance battles, freestyle
+	"music",        // Singing, instruments, beatbox, rap
+	"gaming",       // Gameplay, esports, game challenges
+	"art",          // Drawing, painting, creative crafts
+	"education",    // Tutorials, how-to, skill teaching
+	"story",        // Vlogs, storytime, personal experiences
+	"fashion",      // Style, beauty, outfit challenges
+	"food",         // Cooking, food challenges, recipes
+	"horror",       // Scary, thriller, creepy content
+	"emotional",    // Sad, heartfelt, deep emotional content
+	"lifestyle",    // Day in life, routines, wellness
+	"tech",         // Technology, coding, gadgets
+	"prank",        // Pranks, social experiments
+	"news",         // Commentary, opinions, current events
+	"other",        // Anything that doesn't fit above
+}
+
+// EmotionLabels are the available emotion tags for content.
+// Multiple can be selected. These help the algorithm match content
+// to the user's current mood/state.
+var EmotionLabels = []string{
+	"happy",       // Fun, joyful, cheerful
+	"sad",         // Emotional, tearful, melancholic
+	"intense",     // Hype, adrenaline, competitive
+	"chill",       // Relaxing, calm, easy-going
+	"inspiring",   // Motivating, uplifting, empowering
+	"scary",       // Thrilling, frightening, suspenseful
+	"funny",       // Comedic, humorous, witty
+	"serious",     // Deep, thoughtful, meaningful
+	"aggressive",  // Bold, fierce, confrontational
+	"romantic",    // Love, affection, relationship content
+	"nostalgic",   // Throwback, memories, retro
+	"satisfying",  // ASMR, oddly satisfying, visual pleasure
+	"cringe",      // Awkward, uncomfortable, embarrassing
+	"wholesome",   // Heartwarming, kind, pure
+	"suspenseful", // Edge of seat, cliffhanger, mystery
+	"empowering",  // Confidence boost, self-love, growth
+}
+
+// MoodTags represent the user's mood context — used to match
+// content emotion to what the user NEEDS right now.
+var MoodTags = []string{
+	"bored",       // Needs stimulation — serve high-energy, funny, surprising
+	"stressed",    // Needs relief — serve chill, funny, satisfying
+	"confident",   // Riding high — serve challenges, intense, competitive
+	"lonely",      // Needs connection — serve social, wholesome, romantic
+	"motivated",   // In the zone — serve inspiring, intense, empowering
+	"relaxed",     // Taking it easy — serve chill, funny, satisfying
+}
+
+// EnergyLevels define how stimulating the content is.
+// Matched against user's current dopamine budget / energy state.
+var EnergyLevels = []string{"low", "medium", "high"}
+
+// CaptionKeywordTags auto-extracts tags from caption/subject text.
+// Maps keywords to the tags they imply.
+var CaptionKeywordTags = map[string][]string{
+	// Emotion keywords
+	"lol": {"funny"}, "lmao": {"funny"}, "haha": {"funny"}, "dead": {"funny"},
+	"crying": {"sad", "funny"}, "insane": {"intense"}, "crazy": {"intense"},
+	"wild": {"intense"}, "fire": {"intense"}, "lit": {"intense"},
+	"wholesome": {"wholesome"}, "cute": {"wholesome", "happy"},
+	"scary": {"scary"}, "creepy": {"scary"}, "spooky": {"scary"},
+	"satisfying": {"satisfying"}, "asmr": {"satisfying", "chill"},
+	"relax": {"chill"}, "calm": {"chill"}, "peace": {"chill"},
+	"cringe": {"cringe"}, "awkward": {"cringe"},
+	"nostalgic": {"nostalgic"}, "throwback": {"nostalgic"}, "memories": {"nostalgic"},
+	"love": {"romantic", "wholesome"}, "crush": {"romantic"},
+	"grind": {"inspiring", "empowering"}, "hustle": {"inspiring", "motivated"},
+	"believe": {"inspiring"}, "never give up": {"inspiring", "empowering"},
+	"confidence": {"empowering"}, "glow up": {"empowering"},
+	"suspense": {"suspenseful"}, "wait for it": {"suspenseful"},
+	"plot twist": {"suspenseful"}, "unexpected": {"suspenseful"},
+	// Category keywords that also imply emotion
+	"battle": {"intense", "aggressive"}, "vs": {"intense"},
+	"challenge": {"intense"}, "dare": {"intense", "scary"},
+	"prank": {"funny"}, "roast": {"funny", "aggressive"},
+	"workout": {"intense", "empowering"}, "gym": {"intense"},
 }
 
 // AcceptChallengePayload is sent when a user accepts a challenge.
@@ -185,6 +289,16 @@ type AcceptChallengePayload struct {
 	ResponderID  string `json:"responderId"`
 	VideoURL     string `json:"videoUrl"`
 	ThumbnailURL string `json:"thumbnailUrl"`
+	// Tier-1 validation fields — required so the server can enforce length limits
+	// and store metadata for downstream relevance scoring.
+	DurationMs   int    `json:"durationMs"`
+	Caption      string `json:"caption,omitempty"`
+}
+
+// FlagResponsePayload is the body for community-moderation off-topic flagging.
+type FlagResponsePayload struct {
+	UserID string `json:"userId"`
+	Reason string `json:"reason,omitempty"` // defaults to "off_topic" if empty
 }
 
 // ChallengeVotePayload is the request body for voting on a challenge response.

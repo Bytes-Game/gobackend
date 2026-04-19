@@ -2,10 +2,52 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"net/http"
 
 	"github.com/gorilla/mux"
 )
+
+// leagueTier maps league names to numeric tiers for matchmaking comparison.
+// Users can only challenge within ±2 tiers for fair play.
+var leagueTier = map[string]int{
+	"Bronze":   1,
+	"Silver":   2,
+	"Gold":     3,
+	"Platinum": 4,
+	"Diamond":  5,
+}
+
+const maxLeagueDiff = 2 // Maximum league tier difference allowed for challenges
+
+// checkLeagueEligibility verifies two users are within the allowed league range.
+// Returns nil if eligible, or an error describing why not.
+func checkLeagueEligibility(userID1, userID2 string) error {
+	user1, found1 := GetUserByID(userID1)
+	user2, found2 := GetUserByID(userID2)
+	if !found1 || !found2 {
+		return fmt.Errorf("user not found")
+	}
+
+	tier1, ok1 := leagueTier[user1.League]
+	tier2, ok2 := leagueTier[user2.League]
+	if !ok1 {
+		tier1 = 1 // Default to Bronze if unknown
+	}
+	if !ok2 {
+		tier2 = 1
+	}
+
+	diff := math.Abs(float64(tier1 - tier2))
+	if diff > maxLeagueDiff {
+		return fmt.Errorf(
+			"league mismatch: %s (%s) cannot challenge %s (%s) — max %d tier difference allowed",
+			user1.Username, user1.League, user2.Username, user2.League, maxLeagueDiff,
+		)
+	}
+	return nil
+}
 
 // ------------------------------------------------------------------------------------
 // Challenge HTTP handlers
@@ -74,7 +116,8 @@ func GetFriendsChallengesHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetChallengeDetailHandler returns a challenge with all its responses.
-// GET /api/v1/challenges/{id)
+// GET /api/v1/challenges/{id}?userId=x
+// If userId is provided, includes league eligibility check in response.
 func GetChallengeDetailHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
@@ -98,22 +141,51 @@ func GetChallengeDetailHandler(w http.ResponseWriter, r *http.Request) {
 		votes = []VoteSummary{}
 	}
 
-	resp := ChallengeDetailResponse{
-		Challenge: challenge,
-		Responses: responses,
-		Votes:     votes,
+	// Check league eligibility if userId provided
+	canAccept := true
+	leagueMsg := ""
+	if userID := r.URL.Query().Get("userId"); userID != "" {
+		if err := checkLeagueEligibility(challenge.CreatorID, userID); err != nil {
+			canAccept = false
+			leagueMsg = err.Error()
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"challenge":      challenge,
+		"responses":      responses,
+		"votes":          votes,
+		"canAccept":      canAccept,
+		"leagueMessage":  leagueMsg,
+	})
 }
 
 // AcceptChallengeHandler lets a user respond to a challenge.
 // POST /api/v1/challenges/accept
+// Enforces league-restricted matchmaking: responder must be within ±2 league tiers of creator.
 func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	var payload AcceptChallengePayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// League restriction: verify the responder is within ±2 tiers of the challenge creator
+	challenge, found := GetChallengeByID(payload.ChallengeID)
+	if !found {
+		http.Error(w, "Challenge not found", http.StatusNotFound)
+		return
+	}
+	if err := checkLeagueEligibility(challenge.CreatorID, payload.ResponderID); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+
+	// Tier-1 structural validation: duration bounds, video dedupe, one-per-challenge,
+	// challenge-still-open, per-user rate limit. Cheap checks that fire on every upload.
+	if err := validateChallengeResponseSubmission(payload, challenge); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -124,11 +196,8 @@ func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Notify the challenger that someone accepted.
-	challenge, found := GetChallengeByID(payload.ChallengeID)
-	if found {
-		responder, _ := GetUserByID(payload.ResponderID)
-		go SendChallengeAcceptedNotification(responder.Username, challenge.CreatorUsername, challenge.Prefix+" "+challenge.Subject)
-	}
+	responder, _ := GetUserByID(payload.ResponderID)
+	go SendChallengeAcceptedNotification(responder.Username, challenge.CreatorUsername, challenge.Prefix+" "+challenge.Subject)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)

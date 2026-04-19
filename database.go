@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -187,6 +188,74 @@ func runMigrations() {
 		created_at    TIMESTAMPTZ DEFAULT NOW(),
 		PRIMARY KEY (user_id, challenge_id)
 	);
+
+	-- ═══════════════════════════════════════════════════════════════
+	-- RECOMMENDATION ENGINE TABLES
+	-- ═══════════════════════════════════════════════════════════════
+
+	-- feed_events: Every user interaction — the raw fuel for the algorithm.
+	-- Captures implicit signals (watch time, skips) and explicit (likes, shares).
+	CREATE TABLE IF NOT EXISTS feed_events (
+		id               SERIAL PRIMARY KEY,
+		user_id          TEXT NOT NULL,
+		content_id       TEXT NOT NULL,
+		content_type     VARCHAR(20) NOT NULL,
+		event_type       VARCHAR(30) NOT NULL,
+		watch_duration_ms INT DEFAULT 0,
+		total_duration_ms INT DEFAULT 0,
+		completion_rate  REAL DEFAULT 0,
+		session_id       TEXT NOT NULL DEFAULT '',
+		session_position INT DEFAULT 0,
+		metadata         JSONB DEFAULT '{}',
+		created_at       TIMESTAMPTZ DEFAULT NOW()
+	);
+	-- Add metadata column if table existed before this migration
+	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}';
+
+	-- user_profiles: Computed personality model per user.
+	-- 5 psychological dimensions + behavioral metrics + ego state.
+	CREATE TABLE IF NOT EXISTS user_profiles (
+		user_id              TEXT PRIMARY KEY,
+		category_affinity    JSONB DEFAULT '{}',
+		energy_preference    REAL DEFAULT 0.5,
+		social_drive         REAL DEFAULT 0.5,
+		novelty_tolerance    REAL DEFAULT 0.5,
+		ego_sensitivity      REAL DEFAULT 0.5,
+		avg_session_sec      INT DEFAULT 0,
+		active_hours         JSONB DEFAULT '[]',
+		preferred_creators   JSONB DEFAULT '[]',
+		avoided_categories   JSONB DEFAULT '[]',
+		avg_completion_rate  REAL DEFAULT 0.5,
+		avg_skip_rate        REAL DEFAULT 0,
+		total_sessions       INT DEFAULT 0,
+		total_watch_time_ms  BIGINT DEFAULT 0,
+		recent_wins          INT DEFAULT 0,
+		recent_losses        INT DEFAULT 0,
+		last_computed_at     TIMESTAMPTZ DEFAULT NOW(),
+		event_count          INT DEFAULT 0,
+		-- Context-aware preferences: what they like WHEN
+		category_by_hour     JSONB DEFAULT '{}',
+		category_by_ego      JSONB DEFAULT '{}',
+		emotion_preference   JSONB DEFAULT '{}',
+		energy_by_hour       JSONB DEFAULT '{}'
+	);
+
+	CREATE TABLE IF NOT EXISTS experiment_exposures (
+		id            SERIAL PRIMARY KEY,
+		user_id       TEXT NOT NULL,
+		experiment_id TEXT NOT NULL,
+		variant_id    TEXT NOT NULL,
+		session_id    TEXT NOT NULL,
+		created_at    TIMESTAMPTZ DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS user_similarities (
+		user_id          TEXT NOT NULL,
+		similar_user_id  TEXT NOT NULL,
+		similarity_score FLOAT NOT NULL,
+		computed_at      TIMESTAMPTZ DEFAULT NOW(),
+		PRIMARY KEY (user_id, similar_user_id)
+	);
 	`
 
 	if _, err := db.Exec(schema); err != nil {
@@ -201,6 +270,38 @@ func runMigrations() {
 	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN edited_at TIMESTAMPTZ; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE users ADD COLUMN last_seen TIMESTAMPTZ DEFAULT NOW(); EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN category VARCHAR(30) DEFAULT 'other'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN emotion_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN energy_level VARCHAR(10) DEFAULT 'medium'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE posts ADD COLUMN category VARCHAR(30) DEFAULT 'other'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE posts ADD COLUMN emotion_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE posts ADD COLUMN energy_level VARCHAR(10) DEFAULT 'medium'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN custom_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE posts ADD COLUMN custom_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+
+	-- Extended personality dimensions on user_profiles
+	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN attention_span REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN binge_intensity REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN creator_loyalty REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN competitiveness_index REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN mood_volatility REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN strategy_success_history JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+
+	-- Challenge response validation + community-moderation columns
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN duration_ms INT DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN caption TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN relevance_score REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN off_topic_flags INT DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN is_hidden BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+
+	-- Challenge response off-topic flagging table (community moderation)
+	CREATE TABLE IF NOT EXISTS challenge_response_flags (
+		response_id INT NOT NULL REFERENCES challenge_responses(id) ON DELETE CASCADE,
+		user_id     INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		reason      VARCHAR(40) NOT NULL DEFAULT 'off_topic',
+		created_at  TIMESTAMPTZ DEFAULT NOW(),
+		PRIMARY KEY (response_id, user_id)
+	);
 	`
 	if _, err := db.Exec(alterStmts); err != nil {
 		log.Printf("Warning: alter table issue: %v", err)
@@ -218,6 +319,9 @@ func runMigrations() {
 	CREATE INDEX IF NOT EXISTS idx_challenges_status ON challenges(status);
 	CREATE INDEX IF NOT EXISTS idx_challenges_created_at ON challenges(created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_challenge_responses_challenge_id ON challenge_responses(challenge_id);
+	CREATE INDEX IF NOT EXISTS idx_challenge_responses_dedupe ON challenge_responses(responder_id, video_url);
+	CREATE INDEX IF NOT EXISTS idx_challenge_responses_responder ON challenge_responses(responder_id);
+	CREATE INDEX IF NOT EXISTS idx_challenge_response_flags_response ON challenge_response_flags(response_id);
 	CREATE INDEX IF NOT EXISTS idx_challenge_votes_challenge_id ON challenge_votes(challenge_id);
 	CREATE INDEX IF NOT EXISTS idx_watch_events_user_id ON watch_events(user_id);
 	CREATE INDEX IF NOT EXISTS idx_watch_events_content ON watch_events(content_id, content_type);
@@ -228,6 +332,34 @@ func runMigrations() {
 	CREATE INDEX IF NOT EXISTS idx_chat_messages_pair ON chat_messages(sender_id, receiver_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_challenge_comments_challenge_id ON challenge_comments(challenge_id, created_at ASC);
 	CREATE INDEX IF NOT EXISTS idx_saved_challenges_user ON saved_challenges(user_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_feed_events_user ON feed_events(user_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_feed_events_content ON feed_events(content_id, content_type);
+	CREATE INDEX IF NOT EXISTS idx_feed_events_session ON feed_events(session_id);
+	CREATE INDEX IF NOT EXISTS idx_feed_events_type ON feed_events(event_type);
+	-- Composite used by nightly analytics job (event_type + time window scans).
+	-- Without this, 50M+ row tables force a seq scan on the 7/14/30d aggregations.
+	CREATE INDEX IF NOT EXISTS idx_feed_events_type_time ON feed_events(event_type, created_at DESC);
+	-- Supports creator_affinity query: WHERE user_id=X AND event_type IN (...)
+	CREATE INDEX IF NOT EXISTS idx_feed_events_user_type_time ON feed_events(user_id, event_type, created_at DESC);
+	-- Expression indexes on metadata JSONB — partial so they stay tiny.
+	CREATE INDEX IF NOT EXISTS idx_feed_events_upload_type
+	  ON feed_events((metadata->>'uploadType'))
+	  WHERE event_type IN ('upload_start','upload_step','upload_abandon','upload_complete');
+	CREATE INDEX IF NOT EXISTS idx_feed_events_page_name
+	  ON feed_events((metadata->>'pageName'))
+	  WHERE event_type = 'page_exit';
+	CREATE INDEX IF NOT EXISTS idx_feed_events_error_surface
+	  ON feed_events((metadata->>'surface'))
+	  WHERE event_type = 'error';
+
+	CREATE INDEX IF NOT EXISTS idx_challenges_category ON challenges(category);
+	CREATE INDEX IF NOT EXISTS idx_posts_category ON posts(category);
+	CREATE INDEX IF NOT EXISTS idx_challenges_created_category ON challenges(created_at DESC, category);
+	CREATE INDEX IF NOT EXISTS idx_posts_created_category ON posts(created_at DESC, category);
+
+	CREATE INDEX IF NOT EXISTS idx_experiment_exposures_exp ON experiment_exposures(experiment_id, variant_id);
+	CREATE INDEX IF NOT EXISTS idx_experiment_exposures_user ON experiment_exposures(user_id, experiment_id);
+	CREATE INDEX IF NOT EXISTS idx_user_similarities_user ON user_similarities(user_id, similarity_score DESC);
 	`
 	if _, err := db.Exec(indexes); err != nil {
 		log.Printf("Warning: index creation issue: %v", err)
@@ -401,7 +533,10 @@ SELECT p.id, p.author_id, u.username, u.league,
 	   p.caption, p.views,
 	   COALESCE(lc.cnt, 0) AS likes,
 	   COALESCE(cc.cnt, 0) AS comment_count,
-	   p.created_at
+	   p.created_at,
+	   COALESCE(p.category, 'other') AS category,
+	   COALESCE(p.emotion_tags, '[]'::JSONB) AS emotion_tags,
+	   COALESCE(p.energy_level, 'medium') AS energy_level
 FROM posts p
 JOIN users u ON p.author_id = u.id
 LEFT JOIN (SELECT post_id, COUNT(*) AS cnt FROM post_likes GROUP BY post_id) lc ON lc.post_id = p.id
@@ -423,11 +558,17 @@ func queryPosts(query string, args ...interface{}) []Post {
 	for rows.Next() {
 		var id, authorID, views, likes, comments int
 		var username, league, postType, contentURL, thumbnailURL, caption string
+		var category, energyLevel string
+		var emotionJSON []byte
 		var createdAt time.Time
 
 		if rows.Scan(&id, &authorID, &username, &league,
 			&postType, &contentURL, &thumbnailURL,
-			&caption, &views, &likes, &comments, &createdAt) == nil {
+			&caption, &views, &likes, &comments, &createdAt,
+			&category, &emotionJSON, &energyLevel) == nil {
+
+			var emotions []string
+			json.Unmarshal(emotionJSON, &emotions)
 
 			result = append(result, Post{
 				ID:             strconv.Itoa(id),
@@ -442,6 +583,9 @@ func queryPosts(query string, args ...interface{}) []Post {
 				Likes:          likes,
 				Comments:       comments,
 				CreatedAt:      createdAt.UTC().Format(time.RFC3339),
+				Category:       category,
+				EmotionTags:    emotions,
+				EnergyLevel:    energyLevel,
 			})
 			postIDs = append(postIDs, id)
 		}
@@ -802,10 +946,25 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 
 	var id int
 	var createdAt time.Time
+	// Default energy level if not provided
+	energyLevel := payload.EnergyLevel
+	if energyLevel == "" {
+		energyLevel = "medium"
+	}
+	category := payload.Category
+	if category == "" {
+		category = inferCategory(payload.Subject, payload.Prefix, "")
+	}
+	emotionJSON, _ := json.Marshal(payload.EmotionTags)
+	if len(payload.EmotionTags) == 0 {
+		emotionJSON = []byte("[]")
+	}
+
 	err = db.QueryRow(
-		`INSERT INTO challenges (creator_id, video_url, thumbnail_url, prefix, subject, visibility)
-		 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, created_at`,
+		`INSERT INTO challenges (creator_id, video_url, thumbnail_url, prefix, subject, visibility, category, emotion_tags, energy_level)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, created_at`,
 		creatorID, payload.VideoURL, payload.ThumbnailURL, payload.Prefix, payload.Subject, payload.Visibility,
+		category, emotionJSON, energyLevel,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return Challenge{}, err
@@ -835,7 +994,12 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 		Subject:         payload.Subject,
 		Visibility:      payload.Visibility,
 		Status:          "open",
-		CreatedAt:       createdAt.UTC().Format(time.RFC3339), ExpiresAt: createdAt.Add(24 * time.Hour).UTC().Format(time.RFC3339)}, nil
+		Category:        category,
+		EmotionTags:     payload.EmotionTags,
+		EnergyLevel:     energyLevel,
+		CreatedAt:       createdAt.UTC().Format(time.RFC3339),
+		ExpiresAt:       createdAt.Add(24 * time.Hour).UTC().Format(time.RFC3339),
+	}, nil
 }
 
 // challengeBaseQuery is the common SELECT for challenges.
@@ -846,7 +1010,10 @@ SELECT c.id, c.creator_id, u.username, u.league,
 	c.prefix, c.subject, c.visibility, c.status, c.views,
 	COALESCE(lc.cnt, 0) AS likes,
 	COALESCE(rc.cnt, 0) AS response_count,
-	c.created_at
+	c.created_at,
+	COALESCE(c.category, 'other') AS category,
+	COALESCE(c.emotion_tags, '[]') AS emotion_tags,
+	COALESCE(c.energy_level, 'medium') AS energy_level
 FROM challenges c
 JOIN users u ON c.creator_id = u.id
 LEFT JOIN (SELECT challenge_id, COUNT(*) AS cnt FROM challenge_likes GROUP BY challenge_id) lc ON lc.challenge_id = c.id
@@ -865,12 +1032,18 @@ func queryChallenges(query string, args ...interface{}) []Challenge {
 	for rows.Next() {
 		var id, creatorID, views, likes, respCount int
 		var username, league, videoURL, thumbURL, prefix, subject, visibility, status string
+		var categoryStr, energyStr string
+		var emotionJSON []byte
 		var createdAt time.Time
 
 		if rows.Scan(&id, &creatorID, &username, &league,
 			&videoURL, &thumbURL,
 			&prefix, &subject, &visibility, &status, &views,
-			&likes, &respCount, &createdAt) == nil {
+			&likes, &respCount, &createdAt,
+			&categoryStr, &emotionJSON, &energyStr) == nil {
+
+			var emotions []string
+			json.Unmarshal(emotionJSON, &emotions)
 
 			result = append(result, Challenge{
 				ID:              strconv.Itoa(id),
@@ -886,6 +1059,9 @@ func queryChallenges(query string, args ...interface{}) []Challenge {
 				Views:           views,
 				Likes:           likes,
 				ResponseCount:   respCount,
+				Category:        categoryStr,
+				EmotionTags:     emotions,
+				EnergyLevel:     energyStr,
 				CreatedAt:       createdAt.UTC().Format(time.RFC3339),
 				ExpiresAt:       createdAt.Add(24 * time.Hour).UTC().Format(time.RFC3339),
 			})
@@ -942,17 +1118,24 @@ func GetChallengeResponses(challengeID string) []ChallengeResponse {
 		return nil
 	}
 
+	// Hidden responses (community-flagged off-topic) are excluded from the
+	// public listing — they remain in the table for audit/appeal.
 	rows, err := db.Query(
 		`SELECT cr.id, cr.challenge_id, cr.responder_id, u.username, u.league,
 				COALESCE(cr.video_url, '') AS video_url,
 				COALESCE(cr.thumbnail_url, '') AS thumbnail_url,
 				cr.views,
 				COALESCE(lc.cnt, 0) AS likes,
+				COALESCE(cr.duration_ms, 0),
+				COALESCE(cr.caption, ''),
+				COALESCE(cr.relevance_score, 0.5),
+				COALESCE(cr.off_topic_flags, 0),
+				COALESCE(cr.is_hidden, FALSE),
 				cr.created_at
 		 FROM challenge_responses cr
 		 JOIN users u ON cr.responder_id = u.id
 		 LEFT JOIN (SELECT response_id, COUNT(*) AS cnt FROM challenge_response_likes GROUP BY response_id) lc ON lc.response_id = cr.id
-		 WHERE cr.challenge_id = $1
+		 WHERE cr.challenge_id = $1 AND COALESCE(cr.is_hidden, FALSE) = FALSE
 		 ORDER BY cr.created_at ASC`, cid,
 	)
 	if err != nil {
@@ -962,11 +1145,15 @@ func GetChallengeResponses(challengeID string) []ChallengeResponse {
 
 	var result []ChallengeResponse
 	for rows.Next() {
-		var id, chalID, respID, views, likes int
-		var username, league, videoURL, thumbURL string
+		var id, chalID, respID, views, likes, durationMs, offTopicFlags int
+		var relevance float64
+		var isHidden bool
+		var username, league, videoURL, thumbURL, caption string
 		var createdAt time.Time
 		if rows.Scan(&id, &chalID, &respID, &username, &league,
-			&videoURL, &thumbURL, &views, &likes, &createdAt) == nil {
+			&videoURL, &thumbURL, &views, &likes,
+			&durationMs, &caption, &relevance, &offTopicFlags, &isHidden,
+			&createdAt) == nil {
 			result = append(result, ChallengeResponse{
 				ID:                strconv.Itoa(id),
 				ChallengeID:       strconv.Itoa(chalID),
@@ -977,6 +1164,11 @@ func GetChallengeResponses(challengeID string) []ChallengeResponse {
 				ThumbnailURL:      thumbURL,
 				Views:             views,
 				Likes:             likes,
+				DurationMs:        durationMs,
+				Caption:           caption,
+				RelevanceScore:    relevance,
+				OffTopicFlags:     offTopicFlags,
+				IsHidden:          isHidden,
 				CreatedAt:         createdAt.UTC().Format(time.RFC3339),
 			})
 		}
@@ -985,19 +1177,28 @@ func GetChallengeResponses(challengeID string) []ChallengeResponse {
 }
 
 // AcceptChallenge inserts a response and updates challenge status.
+// Computes relevance score from caption vs challenge prompt at insert time
+// (cheap keyword overlap — no per-upload AI inference).
 func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) {
 	cid, err1 := strconv.Atoi(payload.ChallengeID)
 	rid, err2 := strconv.Atoi(payload.ResponderID)
 	if err1 != nil || err2 != nil {
-		return ChallengeResponse{}, fmt.Errorf("'invalid IDs")
+		return ChallengeResponse{}, fmt.Errorf("invalid IDs")
 	}
+
+	// Compute relevance once at upload time so the feed engine can use it
+	// for ranking without recomputing per-request.
+	challenge, _ := GetChallengeByID(payload.ChallengeID)
+	relevance := computeRelevanceScore(challenge, payload.Caption)
 
 	var id int
 	var createdAt time.Time
 	err := db.QueryRow(
-		`INSERT INTO challenge_responses (challenge_id, responder_id, video_url, thumbnail_url)
-		 VALUES ($1,$2,$3,$4) RETURNING id, created_at`,
+		`INSERT INTO challenge_responses
+			(challenge_id, responder_id, video_url, thumbnail_url, duration_ms, caption, relevance_score)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, created_at`,
 		cid, rid, payload.VideoURL, payload.ThumbnailURL,
+		payload.DurationMs, payload.Caption, relevance,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return ChallengeResponse{}, err
@@ -1016,6 +1217,9 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 		ResponderLeague:   responder.League,
 		VideoURL:          payload.VideoURL,
 		ThumbnailURL:      payload.ThumbnailURL,
+		DurationMs:        payload.DurationMs,
+		Caption:           payload.Caption,
+		RelevanceScore:    relevance,
 		CreatedAt:         createdAt.UTC().Format(time.RFC3339),
 	}, nil
 }
