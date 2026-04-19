@@ -138,6 +138,27 @@ func AdminHealthHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(h)
 }
 
+// AdminGoldenHourHandler exposes the analytics-computed golden notification
+// hour for a given user. Useful when debugging "why isn't this user getting
+// pushes at the expected time" — you can confirm we have a signal and how
+// confident it is before looking at the delivery pipeline.
+//
+// Response: {"hour": 19, "confidence": 0.78} or {"hour": -1, "confidence": 0}
+// if no data has been computed yet (new user / analytics hasn't run).
+func AdminGoldenHourHandler(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("userId")
+	if userID == "" {
+		http.Error(w, "userId required", http.StatusBadRequest)
+		return
+	}
+	hour, conf := GetGoldenHour(userID)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"hour":       hour,
+		"confidence": conf,
+	})
+}
+
 // AdminDashboardHandler serves an inline HTML page that fetches the JSON
 // endpoints and renders them as tables. Kept inline so deployment stays a
 // single binary with no separate static assets to serve.

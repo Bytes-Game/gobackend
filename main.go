@@ -175,6 +175,7 @@ func main() {
 	startSimilarityWorker()
 	startImpressionAggregator()
 	startAnalyticsScheduler()
+	startLTRFlusher()
 
 	r := mux.NewRouter()
 
@@ -222,6 +223,7 @@ func main() {
 	api.HandleFunc("/admin/funnels", adminOnly(AdminFunnelsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/errors", adminOnly(AdminErrorsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/health", adminOnly(AdminHealthHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/admin/golden_hour", adminOnly(AdminGoldenHourHandler)).Methods("GET", "OPTIONS")
 	r.HandleFunc("/admin", adminOnly(AdminDashboardHandler)).Methods("GET")
 	api.HandleFunc("/chat/send", SendMessageHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/chat/conversations/{userId}", GetConversationsHandler).Methods("GET", "OPTIONS")

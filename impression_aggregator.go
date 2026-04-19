@@ -101,6 +101,12 @@ func updateSessionFromImpression(event FeedEvent) {
 	if event.WatchDurationMs < dwellBounceThresholdMs {
 		state.BounceCount++
 		state.BounceStreak++
+		// Tier 1.2 / 2.7: persist the bounce on the per-user negative-signal
+		// ZSET so the ranker will zero-out this exact content for 24h across
+		// sessions — not just within this session.
+		if event.ContentID != "" && event.ContentType != "" {
+			go MarkBounce(event.UserID, event.ContentType+":"+event.ContentID)
+		}
 	} else {
 		state.BounceStreak = 0
 	}

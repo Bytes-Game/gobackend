@@ -25,6 +25,7 @@ type UnifiedSearchResponse struct {
 func SearchHandler(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	searchType := r.URL.Query().Get("type") // "all", "users", "challenges"
+	userID := r.URL.Query().Get("userId")
 
 	if query == "" {
 		http.Error(w, "Missing search query parameter 'q'", http.StatusBadRequest)
@@ -33,6 +34,13 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 
 	if searchType == "" {
 		searchType = "all"
+	}
+
+	// Tier 1.4: capture the query into the user's recent-search LIST so the
+	// feed ranker can bias toward matching categories/captions for 24h. Best
+	// effort — a Redis miss doesn't affect the search response.
+	if userID != "" {
+		go RecordSearchQuery(userID, query)
 	}
 
 	// Try Meilisearch first

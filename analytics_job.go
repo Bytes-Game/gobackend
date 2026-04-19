@@ -139,6 +139,7 @@ func runAnalyticsBatch() {
 	runOne("social_drive", computeSocialDrive)
 	runOne("creator_affinity", computeCreatorAffinity)
 	runOne("page_dwell", computePageDwell)
+	runOne("golden_hour", computeNotificationGoldenHour)
 
 	dur := time.Since(start)
 	analyticsHealthState.mu.Lock()
@@ -439,11 +440,12 @@ func computeCreatorAffinity() (int, error) {
 	rows, err := db.Query(fmt.Sprintf(`
 		SELECT fe.user_id,
 		       COALESCE(c.creator_id::text, p.author_id::text, '') AS creator,
-		       fe.event_type
+		       fe.event_type,
+		       EXTRACT(EPOCH FROM (NOW() - fe.created_at))/86400.0 AS age_days
 		FROM feed_events fe
 		LEFT JOIN challenges c ON fe.content_type = 'challenge' AND fe.content_id = c.id::text
 		LEFT JOIN posts p      ON fe.content_type = 'post'      AND fe.content_id = p.id::text
-		WHERE fe.event_type IN ('complete','like','scroll_back','loop','profile_visit')
+		WHERE fe.event_type IN ('complete','like','scroll_back','loop','profile_visit','skip','not_interested')
 		  AND fe.created_at > NOW() - INTERVAL '%s'
 	`, affinityWindow))
 	if err != nil {
@@ -451,23 +453,43 @@ func computeCreatorAffinity() (int, error) {
 	}
 	for rows.Next() {
 		var user, creator, evt string
-		if rows.Scan(&user, &creator, &evt) != nil {
+		var ageDays float64
+		if rows.Scan(&user, &creator, &evt, &ageDays) != nil {
 			continue
 		}
+		// Tier 1.3: exponential recency decay — weight halves every 7 days.
+		// Recent engagement matters more than stale history.
+		recency := math.Exp(-ageDays / 7.0)
+		var w float64
 		switch evt {
 		case "loop":
-			add(user, creator, 1.5)
+			w = 1.5 * recency
 		case "scroll_back":
-			add(user, creator, 1.2)
+			w = 1.2 * recency
 		case "complete":
-			add(user, creator, 1.0)
+			w = 1.0 * recency
 		case "like":
-			add(user, creator, 0.8)
+			w = 0.8 * recency
 		case "profile_visit":
-			add(user, creator, 0.5)
+			w = 0.5 * recency
+		case "skip":
+			// Tier 2.9: skips are a soft negative on creator affinity. Subtract
+			// a small amount so skipped creators drift down over time.
+			w = -0.4 * recency
+		case "not_interested":
+			// Harder negative — explicit signal.
+			w = -1.0 * recency
+		}
+		if w != 0 {
+			add(user, creator, w)
 		}
 	}
 	rows.Close()
+
+	// Tier 2.9: explicit unfollow is already handled at scoring time via the
+	// negativeCreatorPenalty(unfollowed ZSET → 7-day linear decay). No need to
+	// double-penalise here — the skip-based negative above already captures
+	// the soft signal, and the unfollowed: key handles the hard one.
 
 	type kv struct {
 		k string
@@ -576,4 +598,114 @@ func computePageDwell() (int, error) {
 	}
 	log.Printf("[analytics] page_dwell: %d users", len(data))
 	return len(data), nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTIFICATION GOLDEN HOUR (Tier 2.8)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Per-user "best hour to notify" — the hour of day at which the user has
+// historically been most likely to tap a notification (notification_tap)
+// or open the app (session_start / app_foreground) within 5 min of a push.
+// Computed over a 30-day window. Written to Redis key golden_hour:{userId}
+// as a small JSON blob {"hour": 19, "confidence": 0.78}.
+//
+// notification_service consults this before sending a non-time-sensitive push
+// — if we're more than 2h from the user's golden hour, we hold the push until
+// the next window. Time-sensitive pushes (like/comment/mention) always go
+// through immediately.
+
+const notifGoldenHourWindow = "30 days"
+
+type goldenHour struct {
+	Hour       int     `json:"hour"`
+	Confidence float64 `json:"confidence"` // 0..1 — how sharply peaked the distribution is
+}
+
+func computeNotificationGoldenHour() (int, error) {
+	ctx, cancel := context.WithTimeout(rctx, 5*time.Minute)
+	defer cancel()
+
+	rows, err := db.Query(fmt.Sprintf(`
+		SELECT user_id,
+		       EXTRACT(HOUR FROM created_at)::int AS hour,
+		       COUNT(*) AS c
+		FROM feed_events
+		WHERE event_type IN ('notification_tap','app_foreground','session_start')
+		  AND created_at > NOW() - INTERVAL '%s'
+		GROUP BY user_id, EXTRACT(HOUR FROM created_at)
+	`, notifGoldenHourWindow))
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	byUser := make(map[string]map[int]int)
+	for rows.Next() {
+		var u string
+		var h, c int
+		if rows.Scan(&u, &h, &c) != nil {
+			continue
+		}
+		if byUser[u] == nil {
+			byUser[u] = make(map[int]int)
+		}
+		byUser[u][h] = c
+	}
+
+	pipe := rdb.Pipeline()
+	pipeSize := 0
+	for u, hist := range byUser {
+		total := 0
+		bestHour := -1
+		bestCount := 0
+		for h, c := range hist {
+			total += c
+			if c > bestCount {
+				bestCount = c
+				bestHour = h
+			}
+		}
+		if total < 10 || bestHour < 0 {
+			continue // Not enough signal — skip, fallback will use heuristic.
+		}
+		// Confidence: how concentrated the distribution is around the peak.
+		// 0.25 = uniform (every hour equal), 1.0 = all taps in one hour.
+		confidence := float64(bestCount) / float64(total)
+		gh := goldenHour{Hour: bestHour, Confidence: confidence}
+		js, _ := json.Marshal(gh)
+		pipe.Set(ctx, "golden_hour:"+u, js, analyticsRedisTTL)
+		pipeSize++
+		if pipeSize >= 500 {
+			if _, err := pipe.Exec(ctx); err != nil {
+				log.Printf("[analytics] golden_hour flush: %v", err)
+			}
+			pipe = rdb.Pipeline()
+			pipeSize = 0
+		}
+	}
+	if pipeSize > 0 {
+		if _, err := pipe.Exec(ctx); err != nil {
+			log.Printf("[analytics] golden_hour final flush: %v", err)
+		}
+	}
+	log.Printf("[analytics] golden_hour: %d users", len(byUser))
+	return len(byUser), nil
+}
+
+// GetGoldenHour returns the user's preferred notification hour (0-23) and
+// confidence [0..1]. Returns (-1, 0) if unknown. Safe to call at push time.
+func GetGoldenHour(userID string) (int, float64) {
+	if rdb == nil || userID == "" {
+		return -1, 0
+	}
+	s, err := rdb.Get(rctx, "golden_hour:"+userID).Result()
+	if err != nil || s == "" {
+		return -1, 0
+	}
+	var gh goldenHour
+	if json.Unmarshal([]byte(s), &gh) != nil {
+		return -1, 0
+	}
+	return gh.Hour, gh.Confidence
 }

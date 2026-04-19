@@ -95,6 +95,11 @@ type SessionState struct {
 	ErrorCount            int            `json:"errorCount"`
 	// Per-page dwell totals (ms) — accumulated from page_exit events
 	PageDwellMs map[string]int `json:"pageDwellMs"`
+	// === Sequence awareness (new) ===
+	// Last N categories/creators shown, in order. Used by the ranker to avoid
+	// clumpy repeats (same category/creator 3+ in a row = feed feels monotonous).
+	LastCategories []string `json:"lastCategories"`
+	LastCreators   []string `json:"lastCreators"`
 }
 
 // UserProfile is the long-term personality model. Computed from event history,
@@ -636,6 +641,9 @@ func updateSessionFromEvent(event FeedEvent) {
 			// mark session as paused so subsequent foreground can compute "away time".
 			state.BackgroundedAt = now
 			persistSessionLength(state)
+			// Tier 1.2: stamp a last_session_end so the next session's ranker
+			// can apply the session-continuity dampener.
+			go RecordSessionEnd(state.UserID)
 		case "app_foreground":
 			// User came back. If they were backgrounded, count it.
 			// Note: if they were away > sessionTimeout (30 min), the client rotates
@@ -667,6 +675,13 @@ func updateSessionFromEvent(event FeedEvent) {
 
 	// Deplete dopamine budget — each item costs attention energy
 	state.DopamineBudget = math.Max(0, state.DopamineBudget-dopamineDepletionRate)
+
+	// Tier 3.11: feed terminal outcome events into the online LTR model so it
+	// learns which breakdown features correlate with completions for this
+	// cohort. ltrObserveEvent is a no-op if no breakdown was stashed.
+	if label, ok := ltrLabelForEvent(event.EventType, event.CompletionRate); ok {
+		go ltrObserveEvent(event.UserID, event.ContentType, event.ContentID, label)
+	}
 
 	switch event.EventType {
 	case "skip", "not_interested":
@@ -838,6 +853,13 @@ func recordStrategyOutcome(state *SessionState, profile *UserProfile) {
 		profile.StrategySuccessHistory[state.CurrentStrategy] = prev*0.7 + delta*0.3
 	}
 	saveUserProfile(profile)
+
+	// Tier 3.13: feed the same outcome into the Thompson-sampling bandit.
+	// Convert delta [-1..1] to a reward [0..1] — anything above neutral is
+	// treated as a partial win, anything below as a partial loss.
+	reward := (delta + 1.0) / 2.0
+	b := loadBandit(profile.UserID)
+	b.updateArm(profile.UserID, state.CurrentStrategy, reward)
 }
 
 // detectResistance analyzes session patterns to determine if the user is
@@ -1028,6 +1050,19 @@ func pickAlternateStrategy(state *SessionState, profile *UserProfile) string {
 		// Exhausted everything — reset history and pick the historically best
 		filtered = []string{strategySocial, strategyTrending, strategyDiscovery,
 			strategyCalming, strategyFreshBlood, strategyNostalgic, strategyMoodMatch}
+	}
+
+	// Tier 3.13: Thompson-sampling bandit on top of the heuristic. The bandit
+	// maintains a per-user Beta posterior on each strategy and samples the
+	// most promising one — naturally balancing exploration and exploitation.
+	// This beats pure "pick historical best" which can lock onto a strategy
+	// that used to work but no longer does.
+	if profile != nil {
+		b := loadBandit(profile.UserID)
+		rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+		if pick := b.sampleBest(filtered, rnd); pick != "" {
+			return pick
+		}
 	}
 
 	// Rank by StrategySuccessHistory (if available) — prefer what worked before
@@ -2082,6 +2117,15 @@ func inferContentEnergy(contentType string, cs *ContentScore) float64 {
 func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState, followingSet map[string]bool, fofSet map[string]bool, interactedIDs map[string]bool) (float64, map[string]float64) {
 	breakdown := make(map[string]float64)
 
+	// ── COHORT + NEGATIVE SIGNAL CONTEXT ──
+	// Loaded once per user at the top of SmartFeedHandler; fetched from the
+	// per-request caches here. Missing ⇒ safe defaults (engaged cohort, no
+	// penalties).
+	cohort := classifyCohort(profile)
+	cw := weightsFor(cohort)
+	ns := getNegativeSignals(profile.UserID)
+	breakdown["cohort"] = float64(cohortOrdinal(cohort)) // numeric handle for debug
+
 	// ── SOCIAL BOOST ──
 	// Direct follow = strongest social signal
 	// Friend-of-friend = weaker but still relevant
@@ -2206,10 +2250,25 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	socialWeightMult := 0.7 + 0.6*profile.SocialDrive // range 0.7 .. 1.3
 	breakdown["socialDriveMult"] = socialWeightMult
 
-	// ── BASE SCORE ──
-	baseScore := social*wSocial*socialWeightMult + freshness*wFreshness + energyFit*wEnergyFit +
-		relevance*wRelevance + quality*wQuality + novelty*wNovelty +
-		tieBoost + creatorAffinityBoost + dwellBoost
+	// ── SEARCH-INTENT BOOST (Tier 1.4) ──
+	// Reads the user's last 3 search queries (captured by SearchHandler) and
+	// biases the feed toward matching categories/captions for 24h.
+	searchB := searchBoost(ns, cs.Category, "")
+	wSearch := 0.18 // up to ~+0.18 for an exact query hit
+	searchTerm := searchB * wSearch * cw.Search
+	breakdown["searchBoost"] = searchTerm
+
+	// ── BASE SCORE (cohort-weighted) ──
+	baseScore := social*wSocial*socialWeightMult*cw.Social +
+		freshness*wFreshness*cw.Freshness +
+		energyFit*wEnergyFit*cw.EnergyFit +
+		relevance*wRelevance*cw.Relevance +
+		quality*wQuality*cw.Quality +
+		novelty*wNovelty*cw.Novelty +
+		tieBoost*cw.Tie +
+		creatorAffinityBoost*cw.Affinity +
+		dwellBoost +
+		searchTerm
 
 	// ── EGO BOOST (conditional) ──
 	// After a loss, boost content that validates the user
@@ -2244,6 +2303,43 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		}
 	}
 	breakdown["fatiguePenalty"] = fatiguePenalty
+
+	// ── CREATOR FATIGUE PENALTY (Tier 1.1) ──
+	// Seeing the same creator 3+ times in a session makes the feed feel like
+	// a single-channel loop. Penalty grows with each repeat, capped at -0.35.
+	creatorFatigue := 0.0
+	if session.CreatorsSeen != nil && cs.CreatorID != "" {
+		seenC := session.CreatorsSeen[cs.CreatorID]
+		if seenC >= 2 {
+			creatorFatigue = -0.12 * float64(seenC-1)
+			if creatorFatigue < -0.35 {
+				creatorFatigue = -0.35
+			}
+		}
+	}
+	breakdown["creatorFatigue"] = creatorFatigue
+
+	// ── SEQUENCE PENALTY (Tier 3.12) ──
+	// Penalise the same category/creator if it's one of the last 2 items shown
+	// — keeps the feed rhythm varied even when score ties would cluster them.
+	sequencePenalty := 0.0
+	if n := len(session.LastCategories); n > 0 {
+		if session.LastCategories[n-1] == cs.Category {
+			sequencePenalty -= 0.08
+		}
+		if n >= 2 && session.LastCategories[n-2] == cs.Category {
+			sequencePenalty -= 0.05
+		}
+	}
+	if n := len(session.LastCreators); n > 0 && cs.CreatorID != "" {
+		if session.LastCreators[n-1] == cs.CreatorID {
+			sequencePenalty -= 0.10
+		}
+		if n >= 2 && session.LastCreators[n-2] == cs.CreatorID {
+			sequencePenalty -= 0.06
+		}
+	}
+	breakdown["sequencePenalty"] = sequencePenalty
 
 	// ── DOPAMINE PENALTY (conditional) ──
 	// Low dopamine budget = user is fatigued, penalize intense content
@@ -2562,17 +2658,65 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	breakdown["profileVisitBonus"] = profileVisitBonus
 
 	// ── FINAL SCORE ──
-	finalScore := baseScore + egoBonus + fatiguePenalty + dopaminePenalty +
+	finalScore := baseScore + egoBonus + fatiguePenalty + creatorFatigue + sequencePenalty + dopaminePenalty +
 		unseenBonus + coldContentBonus + trendingBonus +
 		hourBonus + emotionBonus + egoContextBonus + wellbeingBonus +
 		collabBonus + momentumBonus + variableReward + reentryBonus + streakBonus +
 		impressionPenalty + scrollBackBonus + completeBonus + loopBonus +
 		unmuteBonus + profileVisitBonus
 
+	// ── LEARNING-TO-RANK DELTA (Tier 3.11) ──
+	// Small online-SGD residual that learns which score breakdowns correlate
+	// with completions for this cohort. Adds a bounded correction, never more
+	// than ±0.25 so the hand-tuned base score stays dominant until LTR has
+	// enough evidence.
+	ltrDelta := ltrScoreDelta(cohort, breakdown)
+	breakdown["ltrDelta"] = ltrDelta
+	finalScore += ltrDelta
+
+	// ── NEGATIVE-SIGNAL MULTIPLIERS (Tier 1.2) ──
+	// Creator block/unfollow penalty multiplies the whole score (blocked = 0).
+	// Recent-bounce on this exact content zeros it out so we never re-serve
+	// a just-bounced item.
+	negMult := negativeCreatorPenalty(ns, cs.CreatorID) * bouncePenalty(ns, cs.ContentType, cs.ContentID)
+	breakdown["negativeMult"] = negMult
+	finalScore *= negMult
+
+	// ── SESSION CONTINUITY FACTOR (Tier 1.5) ──
+	// Short gap since last session → dampen the "fresh-start" boosts (unseen,
+	// cold content, novelty) so we don't shake up a still-warm feed.
+	if ns != nil {
+		contFactor := sessionContinuityFactor(ns) // 0.2 .. 1.0
+		// Re-apply a gentle dampener to exploration-y bonuses; keep at least
+		// 20% of their effect so curiosity isn't killed entirely.
+		damp := 0.4 + 0.6*contFactor // 0.52 .. 1.0
+		exploreTerms := unseenBonus + coldContentBonus + novelty*wNovelty*cw.Novelty
+		finalScore -= (1.0 - damp) * exploreTerms
+		breakdown["continuityFactor"] = contFactor
+	}
+
 	breakdown["baseScore"] = baseScore
 	breakdown["finalScore"] = finalScore
 
 	return finalScore, breakdown
+}
+
+// cohortOrdinal returns a stable int handle for a cohort — used for the
+// debug breakdown ("cohort": N) so clients can render without a string mapping.
+func cohortOrdinal(c Cohort) int {
+	switch c {
+	case CohortColdStart:
+		return 0
+	case CohortNew:
+		return 1
+	case CohortEngaged:
+		return 2
+	case CohortPower:
+		return 3
+	case CohortAtRisk:
+		return 4
+	}
+	return 2
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -3023,7 +3167,13 @@ func isColdStartUser(profile *UserProfile) bool {
 func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error) {
 	offset := (page - 1) * limit
 
-	// Get popular challenges (by views + likes, recent)
+	// Tier 2.10 — cold-start QUALITY FLOOR.
+	// Brand-new users have no personal signal, so everything rides on "good
+	// first impression". Filter out challenges with zero engagement AND keep
+	// only those whose like-to-view ratio is above the platform baseline.
+	// Min thresholds (coldStartMinViews / coldStartMinLikes) are intentionally
+	// loose so small-creator content still has a chance, but skip-heavy
+	// low-quality content won't surface first.
 	challengeRows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
@@ -3036,6 +3186,8 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 			ON cl.challenge_id = c.id
 		WHERE c.visibility = 'arena' AND c.status IN ('open','active','completed')
 		AND c.created_at > NOW() - INTERVAL '14 days'
+		AND c.views >= 10
+		AND COALESCE(cl.likes,0) >= 1
 		ORDER BY (c.views + COALESCE(cl.likes,0) * 3) DESC, c.created_at DESC
 		LIMIT $1 OFFSET $2`, limit/2, offset/2)
 	if err != nil {
@@ -3067,7 +3219,7 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 		items = append(items, HomeFeedItem{Type: "challenge", Challenge: &ch})
 	}
 
-	// Get popular posts
+	// Get popular posts — same cold-start quality floor as above.
 	postRows, err := db.Query(`
 		SELECT p.id, p.author_id, u.username, u.league, p.type, p.content_url,
 			p.thumbnail_url, p.caption, p.views, p.created_at,
@@ -3078,6 +3230,8 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 		LEFT JOIN (SELECT post_id, COUNT(*) as likes FROM post_likes GROUP BY post_id) pl
 			ON pl.post_id = p.id
 		WHERE p.created_at > NOW() - INTERVAL '14 days'
+		AND p.views >= 10
+		AND COALESCE(pl.likes,0) >= 1
 		ORDER BY (p.views + COALESCE(pl.likes,0) * 3) DESC, p.created_at DESC
 		LIMIT $1 OFFSET $2`, limit/2, offset/2)
 	if err != nil {
@@ -3246,6 +3400,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// Step 4.5: Warm signal caches so scoring can read them in O(1)
 	warmUserSignalCaches(userID)
 	warmPrecomputedSignals(userID)
+	warmNegativeSignals(userID)
 
 	// Step 5: Fetch candidates
 	candidateLimit := limit * candidateMultiplier
@@ -3280,6 +3435,40 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// Step 7: Compose feed with slot pattern
 	pattern := getFeedPattern(profile, session, limit)
 	composed := composeFeed(scored, pattern, followingSet)
+
+	// Step 7.5: Remember the tail of what we just served so the NEXT page's
+	// ranker can apply sequence-awareness penalties against it, AND stash the
+	// score breakdown of each served item so LTR can learn from the outcome.
+	cohort := classifyCohort(profile)
+	if len(composed) > 0 {
+		for _, it := range composed {
+			cid := getItemID(it.Item)
+			if it.ScoreBreakdown != nil {
+				go ltrStashBreakdown(userID, it.Item.Type, cid, cohort, it.ScoreBreakdown)
+			}
+		}
+		tail := composed
+		if len(tail) > 6 {
+			tail = tail[len(tail)-6:]
+		}
+		for _, it := range tail {
+			cid := getItemID(it.Item)
+			cscore := getContentScore(cid, it.Item.Type)
+			if cscore.Category != "" {
+				session.LastCategories = append(session.LastCategories, cscore.Category)
+			}
+			if cscore.CreatorID != "" {
+				session.LastCreators = append(session.LastCreators, cscore.CreatorID)
+			}
+		}
+		if n := len(session.LastCategories); n > 6 {
+			session.LastCategories = session.LastCategories[n-6:]
+		}
+		if n := len(session.LastCreators); n > 6 {
+			session.LastCreators = session.LastCreators[n-6:]
+		}
+		saveSessionState(session)
+	}
 
 	// Pagination
 	hasMore := len(composed) >= limit

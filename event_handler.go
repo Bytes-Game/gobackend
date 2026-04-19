@@ -50,6 +50,19 @@ func HandleUnfollowEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Tier 1.2: record a soft negative signal so the ranker attenuates this
+	// creator's content for ~7 days. Best-effort — Redis blips don't fail the
+	// primary flow.
+	unfollowerID := payload.UnfollowerID
+	if unfollowerID == "" {
+		unfollowerID = payload.UnfollowerUsername
+	}
+	unfollowedID := payload.UnfollowedID
+	if unfollowedID == "" {
+		unfollowedID = payload.UnfollowedUsername
+	}
+	go MarkUnfollowed(unfollowerID, unfollowedID)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Unfollow event processed successfully"})
@@ -176,7 +189,26 @@ func HandleReportEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Tier 1.2: on a high-severity report (block/abuse/harassment/hate), treat
+	// the target creator as blocked for the reporter so their feed stops
+	// serving that creator immediately. Lower-severity reasons don't trigger
+	// a block — they go through normal moderation.
+	if isHardBlockReason(payload.Reason) {
+		go MarkBlocked(payload.ReporterID, payload.TargetID)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(report)
+}
+
+// isHardBlockReason decides whether a report reason is severe enough that the
+// reporter should have the target creator hidden from their feed immediately.
+// Matches on a small set of known-severe reasons; everything else is soft.
+func isHardBlockReason(reason string) bool {
+	switch reason {
+	case "block", "abuse", "harassment", "hate", "threats", "sexual_content", "violence":
+		return true
+	}
+	return false
 }
