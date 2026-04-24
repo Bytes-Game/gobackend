@@ -197,6 +197,13 @@ func HandleReportEvent(w http.ResponseWriter, r *http.Request) {
 		go MarkBlocked(payload.ReporterID, payload.TargetID)
 	}
 
+	// Drop the content's cached two-tower embedding so the next ranker pass
+	// rebuilds it from current metadata (which moderation may have changed,
+	// e.g. category re-tagging or visibility flip). Cheap and best-effort.
+	if payload.TargetType == "post" || payload.TargetType == "challenge" || payload.TargetType == "" {
+		go invalidateContentEmbedding(payload.TargetID)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(report)

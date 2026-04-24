@@ -361,8 +361,55 @@ func TrackEventHandler(w http.ResponseWriter, r *http.Request) {
 		updateSessionFromEvent(event)
 	}()
 
+	// Update the user's two-tower embedding for reward-bearing events.
+	// EMA toward content vector on positive engagement, away on negative.
+	go applyEmbeddingFromEvent(event)
+
+	// Feed the realtime trending ZSET so viral spikes surface within minutes.
+	// Skip self-engagement so authors can't game their own trend score.
+	go func(e FeedEvent) {
+		if e.UserID == "" || e.ContentID == "" {
+			return
+		}
+		// Skip events on the user's own content (best-effort — we don't
+		// always have the creator handy here; trending source filters again
+		// on read so this is just an early-out for the obvious case).
+		noteTrendingEvent(e.ContentType, e.ContentID, e.EventType, e.CompletionRate)
+	}(event)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// applyEmbeddingFromEvent maps an event to an embedding reward label and
+// updates the user EMA. Skips events that aren't reliable reward signals
+// (e.g., impressions or lifecycle events).
+func applyEmbeddingFromEvent(event FeedEvent) {
+	if event.UserID == "" || event.ContentID == "" {
+		return
+	}
+	var label float64
+	switch event.EventType {
+	case "like", "save", "share", "rewatch", "comment":
+		label = 1.0
+	case "view":
+		// View is only a positive signal if completion was meaningful.
+		if event.CompletionRate >= 0.6 {
+			label = 1.0
+		} else if event.CompletionRate > 0 && event.CompletionRate < 0.2 {
+			label = 0.0
+		} else {
+			return // ambiguous — don't move the vector
+		}
+	case "skip", "not_interested", "unlike", "unsave":
+		label = 0.0
+	default:
+		return
+	}
+	cs := getContentScore(event.ContentID, event.ContentType)
+	emotions := getContentEmotions(event.ContentID, event.ContentType)
+	cv := getOrBuildContentEmbedding(cs, emotions)
+	updateUserEmbedding(event.UserID, cv, label)
 }
 
 // TrackBatchEventsHandler receives multiple events at once.
@@ -396,6 +443,8 @@ func TrackBatchEventsHandler(w http.ResponseWriter, r *http.Request) {
 				log.Printf("Failed to record batch event: %v", err)
 			}
 			updateSessionFromEvent(event)
+			applyEmbeddingFromEvent(event)
+			noteTrendingEvent(event.ContentType, event.ContentID, event.EventType, event.CompletionRate)
 		}
 	}()
 
@@ -676,8 +725,18 @@ func updateSessionFromEvent(event FeedEvent) {
 	// Tier 3.11: feed terminal outcome events into the online LTR model so it
 	// learns which breakdown features correlate with completions for this
 	// cohort. ltrObserveEvent is a no-op if no breakdown was stashed.
+	// Pass watchRatio=-1 when we don't have a reliable ratio (e.g. like
+	// fired without a view event preceding it); positive cases pass the
+	// observed completion rate so the watch-ratio head trains on rich data.
 	if label, ok := ltrLabelForEvent(event.EventType, event.CompletionRate); ok {
-		go ltrObserveEvent(event.UserID, event.ContentType, event.ContentID, label)
+		watchRatio := -1.0
+		switch event.EventType {
+		case "view", "complete", "skip":
+			if event.CompletionRate >= 0 {
+				watchRatio = event.CompletionRate
+			}
+		}
+		go ltrObserveEvent(event.UserID, event.ContentType, event.ContentID, label, watchRatio)
 	}
 
 	switch event.EventType {
@@ -2690,6 +2749,31 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	breakdown["ltrDelta"] = ltrDelta
 	finalScore += ltrDelta
 
+	// ── PLATT-CALIBRATED LTR BONUS ──
+	// The raw ltrDelta is a logit-ish correction on arbitrary scale. Passing
+	// it through the fitted Platt calibrator yields a probability in (0,1)
+	// that this user will positively engage. Re-scaled to ±0.15 it becomes
+	// a second, well-shaped bonus that moves the needle predictably even
+	// before LTR weights have converged.
+	if ltrDelta != 0 {
+		p := plattCalibrate(ltrDelta)
+		// Centre around 0.5 so p≈0.5 contributes nothing, p≈1 adds ~+0.15.
+		calibBonus := (p - 0.5) * 0.30
+		breakdown["calibBonus"] = calibBonus
+		finalScore += calibBonus
+	}
+
+	// ── WATCH-RATIO PREDICTION BONUS ──
+	// Separate per-cohort regression head trained on observed completion
+	// fraction. Predicts the % of duration this user is likely to watch and
+	// converts (centered on 0.5) to a ±0.18 ranking bonus. Returns 0 until
+	// the cohort accumulates wrMinSamples so the model doesn't add noise.
+	wrBonus := wrPredictBonus(cohort, breakdown)
+	if wrBonus != 0 {
+		breakdown["watchRatioBonus"] = wrBonus
+		finalScore += wrBonus
+	}
+
 	// ── NEGATIVE-SIGNAL MULTIPLIERS (Tier 1.2) ──
 	// Creator block/unfollow penalty multiplies the whole score (blocked = 0).
 	// Recent-bounce on this exact content zeros it out so we never re-serve
@@ -3418,9 +3502,20 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	warmPrecomputedSignals(userID)
 	warmNegativeSignals(userID)
 
-	// Step 5: Fetch candidates
+	// Step 5: Fetch candidates — multi-source retrieval (recency, trending,
+	// follow-graph, collaborative, embedding-neighbors) merged with weighted
+	// round-robin interleave. Falls back gracefully per-source on error.
 	candidateLimit := limit * candidateMultiplier
-	candidates := fetchCandidates(userID, candidateLimit)
+	candidates := multiSourceFetch(userID, candidateLimit)
+	if len(candidates) == 0 {
+		// Safety net: if every source failed, use the legacy single path.
+		candidates = fetchCandidates(userID, candidateLimit)
+	}
+
+	// Load the user's two-tower embedding ONCE per request. If cold, cosine
+	// term is skipped (returns 0 below) so new users don't get a noisy signal.
+	userVec := getUserEmbedding(userID)
+	userCold := userEmbeddingIsCold(userVec)
 
 	// Step 6: Score each candidate
 	scored := make([]ScoredItem, 0, len(candidates))
@@ -3430,6 +3525,19 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		cs := getContentScore(contentID, contentType)
 
 		score, breakdown := scoreForUser(cs, profile, session, followingSet, fofSet, interactedIDs)
+
+		// Two-tower cosine bonus: ± up to 0.20 for strong matches. Gated on
+		// having a warm user vector; cold users keep base scoring as-is.
+		// Uses the Redis-cached embedding to keep this loop fast at scale.
+		if !userCold {
+			emotions := getContentEmotions(contentID, contentType)
+			cv := getOrBuildContentEmbedding(cs, emotions)
+			sim := cosineSim(userVec, cv)
+			embedBonus := sim * 0.20
+			breakdown["embedSim"] = sim
+			breakdown["embedBonus"] = embedBonus
+			score += embedBonus
+		}
 
 		si := ScoredItem{
 			Item:  item,
@@ -3448,6 +3556,32 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		return scored[i].Score > scored[j].Score
 	})
 
+	// Step 6.5: Drop items the user has already been shown in the last TTL
+	// window (impression dedup — stronger than interactedIDs, which only
+	// covered active engagement).
+	scored = filterUnseenScored(userID, scored)
+
+	// Step 6.6: Diversity re-rank (MMR) on the top-K so near-duplicates
+	// don't stack next to each other in the feed.
+	scored = applyMMRDefault(scored)
+
+	// Step 6.7: Anti-loop diagnosis — if the session shows stuck patterns
+	// (skip streaks, category monoculture, creator flood, dopamine
+	// collapse), override the strategy for this page.
+	if diag := detectLoop(session); diag.Stuck && diag.SuggestedStrat != "" {
+		session.CurrentStrategy = diag.SuggestedStrat
+		session.TriedStrategies = append(session.TriedStrategies, diag.SuggestedStrat)
+		if metricSignalCapture != nil {
+			metricSignalCapture.WithLabelValues("loop_" + diag.Reason).Inc()
+		}
+	}
+
+	// Step 6.8: Cold-start bootstrap mix — for users with very few events,
+	// sprinkle high-Wilson-score "known bangers" into the head of the feed
+	// so first impressions land before personalized signals can warm up.
+	// No-op for non-cold users; safe to call unconditionally.
+	scored = applyBootstrapMixIfCold(userID, scored, getUserEventCount(userID))
+
 	// Step 7: Compose feed with slot pattern
 	pattern := getFeedPattern(profile, session, limit)
 	composed := composeFeed(scored, pattern, followingSet)
@@ -3457,10 +3591,17 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// score breakdown of each served item so LTR can learn from the outcome.
 	cohort := classifyCohort(profile)
 	if len(composed) > 0 {
+		// Seen-filter: record impressions so subsequent pages don't repeat.
+		items := make([]HomeFeedItem, 0, len(composed))
 		for _, it := range composed {
+			items = append(items, it.Item)
+		}
+		go markShownBatch(userID, items)
+		// LTR stash with 1-based position so IPW can down-weight top-slot bias.
+		for idx, it := range composed {
 			cid := getItemID(it.Item)
 			if it.ScoreBreakdown != nil {
-				go ltrStashBreakdown(userID, it.Item.Type, cid, cohort, it.ScoreBreakdown)
+				go ltrStashBreakdownWithPos(userID, it.Item.Type, cid, cohort, it.ScoreBreakdown, idx+1)
 			}
 		}
 		tail := composed

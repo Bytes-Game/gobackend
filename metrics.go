@@ -97,6 +97,87 @@ var (
 		},
 		[]string{"path", "method"},
 	)
+
+	// ── Embeddings / two-tower ───────────────────────────────────────────────
+	metricEmbedUpdates = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "devf_embed_updates_total",
+			Help: "User-embedding EMA updates by outcome.",
+		},
+		[]string{"outcome"}, // "ok" | "error" | "skip_cold"
+	)
+	metricEmbedCacheHits = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "devf_embed_cache_total",
+			Help: "Content-embedding cache hits vs misses.",
+		},
+		[]string{"outcome"}, // "hit" | "miss"
+	)
+
+	// ── Seen-content filter ──────────────────────────────────────────────────
+	metricSeenMarks = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "devf_seen_marks_total",
+			Help: "Impressions recorded into the per-user seen set.",
+		},
+		[]string{"outcome"}, // "ok" | "error"
+	)
+	metricSeenFiltered = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "devf_seen_filtered_total",
+			Help: "Candidates dropped because the user had seen them recently.",
+		},
+	)
+
+	// ── MMR diversity re-rank ────────────────────────────────────────────────
+	metricMMRReranks = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "devf_mmr_reranks_total",
+			Help: "Number of MMR re-rank passes performed.",
+		},
+	)
+
+	// ── Platt calibration fits ───────────────────────────────────────────────
+	metricPlattFits = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "devf_platt_fits_total",
+			Help: "Platt-calibrator refits executed.",
+		},
+	)
+
+	// ── Multi-source candidate generation ────────────────────────────────────
+	metricCandidateSource = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "devf_candidate_source_total",
+			Help: "Candidates produced by each retrieval source.",
+		},
+		[]string{"source", "outcome"}, // source: recency|trending|trendingRealtime|follow|collab|embed ; outcome: ok|error|empty|panic
+	)
+
+	// ── Cold-start bootstrap pool ────────────────────────────────────────────
+	metricBootstrapPool = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "devf_bootstrap_pool_total",
+			Help: "Bootstrap-pool worker activity: compute=refresh runs, inject=items mixed into cold-user feeds.",
+		},
+		[]string{"action"}, // "compute" | "inject"
+	)
+
+	// ── Watch-ratio prediction head ──────────────────────────────────────────
+	metricWatchRatioObserve = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "devf_watch_ratio_observe_total",
+			Help: "Watch-ratio training samples by cohort.",
+		},
+		[]string{"cohort"},
+	)
+	metricWatchRatioFlush = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "devf_watch_ratio_flush_total",
+			Help: "Watch-ratio per-cohort weight flushes by outcome.",
+		},
+		[]string{"outcome"},
+	)
 )
 
 // registerMetrics is called from main() — safe to call multiple times, each
@@ -112,6 +193,16 @@ func registerMetrics() {
 		metricAnalyticsJob,
 		metricHTTPRequests,
 		metricHTTPLatency,
+		metricEmbedUpdates,
+		metricEmbedCacheHits,
+		metricSeenMarks,
+		metricSeenFiltered,
+		metricMMRReranks,
+		metricPlattFits,
+		metricCandidateSource,
+		metricBootstrapPool,
+		metricWatchRatioObserve,
+		metricWatchRatioFlush,
 	)
 }
 

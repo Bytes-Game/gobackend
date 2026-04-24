@@ -121,6 +121,127 @@ func (b *bandit) sampleBest(candidates []string, rnd *rand.Rand) string {
 	return bestStrat
 }
 
+// banditExplorationFloor is the minimum probability mass any candidate gets
+// in softMix even if its Thompson draw is overwhelmingly small. Without a
+// floor, a strategy that lost a few times early can collapse to ~0 weight
+// forever, starving the bandit of new evidence. 5% per arm guarantees we
+// keep retrying every option occasionally — this is the "explore" leg of
+// the exploration/exploitation tradeoff that a pure Thompson loop loses
+// once the prior gets sharply skewed.
+const banditExplorationFloor = 0.05
+
+// softMix returns per-strategy weights summing to 1.0, derived from Thompson
+// draws. Unlike sampleBest (which picks one winner), softMix lets the ranker
+// blend strategy-specific score bonuses proportionally — useful when two
+// strategies are near-tied and "picking one" loses nuance.
+//
+// The default "winner" always has the largest weight; the softmax temperature
+// is tuned so a clear winner still dominates while close runners-up keep
+// meaningful influence. After the softmax we apply an exploration floor so
+// no arm ever falls below banditExplorationFloor — this keeps the bandit
+// learning indefinitely instead of locking onto an early winner.
+func (b *bandit) softMix(candidates []string, rnd *rand.Rand) map[string]float64 {
+	out := make(map[string]float64, len(candidates))
+	if len(candidates) == 0 {
+		return out
+	}
+	// Draw one Thompson sample per candidate.
+	raw := make([]float64, len(candidates))
+	for i, c := range candidates {
+		a := b.armOrDefault(c)
+		raw[i] = betaSample(a.alpha, a.beta, rnd)
+	}
+	// Softmax with temperature 4 — sharp but not degenerate.
+	const temp = 4.0
+	var maxV float64 = -1e18
+	for _, v := range raw {
+		if v > maxV {
+			maxV = v
+		}
+	}
+	var sum float64
+	exps := make([]float64, len(raw))
+	for i, v := range raw {
+		exps[i] = expSafe(temp * (v - maxV))
+		sum += exps[i]
+	}
+	if sum == 0 {
+		// Uniform fallback (shouldn't happen, but guard).
+		u := 1.0 / float64(len(candidates))
+		for _, c := range candidates {
+			out[c] = u
+		}
+		return out
+	}
+	for i, c := range candidates {
+		out[c] = exps[i] / sum
+	}
+
+	// Exploration floor: lift every weight to at least banditExplorationFloor,
+	// then re-normalize so the total stays 1.0. The total mass donated to the
+	// floor is `n * floor` minus what was already above it; the rest is
+	// scaled proportionally so the relative ordering of strong arms is
+	// preserved.
+	if banditExplorationFloor > 0 && len(candidates) > 1 {
+		applyExplorationFloor(out, banditExplorationFloor)
+	}
+	return out
+}
+
+// applyExplorationFloor enforces a minimum weight per key in m. Mutates m
+// in place. After the lift, the remaining mass above floor*n is rescaled
+// so the total is 1.0. Safe when n*floor >= 1: the result is uniform.
+func applyExplorationFloor(m map[string]float64, floor float64) {
+	n := len(m)
+	if n == 0 || floor <= 0 {
+		return
+	}
+	if float64(n)*floor >= 1.0 {
+		// No room for differentiation — uniform.
+		u := 1.0 / float64(n)
+		for k := range m {
+			m[k] = u
+		}
+		return
+	}
+	// Lift each weight to at least the floor, sum the excess above floor.
+	excess := 0.0
+	for _, v := range m {
+		if v > floor {
+			excess += v - floor
+		}
+	}
+	if excess <= 0 {
+		// Everything was at or below the floor — go uniform across floor.
+		u := 1.0 / float64(n)
+		for k := range m {
+			m[k] = u
+		}
+		return
+	}
+	// Available mass above the floor must equal 1 - n*floor.
+	available := 1.0 - float64(n)*floor
+	scale := available / excess
+	for k, v := range m {
+		if v > floor {
+			m[k] = floor + (v-floor)*scale
+		} else {
+			m[k] = floor
+		}
+	}
+}
+
+// expSafe is math.Exp clamped so huge logits don't turn into +Inf.
+func expSafe(x float64) float64 {
+	if x > 50 {
+		x = 50
+	}
+	if x < -50 {
+		x = -50
+	}
+	return math.Exp(x)
+}
+
 // updateArm credits an outcome (reward in [0,1]) to the strategy and persists.
 // reward=1.0 → alpha++, reward=0.0 → beta++. Fractional rewards are supported
 // for partial credit (e.g. 0.5 = "okay but not great").

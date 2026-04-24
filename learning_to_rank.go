@@ -53,6 +53,10 @@ var ltrFeatureKeys = []string{
 	"streakBonus", "impressionBouncePenalty", "scrollBackBonus",
 	"completeBonus", "loopBonus", "unmuteBonus", "profileVisitBonus",
 	"egoBoost",
+	// Two-tower & calibration signals — the ranker now writes these too,
+	// so giving LTR access lets the model learn how much they contribute
+	// to engagement on top of their already-baked influence on score.
+	"embedSim", "embedBonus",
 }
 
 type ltrModel struct {
@@ -121,8 +125,23 @@ func ltrScoreDelta(cohort Cohort, breakdown map[string]float64) float64 {
 // Label: 1 for positive outcomes (complete, like, share, rewatch, scroll_back),
 // 0 for negative (skip, not_interested, bounce).
 func ltrObserve(cohort Cohort, breakdown map[string]float64, label float64) {
+	ltrObserveWeighted(cohort, breakdown, label, 1.0)
+}
+
+// ltrObserveWeighted is ltrObserve but with a sample weight.
+// Position-bias correction multiplies the gradient step by 1/propensity(pos)
+// so items at position 1 don't dominate learning just because they were seen.
+// Weight is clamped to [0.25, 4.0] to prevent runaway updates from pathological
+// positions (bottom of a very long scroll with tiny propensity).
+func ltrObserveWeighted(cohort Cohort, breakdown map[string]float64, label, weight float64) {
 	if breakdown == nil {
 		return
+	}
+	if weight < 0.25 {
+		weight = 0.25
+	}
+	if weight > 4.0 {
+		weight = 4.0
 	}
 	ltrEnsureLoaded()
 	ltr.mu.Lock()
@@ -140,7 +159,9 @@ func ltrObserve(cohort Cohort, breakdown map[string]float64, label float64) {
 		}
 	}
 	pred := 1.0 / (1.0 + math.Exp(-z))
-	err := pred - label
+	err := (pred - label) * weight
+	// Feed every training sample to the Platt calibrator too.
+	plattRecord(z, label)
 	// Decaying learning rate: 1 / sqrt(1 + updates/50)
 	lr := ltrLearningRate / math.Sqrt(1.0+float64(m.Updates)/50.0)
 	for _, k := range ltrFeatureKeys {
@@ -152,6 +173,19 @@ func ltrObserve(cohort Cohort, breakdown map[string]float64, label float64) {
 	m.Bias -= lr * err
 	m.Updates++
 	ltr.dirty[cohort] = true
+}
+
+// positionPropensity returns the empirical probability that an item at
+// position `pos` (1-indexed) receives any engagement *regardless of quality*.
+// Shape: 1/(pos)^0.7 — a standard fit to log-scroll-depth curves. Caller
+// trains on 1/propensity to recover the effect of quality alone.
+//
+// Values: pos=1 → 1.0 | pos=5 → ~0.32 | pos=20 → ~0.11 | pos=100 → ~0.03.
+func positionPropensity(pos int) float64 {
+	if pos < 1 {
+		pos = 1
+	}
+	return math.Pow(float64(pos), -0.7)
 }
 
 // startLTRFlusher periodically persists dirty cohort weights to Redis.
@@ -180,12 +214,19 @@ func ltrBreakdownKey(userID, contentType, contentID string) string {
 // later outcome event can learn from it. Best-effort — a Redis blip just
 // means this particular item won't contribute a training sample.
 func ltrStashBreakdown(userID, contentType, contentID string, cohort Cohort, breakdown map[string]float64) {
+	ltrStashBreakdownWithPos(userID, contentType, contentID, cohort, breakdown, 0)
+}
+
+// ltrStashBreakdownWithPos also records the 1-indexed feed position so the
+// later observe step can apply inverse-propensity weighting.
+func ltrStashBreakdownWithPos(userID, contentType, contentID string, cohort Cohort, breakdown map[string]float64, pos int) {
 	if rdb == nil || userID == "" || contentID == "" {
 		return
 	}
 	payload := map[string]interface{}{
 		"c": string(cohort),
 		"b": breakdown,
+		"p": pos,
 	}
 	js, err := json.Marshal(payload)
 	if err != nil {
@@ -196,7 +237,16 @@ func ltrStashBreakdown(userID, contentType, contentID string, cohort Cohort, bre
 
 // ltrObserveEvent looks up the stashed breakdown for this (user, content) and
 // turns the event into a training sample. Only called for terminal outcomes.
-func ltrObserveEvent(userID, contentType, contentID string, label float64) {
+//
+// If a position was stashed with the breakdown, the training step is weighted
+// by 1/propensity(pos) so the model learns item quality rather than item
+// prominence. Position-0 (legacy path, no IPW) falls through as weight=1.
+//
+// Also feeds the watch-ratio prediction head when watchRatio >= 0 (caller
+// passes -1 if no reliable ratio is available, e.g. on a like with no view
+// completion data). The watch-ratio model is read-only here; LTR remains
+// the breakdown's owner and is responsible for the eventual delete.
+func ltrObserveEvent(userID, contentType, contentID string, label, watchRatio float64) {
 	if rdb == nil || userID == "" || contentID == "" {
 		return
 	}
@@ -207,11 +257,20 @@ func ltrObserveEvent(userID, contentType, contentID string, label float64) {
 	var payload struct {
 		C string             `json:"c"`
 		B map[string]float64 `json:"b"`
+		P int                `json:"p"`
 	}
 	if json.Unmarshal([]byte(s), &payload) != nil {
 		return
 	}
-	ltrObserve(Cohort(payload.C), payload.B, label)
+	weight := 1.0
+	if payload.P > 0 {
+		weight = 1.0 / positionPropensity(payload.P)
+	}
+	ltrObserveWeighted(Cohort(payload.C), payload.B, label, weight)
+	// Train the watch-ratio head on the same breakdown when we have a ratio.
+	if watchRatio >= 0 {
+		wrObserve(Cohort(payload.C), payload.B, watchRatio)
+	}
 	// Delete so the same item can't contribute multiple times (first-outcome wins).
 	_ = rdb.Del(rctx, ltrBreakdownKey(userID, contentType, contentID)).Err()
 }

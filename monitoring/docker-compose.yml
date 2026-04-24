@@ -8,6 +8,10 @@
 #   Alertmanager   : http://localhost:9093
 #   Grafana        : http://localhost:3000  (admin / admin on first login)
 #
+# To override the local Grafana credentials (recommended if you expose port
+# 3000 beyond localhost), export GF_ADMIN_USER / GF_ADMIN_PASSWORD before
+# `docker compose up`.
+#
 # If your backend runs on the host (not in this compose network), point
 # prometheus.yml target at host.docker.internal:8081 instead of backend:8081,
 # and remove the `backend` service block below.
@@ -46,8 +50,8 @@ services:
     image: grafana/grafana:11.2.0
     restart: unless-stopped
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=${GF_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_ADMIN_PASSWORD:-admin}
       - GF_AUTH_ANONYMOUS_ENABLED=false
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro

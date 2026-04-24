@@ -177,6 +177,10 @@ func main() {
 	startImpressionAggregator()
 	startAnalyticsScheduler()
 	startLTRFlusher()
+	startPlattRefitter()
+	startTrendingPruner()
+	startBootstrapPoolWorker()
+	startWatchRatioFlusher()
 
 	r := mux.NewRouter()
 

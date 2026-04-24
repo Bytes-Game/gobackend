@@ -136,7 +136,8 @@ func TestLTR_StashAndObserveEventRoundTrip(t *testing.T) {
 	}
 
 	// Observe a positive outcome — LTR should train on the stashed breakdown.
-	ltrObserveEvent("uLTR", "post", "p42", 1.0)
+	// watchRatio=-1 means "no reliable ratio" so the watch-ratio head stays out.
+	ltrObserveEvent("uLTR", "post", "p42", 1.0, -1)
 	ltr.mu.RLock()
 	m := ltr.byCoh[CohortPower]
 	ltr.mu.RUnlock()
@@ -150,7 +151,7 @@ func TestLTR_StashAndObserveEventRoundTrip(t *testing.T) {
 	}
 
 	// Second observe should be a no-op (no stash left).
-	ltrObserveEvent("uLTR", "post", "p42", 1.0)
+	ltrObserveEvent("uLTR", "post", "p42", 1.0, -1)
 	ltr.mu.RLock()
 	m2 := ltr.byCoh[CohortPower]
 	ltr.mu.RUnlock()
@@ -207,7 +208,7 @@ func TestLTR_EnsureLoadedReadsExistingWeights(t *testing.T) {
 func TestLTR_ObserveEventWithoutStashIsNoop(t *testing.T) {
 	resetRedis(t)
 	resetLTR()
-	ltrObserveEvent("noone", "post", "nope", 1.0)
+	ltrObserveEvent("noone", "post", "nope", 1.0, -1)
 	ltr.mu.RLock()
 	for c, m := range ltr.byCoh {
 		if m != nil && m.Updates > 0 {
