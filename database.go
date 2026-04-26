@@ -256,6 +256,50 @@ func runMigrations() {
 		computed_at      TIMESTAMPTZ DEFAULT NOW(),
 		PRIMARY KEY (user_id, similar_user_id)
 	);
+
+	-- Push notifications: device tokens, per-user prefs, outbox queue, sent log.
+	CREATE TABLE IF NOT EXISTS device_tokens (
+		token        TEXT PRIMARY KEY,
+		user_id      TEXT NOT NULL,
+		platform     VARCHAR(20) NOT NULL,         -- "fcm" | "apns"
+		registered_at TIMESTAMPTZ DEFAULT NOW(),
+		last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+		active       BOOLEAN DEFAULT TRUE
+	);
+	CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id) WHERE active;
+
+	CREATE TABLE IF NOT EXISTS notification_prefs (
+		user_id           TEXT PRIMARY KEY,
+		friend_response   BOOLEAN DEFAULT TRUE,
+		ending_soon       BOOLEAN DEFAULT TRUE,
+		you_will_love     BOOLEAN DEFAULT TRUE,
+		inactive_winback  BOOLEAN DEFAULT TRUE,
+		quiet_hours_start INT DEFAULT 22,           -- local hour 0-23
+		quiet_hours_end   INT DEFAULT 8,
+		max_per_day       INT DEFAULT 4,
+		updated_at        TIMESTAMPTZ DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS notification_outbox (
+		id              SERIAL PRIMARY KEY,
+		user_id         TEXT NOT NULL,
+		trigger_kind    VARCHAR(40) NOT NULL,       -- friend_response|ending_soon|you_will_love|inactive_winback
+		dedupe_key      VARCHAR(120) NOT NULL,      -- prevents duplicate triggers
+		title           TEXT NOT NULL,
+		body            TEXT NOT NULL,
+		deeplink        TEXT,
+		scheduled_at    TIMESTAMPTZ DEFAULT NOW(),
+		queued_at       TIMESTAMPTZ DEFAULT NOW(),
+		sent_at         TIMESTAMPTZ,
+		clicked_at      TIMESTAMPTZ,
+		failed_at       TIMESTAMPTZ,
+		fail_reason     TEXT,
+		status          VARCHAR(20) DEFAULT 'pending', -- pending|sent|clicked|failed|cancelled
+		UNIQUE (user_id, dedupe_key)
+	);
+	CREATE INDEX IF NOT EXISTS idx_notif_outbox_pending ON notification_outbox(scheduled_at)
+		WHERE status = 'pending';
+	CREATE INDEX IF NOT EXISTS idx_notif_outbox_user ON notification_outbox(user_id, queued_at DESC);
 	`
 
 	if _, err := db.Exec(schema); err != nil {

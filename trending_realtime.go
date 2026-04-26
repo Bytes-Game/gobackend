@@ -89,13 +89,29 @@ func trendingEventWeight(eventType string, completionRate float64) float64 {
 // noteTrendingEvent applies a score bump for one engagement event. Cheap
 // (one ZIncrBy), so it's fine on the request hot path. Decay is applied
 // in pruneTrendingRealtime, not here — keeps writes simple and correct.
+//
+// Pass userID to weight the event by that user's engagement-quality
+// multiplier (anti-spam, anti-bot). Pass "" to skip user weighting (back-
+// compat for callers that don't carry the userID). The user multiplier
+// is in [0.2, 2.0] so a single high-trust user counts ~10x more than a
+// brand-new account hammering likes.
 func noteTrendingEvent(contentType, contentID, eventType string, completionRate float64) {
+	noteTrendingEventByUser("", contentType, contentID, eventType, completionRate)
+}
+
+// noteTrendingEventByUser is noteTrendingEvent with the user multiplier
+// applied. Production callers should use this when they have the userID;
+// back-compat callers fall through to the unweighted path with neutral 1.0.
+func noteTrendingEventByUser(userID, contentType, contentID, eventType string, completionRate float64) {
 	if rdb == nil || contentID == "" {
 		return
 	}
 	w := trendingEventWeight(eventType, completionRate)
 	if w == 0 {
 		return
+	}
+	if userID != "" {
+		w *= userEngagementQuality(userID)
 	}
 	member := contentType + ":" + contentID
 	if err := rdb.ZIncrBy(rctx, trendingRealtimeKey, w, member).Err(); err == nil {

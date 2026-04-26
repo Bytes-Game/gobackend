@@ -181,6 +181,9 @@ func main() {
 	startTrendingPruner()
 	startBootstrapPoolWorker()
 	startWatchRatioFlusher()
+	initPushSender()
+	startNotificationDispatcher()
+	startNotificationTriggers()
 
 	r := mux.NewRouter()
 
@@ -231,7 +234,20 @@ func main() {
 	api.HandleFunc("/admin/health", adminOnly(AdminHealthHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/golden_hour", adminOnly(AdminGoldenHourHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/online", adminOnly(AdminOnlineUsersHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/admin/diagnostics", adminOnly(AdminDiagnosticsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/unblock", HandleUnblockEvent).Methods("POST", "OPTIONS")
+
+	// Push notifications: token registration, prefs, click tracking.
+	api.HandleFunc("/notifications/register", HandleRegisterPushToken).Methods("POST", "OPTIONS")
+	api.HandleFunc("/notifications/unregister", HandleUnregisterPushToken).Methods("POST", "OPTIONS")
+	api.HandleFunc("/notifications/prefs", HandleGetNotificationPrefs).Methods("GET", "OPTIONS")
+	api.HandleFunc("/notifications/prefs", HandleSetNotificationPrefs).Methods("POST", "OPTIONS")
+	api.HandleFunc("/notifications/clicked", HandleNotificationClicked).Methods("POST", "OPTIONS")
+
+	// Creator insights — feedback loop for creators to understand reach.
+	api.HandleFunc("/creator/insights", HandleCreatorInsightsOverview).Methods("GET", "OPTIONS")
+	api.HandleFunc("/creator/insights/content", HandleCreatorInsightsPerContent).Methods("GET", "OPTIONS")
+
 	r.HandleFunc("/admin", adminOnly(AdminDashboardHandler)).Methods("GET")
 	api.HandleFunc("/chat/send", SendMessageHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/chat/conversations/{userId}", GetConversationsHandler).Methods("GET", "OPTIONS")

@@ -367,14 +367,13 @@ func TrackEventHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Feed the realtime trending ZSET so viral spikes surface within minutes.
 	// Skip self-engagement so authors can't game their own trend score.
+	// Use the by-user variant so the engagement-quality multiplier weights
+	// trusted users' signals up and brand-new / high-skip accounts down.
 	go func(e FeedEvent) {
 		if e.UserID == "" || e.ContentID == "" {
 			return
 		}
-		// Skip events on the user's own content (best-effort — we don't
-		// always have the creator handy here; trending source filters again
-		// on read so this is just an early-out for the obvious case).
-		noteTrendingEvent(e.ContentType, e.ContentID, e.EventType, e.CompletionRate)
+		noteTrendingEventByUser(e.UserID, e.ContentType, e.ContentID, e.EventType, e.CompletionRate)
 	}(event)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -410,6 +409,12 @@ func applyEmbeddingFromEvent(event FeedEvent) {
 	emotions := getContentEmotions(event.ContentID, event.ContentType)
 	cv := getOrBuildContentEmbedding(cs, emotions)
 	updateUserEmbedding(event.UserID, cv, label)
+
+	// Mirror gradient: also train the CONTENT-side vector. The hash-trick
+	// embedding is just the prior; after enough engagement events the
+	// trained vector encodes who actually engages with this content.
+	uv := getUserEmbedding(event.UserID)
+	updateTrainedContentEmbedding(cs, emotions, uv, label)
 }
 
 // TrackBatchEventsHandler receives multiple events at once.
@@ -444,7 +449,7 @@ func TrackBatchEventsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			updateSessionFromEvent(event)
 			applyEmbeddingFromEvent(event)
-			noteTrendingEvent(event.ContentType, event.ContentID, event.EventType, event.CompletionRate)
+			noteTrendingEventByUser(event.UserID, event.ContentType, event.ContentID, event.EventType, event.CompletionRate)
 		}
 	}()
 
@@ -736,7 +741,43 @@ func updateSessionFromEvent(event FeedEvent) {
 				watchRatio = event.CompletionRate
 			}
 		}
-		go ltrObserveEvent(event.UserID, event.ContentType, event.ContentID, label, watchRatio)
+		latencyMs := engagementLatencyFromEvent(event)
+		go ltrObserveEventWithLatency(event.UserID, event.ContentType, event.ContentID, label, watchRatio, latencyMs)
+	}
+
+	// Mine negative feedback into UserProfile so blocks/unfollows/skips
+	// don't just penalize — they also sharpen the user's preference vector.
+	if isMineableNegative(event.EventType, event.CompletionRate) {
+		go func(e FeedEvent) {
+			profile, err := loadUserProfile(e.UserID)
+			if err == nil && profile != nil {
+				applyNegativeFeedbackFromEvent(profile, e)
+				bumpNegativeProfileMineEpoch()
+				saveUserProfile(profile)
+			}
+		}(event)
+	}
+
+	// Record session-trajectory transition on positive engagement events.
+	// Uses the user's prior LastCategories entry as the "from" state and
+	// this event's content as the "to" state. Reads session via the
+	// existing getSessionState helper; skip when state isn't loaded.
+	if isPositiveEngagementForTrajectory(event.EventType, event.CompletionRate) {
+		go func(e FeedEvent) {
+			profile, err := loadUserProfile(e.UserID)
+			if err != nil || profile == nil || e.SessionID == "" {
+				return
+			}
+			session := getSessionState(e.UserID, e.SessionID)
+			if session == nil {
+				return
+			}
+			cs := getContentScore(e.ContentID, e.ContentType)
+			if cs == nil {
+				return
+			}
+			recordSessionTrajectoryFromEvent(classifyCohort(profile), session, cs.Category, cs.EnergyLevel, true)
+		}(event)
 	}
 
 	switch event.EventType {
@@ -2446,22 +2487,15 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	trendingBonus := cs.TrendingScore * 0.15
 	breakdown["trendingBonus"] = trendingBonus
 
-	// ── CONTEXT-AWARE: HOUR CATEGORY MATCH ──
-	// Boost content that matches what the user prefers at this hour
-	hourBonus := 0.0
-	currentHour := time.Now().Hour()
-	if preferredCat, ok := profile.CategoryByHour[currentHour]; ok && preferredCat == cs.Category {
-		hourBonus = 0.12 // User historically likes this category at this hour
-	}
-	// Also adjust energy fit based on hourly energy preference
-	if hourEnergy, ok := profile.EnergyByHour[currentHour]; ok {
-		// Blend hourly energy with base energy preference (70/30 in favor of hour)
-		adjustedEnergy := hourEnergy*0.7 + profile.EnergyPreference*0.3
-		hourEnergyFit := 1.0 - math.Abs(adjustedEnergy-cs.EnergyLevel)
-		if hourEnergyFit > energyFit {
-			hourBonus += (hourEnergyFit - energyFit) * 0.08
-		}
-	}
+	// ── CONTEXT-AWARE: HOUR ROUTING ──
+	// Delegated to hour_routing.go which now also rewards adjacent-hour and
+	// same-bucket category matches with a tapered scale (not just exact-hour),
+	// and aligns content energy with the user's typical energy at this hour.
+	// Both signals are bounded so a cold profile / wrong inference can only
+	// nudge the score, never capsize it.
+	now := time.Now()
+	hourBonus := categoryHourBoost(profile, cs.Category, now)
+	hourBonus += energyHourMatch(profile, cs.EnergyLevel, now)
 	breakdown["hourBonus"] = hourBonus
 
 	// ── CONTEXT-AWARE: EMOTION MATCH ──
@@ -2772,6 +2806,59 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	if wrBonus != 0 {
 		breakdown["watchRatioBonus"] = wrBonus
 		finalScore += wrBonus
+	}
+
+	// ── BAYESIAN UNCERTAINTY BONUS (active learning) ──
+	// Thompson-sample noise scaled by the current cohort's predictive
+	// stddev. Uncertain items get a noisy boost (we want to learn);
+	// confident items move less. Native exploration without bandit overhead.
+	uncBonus := bayesianUncertaintyBonus(cohort, finalScore, nil)
+	if uncBonus != 0 {
+		breakdown["uncertaintyBonus"] = uncBonus
+		finalScore += uncBonus
+	}
+
+	// ── CREATOR RESIDUAL CALIBRATION ──
+	// Self-correcting bias: if this creator is consistently over-served vs
+	// actual engagement, adjust their score down. Bounded ±0.20 and gated
+	// on creator having enough served items to estimate the bias reliably.
+	if cs.CreatorID != "" {
+		residualAdj := creatorResidualAdjustment(cs.CreatorID)
+		if residualAdj != 0 {
+			breakdown["creatorResidualAdj"] = residualAdj
+			finalScore += residualAdj
+		}
+	}
+
+	// ── SESSION-TRAJECTORY BONUS ──
+	// Markov-style: predict what (category × energy) bucket comes next given
+	// the user's most recent positively-engaged item. Bounded ±0.10. Active
+	// only when the cohort has enough observed transitions to make a useful
+	// prediction (cold model returns 0).
+	if session != nil && cs.Category != "" && len(session.LastCategories) > 0 {
+		fromKey := strings.ToLower(session.LastCategories[len(session.LastCategories)-1]) + ":med"
+		toKey := trajectoryStateKey(cs.Category, cs.EnergyLevel)
+		trajBonus := trajectoryBonus(cohort, fromKey, toKey)
+		if trajBonus != 0 {
+			breakdown["trajectoryBonus"] = trajBonus
+			finalScore += trajBonus
+		}
+	}
+
+	// ── MOOD TRANSITION BONUS ──
+	// Operationalizes "feel better after 20 min" — boosts content whose
+	// mood is the empirically-healthy next step from the user's current
+	// detected mood. Cold model uses sensible priors; learned overrides
+	// once we have enough observations.
+	if session != nil && session.DetectedMood != "" {
+		emotions := getContentEmotions(cs.ContentID, cs.ContentType)
+		if len(emotions) > 0 {
+			moodBonus := moodTransitionBonus(session.DetectedMood, emotions)
+			if moodBonus != 0 {
+				breakdown["moodTransitionBonus"] = moodBonus
+				finalScore += moodBonus
+			}
+		}
 	}
 
 	// ── NEGATIVE-SIGNAL MULTIPLIERS (Tier 1.2) ──
@@ -3504,12 +3591,17 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Step 5: Fetch candidates — multi-source retrieval (recency, trending,
 	// follow-graph, collaborative, embedding-neighbors) merged with weighted
-	// round-robin interleave. Falls back gracefully per-source on error.
+	// round-robin interleave. Per-cohort learned weights via
+	// effectiveSourceWeights so cold/new/engaged/power/at_risk cohorts get
+	// different mixes that reflect what's worked for them. Falls back
+	// gracefully per-source on error.
+	preCohort := classifyCohort(profile)
 	candidateLimit := limit * candidateMultiplier
-	candidates := multiSourceFetch(userID, candidateLimit)
+	candidates, candidateSourceMap := multiSourceFetchForCohort(userID, candidateLimit, preCohort)
 	if len(candidates) == 0 {
 		// Safety net: if every source failed, use the legacy single path.
 		candidates = fetchCandidates(userID, candidateLimit)
+		candidateSourceMap = nil
 	}
 
 	// Load the user's two-tower embedding ONCE per request. If cold, cosine
@@ -3528,10 +3620,14 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Two-tower cosine bonus: ± up to 0.20 for strong matches. Gated on
 		// having a warm user vector; cold users keep base scoring as-is.
-		// Uses the Redis-cached embedding to keep this loop fast at scale.
+		// Uses the *trained* two-tower vector when it has enough updates;
+		// otherwise falls back to the Redis-cached hash-trick prior. The
+		// trained vector encodes who actually engages with each item, so
+		// this is closer to "people like you also liked" than pure
+		// "categories you like."
 		if !userCold {
 			emotions := getContentEmotions(contentID, contentType)
-			cv := getOrBuildContentEmbedding(cs, emotions)
+			cv := getTrainedContentEmbedding(cs, emotions)
 			sim := cosineSim(userVec, cv)
 			embedBonus := sim * 0.20
 			breakdown["embedSim"] = sim
@@ -3576,11 +3672,43 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Cohort already computed above (preCohort) for the per-cohort source
+	// blending step. Reuse to avoid recomputing.
+	cohort := preCohort
+
 	// Step 6.8: Cold-start bootstrap mix — for users with very few events,
 	// sprinkle high-Wilson-score "known bangers" into the head of the feed
 	// so first impressions land before personalized signals can warm up.
 	// No-op for non-cold users; safe to call unconditionally.
 	scored = applyBootstrapMixIfCold(userID, scored, getUserEventCount(userID))
+
+	// Step 6.9: Cross-page session diversity penalty — if this user has
+	// already seen this category multiple times this session (page 2+),
+	// downweight repeats so successive pages stay varied even when MMR
+	// said "fine within this page". Penalty is superlinear so a category
+	// that's already appeared 3 times gets hit hard, while a first repeat
+	// is barely affected.
+	if session != nil && session.SessionID != "" {
+		sessionCats := loadSessionCategoryCounts(r.Context(), session.SessionID)
+		if len(sessionCats) > 0 {
+			for i := range scored {
+				cs := getContentScore(getItemID(scored[i].Item), scored[i].Item.Type)
+				if cs != nil && cs.Category != "" {
+					if n := sessionCats[strings.ToLower(cs.Category)]; n > 0 {
+						scored[i].Score -= diversityPenaltyForCount(n + 1)
+					}
+				}
+			}
+			// Re-sort after penalty application so the scored slice is
+			// still in decreasing-score order before composition.
+			sort.SliceStable(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
+		}
+	}
+
+	// Step 6.95: Surprise injection — at most 1 wildcard from a category
+	// the user has zero affinity for. Filter-bubble defense; gated by a
+	// small probability and skipped for at-risk users.
+	scored = applySurpriseInjection(scored, profile, cohort, nil)
 
 	// Step 7: Compose feed with slot pattern
 	pattern := getFeedPattern(profile, session, limit)
@@ -3589,7 +3717,6 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// Step 7.5: Remember the tail of what we just served so the NEXT page's
 	// ranker can apply sequence-awareness penalties against it, AND stash the
 	// score breakdown of each served item so LTR can learn from the outcome.
-	cohort := classifyCohort(profile)
 	if len(composed) > 0 {
 		// Seen-filter: record impressions so subsequent pages don't repeat.
 		items := make([]HomeFeedItem, 0, len(composed))
@@ -3598,11 +3725,36 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		go markShownBatch(userID, items)
 		// LTR stash with 1-based position so IPW can down-weight top-slot bias.
+		// Also stash the creator ID + source for per-creator residual
+		// calibration AND per-cohort source-blending reward at terminal-event
+		// time, both without an extra DB lookup.
 		for idx, it := range composed {
 			cid := getItemID(it.Item)
 			if it.ScoreBreakdown != nil {
-				go ltrStashBreakdownWithPos(userID, it.Item.Type, cid, cohort, it.ScoreBreakdown, idx+1)
+				cs := getContentScore(cid, it.Item.Type)
+				creatorID := ""
+				if cs != nil {
+					creatorID = cs.CreatorID
+				}
+				source := ""
+				if candidateSourceMap != nil {
+					source = candidateSourceMap[it.Item.Type+":"+cid]
+				}
+				go ltrStashBreakdownAll(userID, it.Item.Type, cid, cohort, it.ScoreBreakdown, idx+1, creatorID, source)
 			}
+		}
+		// Cross-page session diversity: tally every served category against
+		// this session's hash so the next page can see the distribution and
+		// penalize repeats.
+		if session != nil && session.SessionID != "" {
+			servedCats := make([]string, 0, len(composed))
+			for _, it := range composed {
+				cscore := getContentScore(getItemID(it.Item), it.Item.Type)
+				if cscore != nil && cscore.Category != "" {
+					servedCats = append(servedCats, cscore.Category)
+				}
+			}
+			go noteSessionCategories(session.SessionID, servedCats)
 		}
 		tail := composed
 		if len(tail) > 6 {

@@ -40,9 +40,44 @@ func applyMMR(items []ScoredItem, lambda float64, topK int, embedOf func(ScoredI
 	return applyMMRWithCreator(items, lambda, topK, embedOf, defaultCreatorOf)
 }
 
+// positionLambda returns the effective MMR lambda for the (pos)-th selection
+// (0-indexed within the head window of size topK). Ramps linearly from
+// mmrLambdaHead at position 0 to mmrLambdaTail at the last head position.
+//
+// Why position-varying λ: the first 5 items get scrolled past in 30 seconds
+// — diversity here is what stops a same-y feel and burns engagement to
+// retain attention. By position 30 the user is committed; relevance matters
+// more than novelty. Treating λ as a constant under-diversifies the head
+// (where attention is fragile) and over-diversifies the tail (where
+// commitment is high). A linear ramp is the simplest fix that works.
+const (
+	mmrLambdaHead = 0.55 // more diversity at the head (where attention is fragile)
+	mmrLambdaTail = 0.85 // more relevance at the tail (where commitment is high)
+)
+
+func positionLambda(pos, topK int) float64 {
+	if topK <= 1 {
+		return mmrLambdaHead
+	}
+	t := float64(pos) / float64(topK-1)
+	if t < 0 {
+		t = 0
+	}
+	if t > 1 {
+		t = 1
+	}
+	return mmrLambdaHead + (mmrLambdaTail-mmrLambdaHead)*t
+}
+
 // applyMMRWithCreator is the full-featured re-ranker that also penalizes
-// repeated creators in the head window. Existing callers using applyMMR
-// get the default creator extractor.
+// repeated creators in the head window. Lambda is *position-varying*: head
+// positions use a smaller λ (more diversity) and tail positions use a
+// larger λ (more relevance). The `lambda` argument seeds the head; the
+// tail lambda is mmrLambdaTail. Pass mmrLambdaHead (or 0 for default) for
+// production use.
+//
+// Existing callers using applyMMR get the default creator extractor and
+// position-varying λ scheme.
 func applyMMRWithCreator(items []ScoredItem, lambda float64, topK int, embedOf func(ScoredItem) []float64, creatorOf func(ScoredItem) string) []ScoredItem {
 	if len(items) <= 1 {
 		return items
@@ -50,11 +85,11 @@ func applyMMRWithCreator(items []ScoredItem, lambda float64, topK int, embedOf f
 	if topK <= 0 || topK > len(items) {
 		topK = len(items)
 	}
-	if lambda < 0 {
-		lambda = 0
-	}
-	if lambda > 1 {
-		lambda = 1
+	// Treat the lambda parameter as the head lambda; tail lambda is
+	// mmrLambdaTail. Ignore the legacy single-value contract gracefully.
+	headLambda := lambda
+	if headLambda <= 0 || headLambda >= 1 {
+		headLambda = mmrLambdaHead
 	}
 
 	head := items[:topK]
@@ -90,6 +125,13 @@ func applyMMRWithCreator(items []ScoredItem, lambda float64, topK int, embedOf f
 	}
 
 	for len(chosen) < len(head) {
+		// Position-varying λ: this is the (len(chosen))-th selection within
+		// the head window. Override headLambda only when the caller passed
+		// the default; otherwise honour their explicit single value.
+		effLambda := headLambda
+		if lambda <= 0 || lambda >= 1 || lambda == mmrLambdaHead {
+			effLambda = positionLambda(len(chosen), len(head))
+		}
 		bestI := -1
 		bestMMR := -1e18
 		for i := 0; i < len(head); i++ {
@@ -110,7 +152,7 @@ func applyMMRWithCreator(items []ScoredItem, lambda float64, topK int, embedOf f
 			if creators[i] != "" {
 				creatorPen = mmrCreatorPenalty * float64(creatorCount[creators[i]])
 			}
-			mmr := lambda*head[i].Score - (1-lambda)*maxSim - creatorPen
+			mmr := effLambda*head[i].Score - (1-effLambda)*maxSim - creatorPen
 			if mmr > bestMMR {
 				bestMMR = mmr
 				bestI = i

@@ -162,6 +162,9 @@ func ltrObserveWeighted(cohort Cohort, breakdown map[string]float64, label, weig
 	err := (pred - label) * weight
 	// Feed every training sample to the Platt calibrator too.
 	plattRecord(z, label)
+	// Track per-cohort predictive variance so the ranker can do uncertainty-
+	// aware exploration via bayesianUncertaintyBonus.
+	bayesianRecord(cohort, pred, label)
 	// Decaying learning rate: 1 / sqrt(1 + updates/50)
 	lr := ltrLearningRate / math.Sqrt(1.0+float64(m.Updates)/50.0)
 	for _, k := range ltrFeatureKeys {
@@ -218,15 +221,33 @@ func ltrStashBreakdown(userID, contentType, contentID string, cohort Cohort, bre
 }
 
 // ltrStashBreakdownWithPos also records the 1-indexed feed position so the
-// later observe step can apply inverse-propensity weighting.
+// later observe step can apply inverse-propensity weighting. Additionally
+// stashes the creator ID so per-creator residual calibration can update
+// at terminal-event time without an extra DB lookup.
 func ltrStashBreakdownWithPos(userID, contentType, contentID string, cohort Cohort, breakdown map[string]float64, pos int) {
+	ltrStashBreakdownFull(userID, contentType, contentID, cohort, breakdown, pos, "")
+}
+
+// ltrStashBreakdownFull is the creator-aware version. Most callers should
+// use ltrStashBreakdownAll which also records the source attribution.
+func ltrStashBreakdownFull(userID, contentType, contentID string, cohort Cohort, breakdown map[string]float64, pos int, creatorID string) {
+	ltrStashBreakdownAll(userID, contentType, contentID, cohort, breakdown, pos, creatorID, "")
+}
+
+// ltrStashBreakdownAll is the canonical full-fledged stash. Records cohort,
+// breakdown, position, creator, and the candidate source that produced the
+// item so later observe steps can update per-creator residual calibration
+// and per-cohort source-blending rewards in one DB pass.
+func ltrStashBreakdownAll(userID, contentType, contentID string, cohort Cohort, breakdown map[string]float64, pos int, creatorID, source string) {
 	if rdb == nil || userID == "" || contentID == "" {
 		return
 	}
 	payload := map[string]interface{}{
-		"c": string(cohort),
-		"b": breakdown,
-		"p": pos,
+		"c":  string(cohort),
+		"b":  breakdown,
+		"p":  pos,
+		"cr": creatorID,
+		"s":  source,
 	}
 	js, err := json.Marshal(payload)
 	if err != nil {
@@ -242,11 +263,22 @@ func ltrStashBreakdownWithPos(userID, contentType, contentID string, cohort Coho
 // by 1/propensity(pos) so the model learns item quality rather than item
 // prominence. Position-0 (legacy path, no IPW) falls through as weight=1.
 //
+// latencyMs is the impression-to-engagement latency in milliseconds. Faster
+// engagements multiply the weight up to 2x (compelling content); slower
+// ones scale toward 0.5x. Combined multiplicatively with the IPW position
+// weight so both corrections compose cleanly.
+//
 // Also feeds the watch-ratio prediction head when watchRatio >= 0 (caller
 // passes -1 if no reliable ratio is available, e.g. on a like with no view
 // completion data). The watch-ratio model is read-only here; LTR remains
 // the breakdown's owner and is responsible for the eventual delete.
 func ltrObserveEvent(userID, contentType, contentID string, label, watchRatio float64) {
+	ltrObserveEventWithLatency(userID, contentType, contentID, label, watchRatio, 0)
+}
+
+// ltrObserveEventWithLatency is the full version. ltrObserveEvent above
+// is a thin wrapper for callers that don't carry latency.
+func ltrObserveEventWithLatency(userID, contentType, contentID string, label, watchRatio float64, latencyMs int) {
 	if rdb == nil || userID == "" || contentID == "" {
 		return
 	}
@@ -255,9 +287,11 @@ func ltrObserveEvent(userID, contentType, contentID string, label, watchRatio fl
 		return
 	}
 	var payload struct {
-		C string             `json:"c"`
-		B map[string]float64 `json:"b"`
-		P int                `json:"p"`
+		C  string             `json:"c"`
+		B  map[string]float64 `json:"b"`
+		P  int                `json:"p"`
+		CR string             `json:"cr"`
+		S  string             `json:"s"`
 	}
 	if json.Unmarshal([]byte(s), &payload) != nil {
 		return
@@ -266,10 +300,49 @@ func ltrObserveEvent(userID, contentType, contentID string, label, watchRatio fl
 	if payload.P > 0 {
 		weight = 1.0 / positionPropensity(payload.P)
 	}
+	// Compose latency weight: fast engagements contribute more, slow ones
+	// less. Skips use the symmetric companion (early skips are stronger
+	// negatives than late ones).
+	if latencyMs > 0 {
+		if label >= 0.5 {
+			weight *= engagementLatencyWeight(latencyMs)
+		} else {
+			weight *= skipLatencyWeight(latencyMs)
+		}
+	}
 	ltrObserveWeighted(Cohort(payload.C), payload.B, label, weight)
 	// Train the watch-ratio head on the same breakdown when we have a ratio.
 	if watchRatio >= 0 {
 		wrObserve(Cohort(payload.C), payload.B, watchRatio)
+	}
+	// Per-creator residual calibration: compare the predicted Platt-
+	// calibrated probability against the actual binary outcome and EMA
+	// the running residual per creator. Self-correcting reach bias.
+	if payload.CR != "" {
+		// Recompute predicted from the breakdown — same logit pipeline as
+		// ltrScoreDelta but we want the probability, not the bounded delta.
+		var z float64
+		ltr.mu.RLock()
+		if m, ok := ltr.byCoh[Cohort(payload.C)]; ok && m != nil {
+			z = m.Bias
+			for _, k := range ltrFeatureKeys {
+				if v, ok := payload.B[k]; ok {
+					z += m.Weights[k] * v
+				}
+			}
+		}
+		ltr.mu.RUnlock()
+		predicted := plattCalibrate(z)
+		observeCreatorResidual(payload.CR, predicted, label)
+	}
+	// Per-cohort source-blending reward: credit (or debit) the source that
+	// produced this item based on the binary outcome.
+	if payload.S != "" {
+		reward := cohortBlendRewardPositive
+		if label < 0.5 {
+			reward = cohortBlendRewardNegative
+		}
+		observeSourceReward(Cohort(payload.C), payload.S, reward)
 	}
 	// Delete so the same item can't contribute multiple times (first-outcome wins).
 	_ = rdb.Del(rctx, ltrBreakdownKey(userID, contentType, contentID)).Err()

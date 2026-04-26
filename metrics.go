@@ -178,6 +178,69 @@ var (
 		},
 		[]string{"outcome"},
 	)
+
+	// ── Surprise injection (filter-bubble defense) ───────────────────────────
+	metricSurpriseInject = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "devf_surprise_inject_total",
+			Help: "Surprise wildcard injections by outcome.",
+		},
+		[]string{"outcome"}, // "ok" | "skipped_atrisk" | "no_pool" | "no_unfamiliar"
+	)
+
+	// ── Push notifications: enqueue + dispatch outcomes ──────────────────────
+	metricNotifEnqueue = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "devf_notif_enqueue_total",
+			Help: "Notification enqueue outcomes by trigger and decision.",
+		},
+		[]string{"trigger", "outcome"}, // outcome: queued|opted_out|rate_limited|deduped
+	)
+	metricNotifDispatch = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "devf_notif_dispatch_total",
+			Help: "Notification dispatch outcomes by trigger and result.",
+		},
+		[]string{"trigger", "result"}, // result: sent|failed|no_tokens
+	)
+
+	// ── Creator insights API hits ────────────────────────────────────────────
+	metricCreatorInsights = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "devf_creator_insights_total",
+			Help: "Creator-insights endpoint hits by scope.",
+		},
+		[]string{"scope"}, // overview | per_content
+	)
+
+	// ── Peak upgrades ────────────────────────────────────────────────────────
+	metricTwoTowerUpdates = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "devf_two_tower_updates_total",
+			Help: "Trained two-tower content-vector SGD updates by outcome.",
+		},
+		[]string{"outcome"}, // pos | neg
+	)
+	metricNegProfileMine = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "devf_neg_profile_mine_total",
+			Help: "Negative-feedback profile-mining nudges by event type.",
+		},
+		[]string{"event"}, // block | unfollow | not_interested | skip | bounce
+	)
+	metricCreatorResidualUpdate = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "devf_creator_residual_updates_total",
+			Help: "Per-creator reach-residual EMA updates.",
+		},
+	)
+	metricCohortBlendObserve = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "devf_cohort_blend_observe_total",
+			Help: "Cohort×source blending reward observations.",
+		},
+		[]string{"cohort", "source"},
+	)
 )
 
 // registerMetrics is called from main() — safe to call multiple times, each
@@ -203,6 +266,14 @@ func registerMetrics() {
 		metricBootstrapPool,
 		metricWatchRatioObserve,
 		metricWatchRatioFlush,
+		metricSurpriseInject,
+		metricNotifEnqueue,
+		metricNotifDispatch,
+		metricCreatorInsights,
+		metricTwoTowerUpdates,
+		metricNegProfileMine,
+		metricCreatorResidualUpdate,
+		metricCohortBlendObserve,
 	)
 }
 
@@ -274,7 +345,7 @@ func normalizeMetricPath(p string) string {
 		"/api/v1/profile", "/api/v1/experiments", "/api/v1/experiments/results",
 		"/api/v1/users/similar", "/api/v1/watch", "/api/v1/report",
 		"/api/v1/admin/reseed", "/api/v1/admin/funnels", "/api/v1/admin/errors",
-		"/api/v1/admin/health", "/api/v1/admin/golden_hour",
+		"/api/v1/admin/health", "/api/v1/admin/golden_hour", "/api/v1/admin/diagnostics",
 		"/api/v1/chat/send", "/api/v1/chat/read", "/api/v1/chat/edit",
 		"/api/v1/chat/delete", "/api/v1/chat/forward", "/api/v1/save",
 		"/login", "/search", "/admin", "/metrics":

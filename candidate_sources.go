@@ -50,12 +50,28 @@ var defaultSourceWeights = map[string]float64{
 
 // multiSourceFetch runs all default sources in parallel and merges results,
 // deduping by (type, id). Per-source budget = totalLimit * weight.
+//
+// This wrapper preserves the legacy signature for callers that don't carry
+// cohort context. Production should call multiSourceFetchForCohort so the
+// learned per-cohort blending weights are applied.
 func multiSourceFetch(userID string, totalLimit int) []HomeFeedItem {
+	items, _ := multiSourceFetchForCohort(userID, totalLimit, "")
+	return items
+}
+
+// multiSourceFetchForCohort is the cohort-aware variant. Returns items AND
+// a per-item source-attribution map (keyed by item type+id) so the LTR
+// stash can record which source produced each impression. Reward observation
+// at outcome time then credits the right source.
+//
+// When cohort=="" we fall back to defaultSourceWeights (legacy behavior).
+// Otherwise effectiveSourceWeights(cohort) wraps the learned blending.
+func multiSourceFetchForCohort(userID string, totalLimit int, cohort Cohort) ([]HomeFeedItem, map[string]string) {
 	if totalLimit <= 0 {
-		return nil
+		return nil, nil
 	}
 
-	sources := buildDefaultSources()
+	sources := buildSourcesForCohort(cohort)
 	type result struct {
 		name  string
 		items []HomeFeedItem
@@ -97,6 +113,7 @@ func multiSourceFetch(userID string, totalLimit int) []HomeFeedItem {
 	// Dedup by member key.
 	seen := make(map[string]bool, totalLimit)
 	bySource := make(map[string][]HomeFeedItem, len(sources))
+	itemSource := make(map[string]string, totalLimit)
 	for r := range resCh {
 		for _, it := range r.items {
 			id := getItemID(it)
@@ -109,11 +126,30 @@ func multiSourceFetch(userID string, totalLimit int) []HomeFeedItem {
 			}
 			seen[key] = true
 			bySource[r.name] = append(bySource[r.name], it)
+			itemSource[key] = r.name
 		}
 	}
 
 	// Weighted round-robin interleave so no single source dominates the head.
-	return interleaveBySource(bySource, sources, totalLimit)
+	merged := interleaveBySource(bySource, sources, totalLimit)
+	return merged, itemSource
+}
+
+// buildSourcesForCohort returns the source list with per-cohort weights
+// applied when cohort is non-empty; falls back to defaults otherwise.
+func buildSourcesForCohort(cohort Cohort) []candidateSource {
+	if cohort == "" {
+		return buildDefaultSources()
+	}
+	weights := effectiveSourceWeights(cohort)
+	return []candidateSource{
+		{name: "recency", weight: weights["recency"], fetch: sourceRecency},
+		{name: "trending", weight: weights["trending"], fetch: sourceTrending},
+		{name: "trendingRealtime", weight: weights["trendingRealtime"], fetch: sourceTrendingRealtime},
+		{name: "follow", weight: weights["follow"], fetch: sourceFollowGraph},
+		{name: "collab", weight: weights["collab"], fetch: sourceCollaborative},
+		{name: "embedding", weight: weights["embedding"], fetch: sourceEmbeddingNeighbors},
+	}
 }
 
 // interleaveBySource pulls from each source in a round-robin, respecting
