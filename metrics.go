@@ -243,6 +243,13 @@ var (
 		},
 		[]string{"cohort", "source"},
 	)
+
+	metricExploreFeed = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "devf_explore_feed_requests_total",
+			Help: "Requests served by the non-personalized explore feed.",
+		},
+	)
 )
 
 // registerMetrics is called from main() — safe to call multiple times, each
@@ -276,6 +283,7 @@ func registerMetrics() {
 		metricNegProfileMine,
 		metricCreatorResidualUpdate,
 		metricCohortBlendObserve,
+		metricExploreFeed,
 	)
 }
 

@@ -219,6 +219,7 @@ func main() {
 	// Psychology-based recommendation engine (v2)
 	api.HandleFunc("/feed/smart", SmartFeedHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/feed/following/v2", FollowingFeedV2Handler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/feed/explore", ExploreFeedHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/categories", CategoriesHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/events", TrackEventHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/events/batch", TrackBatchEventsHandler).Methods("POST", "OPTIONS")
