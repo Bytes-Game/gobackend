@@ -897,6 +897,38 @@ func seedFollows() {
 	}
 }
 
+// seedAnchorTime is the "newest item" reference point in the hardcoded
+// seed timestamps. Any timestamp older than this is converted into a
+// relative offset from seedAnchorTime, then re-anchored to "now" at insert
+// time so the seed always looks recent regardless of when the server boots.
+//
+// Why: hardcoded absolute timestamps go stale. Every candidate-source
+// query filters by `created_at > NOW() - INTERVAL 'N days'`. If the seed
+// timestamps are 30 days old but the windows are 14 days, the entire feed
+// pipeline returns empty, and the user sees "Nothing to play just yet."
+// This indirection eliminates the staleness problem permanently.
+var seedAnchorTime = time.Date(2026, 4, 2, 14, 0, 0, 0, time.UTC) // newest hardcoded ts
+
+// freshTimestamp converts a hardcoded seed timestamp into one anchored to
+// the current wall clock. The offset (anchor − original) is preserved so
+// relative ordering and spacing are intact, but the entire timeline is
+// shifted forward so the newest item is "now" and everything else is
+// older relative to that.
+//
+// Falls back to time.Now() if the input doesn't parse — never returns
+// a zero time that would break the schema.
+func freshTimestamp(rawIso string) time.Time {
+	t, err := time.Parse(time.RFC3339, rawIso)
+	if err != nil {
+		return time.Now()
+	}
+	offset := seedAnchorTime.Sub(t)
+	if offset < 0 {
+		offset = 0
+	}
+	return time.Now().Add(-offset)
+}
+
 func seedPosts() {
 	type sp struct {
 		authorID                                    int
@@ -956,7 +988,7 @@ func seedPosts() {
 		{9, "video", vids[5].url, vids[5].thumb, "Team challenge highlights with frostbyte!", 1700, "2026-02-17T12:00:00Z"},
 	}
 	for _, p := range data {
-		t, _ := time.Parse(time.RFC3339, p.createdAt)
+		t := freshTimestamp(p.createdAt)
 		db.Exec(
 			`INSERT INTO posts (author_id, type, content_url, thumbnail_url, caption, views, created_at)
 			VALUES ($1,$2,$3,$4,$5,$6,$7)`,
@@ -990,7 +1022,7 @@ func seedComments() {
 		{26, 3, "Inspiring journey! I'm working on the same goal", "2026-02-17T19:00:00Z"},
 	}
 	for _, c := range data {
-		t, _ := time.Parse(time.RFC3339, c.createdAt)
+		t := freshTimestamp(c.createdAt)
 		db.Exec(
 			`INSERT INTO comments (post_id, author_id, text, created_at) VALUES ($1,$2,$3,$4)`,
 			c.postID, c.authorID, c.text, t,
@@ -1575,7 +1607,7 @@ func seedChallenges() {
 	}
 
 	for _, c := range data {
-		t, _ := time.Parse(time.RFC3339, c.createdAt)
+		t := freshTimestamp(c.createdAt)
 		db.Exec(
 			`INSERT INTO challenges (creator_id, video_url, thumbnail_url, prefix, subject, visibility, status, views, created_at)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
@@ -1647,7 +1679,7 @@ func seedChallenges() {
 		{37, 1, v3, "", 340, "2026-03-28T08:00:00Z"},     // player1 responds to nightowl (friends battle)
 	}
 	for _, r := range responses {
-		rt, _ := time.Parse(time.RFC3339, r.createdAt)
+		rt := freshTimestamp(r.createdAt)
 		db.Exec(
 			`INSERT INTO challenge_responses (challenge_id, responder_id, video_url, thumbnail_url, views, created_at)
 			 VALUES ($1,$2,$3,$4,$5,$6)`,

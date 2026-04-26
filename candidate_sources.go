@@ -208,10 +208,36 @@ func sourceRecency(userID string, limit int) []HomeFeedItem {
 // SOURCE 2: Trending — engagement-weighted within the last 48h.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// candidateSourceWindows holds the strict-then-widening fallback ladder
+// each source tries when the prior window returned nothing. This is the
+// architectural defense against any kind of sparse-data bug — seed data
+// going stale, a quiet weekend, a brand-new region, etc. The strict
+// window stays first for the typical case; wider windows kick in only
+// when the strict one has zero results.
+var candidateSourceWindows = map[string][]string{
+	"trending": {"48 hours", "7 days", "30 days", "365 days"},
+	"follow":   {"7 days", "30 days", "180 days", "365 days"},
+	"collab":   {"14 days", "60 days", "180 days", "365 days"},
+	"recency":  {"14 days", "60 days", "180 days", "365 days"},
+}
+
 func sourceTrending(userID string, limit int) []HomeFeedItem {
 	if db == nil {
 		return nil
 	}
+	for _, window := range candidateSourceWindows["trending"] {
+		items := sourceTrendingWindowed(userID, limit, window)
+		if len(items) > 0 {
+			return items
+		}
+	}
+	return nil
+}
+
+// sourceTrendingWindowed parametrizes the recency cutoff so the wrapper
+// can try progressively wider windows. Returns immediately when the query
+// has any rows.
+func sourceTrendingWindowed(userID string, limit int, window string) []HomeFeedItem {
 	items := make([]HomeFeedItem, 0, limit)
 	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
@@ -223,10 +249,10 @@ func sourceTrending(userID string, limit int) []HomeFeedItem {
 			ON cl.challenge_id = c.id
 		WHERE c.visibility = 'arena'
 		  AND c.status IN ('open','active','completed')
-		  AND c.created_at > NOW() - INTERVAL '48 hours'
+		  AND c.created_at > NOW() - ($3::text)::interval
 		  AND c.creator_id != CAST($1 AS INT)
 		ORDER BY (c.views + COALESCE(cl.likes,0)*5) DESC
-		LIMIT $2`, userID, limit)
+		LIMIT $2`, userID, limit, window)
 	if err != nil {
 		return nil
 	}
@@ -257,6 +283,16 @@ func sourceFollowGraph(userID string, limit int) []HomeFeedItem {
 	if db == nil {
 		return nil
 	}
+	for _, window := range candidateSourceWindows["follow"] {
+		items := sourceFollowGraphWindowed(userID, limit, window)
+		if len(items) > 0 {
+			return items
+		}
+	}
+	return nil
+}
+
+func sourceFollowGraphWindowed(userID string, limit int, window string) []HomeFeedItem {
 	items := make([]HomeFeedItem, 0, limit)
 	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
@@ -268,10 +304,10 @@ func sourceFollowGraph(userID string, limit int) []HomeFeedItem {
 		LEFT JOIN (SELECT challenge_id, COUNT(*) AS likes FROM challenge_likes GROUP BY challenge_id) cl
 			ON cl.challenge_id = c.id
 		WHERE f.follower_id = CAST($1 AS INT)
-		  AND c.created_at > NOW() - INTERVAL '7 days'
+		  AND c.created_at > NOW() - ($3::text)::interval
 		  AND c.visibility IN ('arena','friends')
 		ORDER BY c.created_at DESC
-		LIMIT $2`, userID, limit)
+		LIMIT $2`, userID, limit, window)
 	if err != nil {
 		return nil
 	}
@@ -303,6 +339,16 @@ func sourceCollaborative(userID string, limit int) []HomeFeedItem {
 	if db == nil {
 		return nil
 	}
+	for _, window := range candidateSourceWindows["collab"] {
+		items := sourceCollaborativeWindowed(userID, limit, window)
+		if len(items) > 0 {
+			return items
+		}
+	}
+	return nil
+}
+
+func sourceCollaborativeWindowed(userID string, limit int, window string) []HomeFeedItem {
 	items := make([]HomeFeedItem, 0, limit)
 	rows, err := db.Query(`
 		SELECT DISTINCT ON (c.id)
@@ -318,10 +364,10 @@ func sourceCollaborative(userID string, limit int) []HomeFeedItem {
 		WHERE us.user_id = $1
 		  AND us.similarity_score > 0.3
 		  AND fe.event_type IN ('like','complete','share','save')
-		  AND c.created_at > NOW() - INTERVAL '14 days'
+		  AND c.created_at > NOW() - ($3::text)::interval
 		  AND c.creator_id != CAST($1 AS INT)
 		ORDER BY c.id, c.created_at DESC
-		LIMIT $2`, userID, limit)
+		LIMIT $2`, userID, limit, window)
 	if err != nil {
 		return nil
 	}

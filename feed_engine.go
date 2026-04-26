@@ -3354,14 +3354,62 @@ func isColdStartUser(profile *UserProfile) bool {
 func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error) {
 	offset := (page - 1) * limit
 
-	// Tier 2.10 — cold-start QUALITY FLOOR.
+	// Tier 2.10 — cold-start QUALITY FLOOR (with widening fallback).
 	// Brand-new users have no personal signal, so everything rides on "good
-	// first impression". Filter out challenges with zero engagement AND keep
-	// only those whose like-to-view ratio is above the platform baseline.
-	// Min thresholds (coldStartMinViews / coldStartMinLikes) are intentionally
-	// loose so small-creator content still has a chance, but skip-heavy
-	// low-quality content won't surface first.
-	challengeRows, err := db.Query(`
+	// first impression." The strict pass requires recent + engaged content;
+	// fallback passes progressively widen the recency window AND lower the
+	// engagement threshold. Final pass returns ANY content rather than an
+	// empty feed — "Nothing to play just yet" is a worse first impression
+	// than imperfect content.
+	type qualityTier struct {
+		window   string
+		minViews int
+		minLikes int
+	}
+	tiers := []qualityTier{
+		{"14 days", 10, 1}, // strict
+		{"60 days", 5, 0},  // wider, looser
+		{"180 days", 1, 0}, // very wide, minimal
+		{"365 days", 0, 0}, // last resort
+	}
+
+	var challengeItems, postItems []HomeFeedItem
+	for _, tier := range tiers {
+		if len(challengeItems) == 0 {
+			challengeItems = coldStartChallengesTiered(limit/2, offset/2, tier.window, tier.minViews, tier.minLikes)
+		}
+		if len(postItems) == 0 {
+			postItems = coldStartPostsTiered(limit/2, offset/2, tier.window, tier.minViews, tier.minLikes)
+		}
+		if len(challengeItems) > 0 && len(postItems) > 0 {
+			break
+		}
+	}
+
+	items := append(challengeItems, postItems...)
+
+	// Shuffle to mix challenges and posts.
+	rand.Shuffle(len(items), func(i, j int) {
+		items[i], items[j] = items[j], items[i]
+	})
+
+	// Enforce diversity: max 2 consecutive items of same type.
+	items = enforceDiversity(items)
+
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+
+	return items, hasMore, nil
+}
+
+// coldStartChallengesTiered runs one tier of the cold-start challenge query.
+func coldStartChallengesTiered(limit, offset int, window string, minViews, minLikes int) []HomeFeedItem {
+	if db == nil {
+		return nil
+	}
+	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
 			c.views, COALESCE(cl.likes,0), c.created_at,
@@ -3372,42 +3420,41 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 		LEFT JOIN (SELECT challenge_id, COUNT(*) as likes FROM challenge_likes GROUP BY challenge_id) cl
 			ON cl.challenge_id = c.id
 		WHERE c.visibility = 'arena' AND c.status IN ('open','active','completed')
-		AND c.created_at > NOW() - INTERVAL '14 days'
-		AND c.views >= 10
-		AND COALESCE(cl.likes,0) >= 1
+		AND c.created_at > NOW() - ($3::text)::interval
+		AND c.views >= $4
+		AND COALESCE(cl.likes,0) >= $5
 		ORDER BY (c.views + COALESCE(cl.likes,0) * 3) DESC, c.created_at DESC
-		LIMIT $1 OFFSET $2`, limit/2, offset/2)
+		LIMIT $1 OFFSET $2`, limit, offset, window, minViews, minLikes)
 	if err != nil {
-		return nil, false, err
+		return nil
 	}
-	defer challengeRows.Close()
-
+	defer rows.Close()
 	var items []HomeFeedItem
-	for challengeRows.Next() {
+	for rows.Next() {
 		var ch Challenge
-		var creatorID int
-		var views int
-		var likes int
+		var creatorID, views, likes, responseCount int
 		var createdAt, expiresAt time.Time
-		var responseCount int
-
-		challengeRows.Scan(&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
+		rows.Scan(&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
 			&ch.VideoURL, &ch.ThumbnailURL, &ch.Prefix, &ch.Subject,
 			&ch.Visibility, &ch.Status, &views, &likes,
 			&createdAt, &expiresAt, &responseCount)
-
 		ch.CreatorID = strconv.Itoa(creatorID)
 		ch.Views = views
 		ch.Likes = likes
 		ch.CreatedAt = createdAt.Format(time.RFC3339)
 		ch.ExpiresAt = expiresAt.Format(time.RFC3339)
 		ch.ResponseCount = responseCount
-
 		items = append(items, HomeFeedItem{Type: "challenge", Challenge: &ch})
 	}
+	return items
+}
 
-	// Get popular posts — same cold-start quality floor as above.
-	postRows, err := db.Query(`
+// coldStartPostsTiered runs one tier of the cold-start post query.
+func coldStartPostsTiered(limit, offset int, window string, minViews, minLikes int) []HomeFeedItem {
+	if db == nil {
+		return nil
+	}
+	rows, err := db.Query(`
 		SELECT p.id, p.author_id, u.username, u.league, p.type, p.content_url,
 			p.thumbnail_url, p.caption, p.views, p.created_at,
 			COALESCE(pl.likes,0) as likes,
@@ -3416,45 +3463,28 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 		JOIN users u ON p.author_id = u.id
 		LEFT JOIN (SELECT post_id, COUNT(*) as likes FROM post_likes GROUP BY post_id) pl
 			ON pl.post_id = p.id
-		WHERE p.created_at > NOW() - INTERVAL '14 days'
-		AND p.views >= 10
-		AND COALESCE(pl.likes,0) >= 1
+		WHERE p.created_at > NOW() - ($3::text)::interval
+		AND p.views >= $4
+		AND COALESCE(pl.likes,0) >= $5
 		ORDER BY (p.views + COALESCE(pl.likes,0) * 3) DESC, p.created_at DESC
-		LIMIT $1 OFFSET $2`, limit/2, offset/2)
+		LIMIT $1 OFFSET $2`, limit, offset, window, minViews, minLikes)
 	if err != nil {
-		return nil, false, err
+		return nil
 	}
-	defer postRows.Close()
-
-	for postRows.Next() {
+	defer rows.Close()
+	var items []HomeFeedItem
+	for rows.Next() {
 		var post Post
 		var authorID int
 		var createdAt time.Time
-
-		postRows.Scan(&post.ID, &authorID, &post.AuthorUsername, &post.AuthorLeague,
+		rows.Scan(&post.ID, &authorID, &post.AuthorUsername, &post.AuthorLeague,
 			&post.Type, &post.ContentURL, &post.ThumbnailURL, &post.Caption,
 			&post.Views, &createdAt, &post.Likes, &post.Comments)
-
 		post.AuthorID = strconv.Itoa(authorID)
 		post.CreatedAt = createdAt.Format(time.RFC3339)
-
 		items = append(items, HomeFeedItem{Type: "post", Post: &post})
 	}
-
-	// Shuffle to ensure diversity (don't show all challenges then all posts)
-	rand.Shuffle(len(items), func(i, j int) {
-		items[i], items[j] = items[j], items[i]
-	})
-
-	// Enforce diversity: max 2 consecutive items of same type
-	items = enforceDiversity(items)
-
-	hasMore := len(items) > limit
-	if hasMore {
-		items = items[:limit]
-	}
-
-	return items, hasMore, nil
+	return items
 }
 
 // enforceDiversity ensures no more than 2 consecutive items of the same type.
@@ -4060,7 +4090,20 @@ func buildInteractedSet(userID string) map[string]bool {
 	return interacted
 }
 
+// fetchCandidates is the recency-source backing query. Uses a widening
+// fallback ladder so a sparse-data window (stale seed, quiet weekend, new
+// region) never produces an empty feed.
 func fetchCandidates(userID string, limit int) []HomeFeedItem {
+	for _, window := range candidateSourceWindows["recency"] {
+		items := fetchCandidatesWindowed(userID, limit, window)
+		if len(items) > 0 {
+			return items
+		}
+	}
+	return nil
+}
+
+func fetchCandidatesWindowed(userID string, limit int, window string) []HomeFeedItem {
 	var items []HomeFeedItem
 
 	// Recent challenges
@@ -4076,10 +4119,10 @@ func fetchCandidates(userID string, limit int) []HomeFeedItem {
 			ON cl.challenge_id = c.id
 		WHERE c.visibility = 'arena'
 		AND c.status IN ('open','active','completed')
-		AND c.created_at > NOW() - INTERVAL '14 days'
+		AND c.created_at > NOW() - ($3::text)::interval
 		AND c.creator_id != CAST($1 AS INT)
 		ORDER BY c.created_at DESC
-		LIMIT $2`, userID, limit/2)
+		LIMIT $2`, userID, limit/2, window)
 	if err == nil {
 		defer cRows.Close()
 		for cRows.Next() {
@@ -4111,9 +4154,9 @@ func fetchCandidates(userID string, limit int) []HomeFeedItem {
 		LEFT JOIN (SELECT post_id, COUNT(*) as likes FROM post_likes GROUP BY post_id) pl
 			ON pl.post_id = p.id
 		WHERE p.author_id != CAST($1 AS INT)
-		AND p.created_at > NOW() - INTERVAL '14 days'
+		AND p.created_at > NOW() - ($3::text)::interval
 		ORDER BY p.created_at DESC
-		LIMIT $2`, userID, limit/2)
+		LIMIT $2`, userID, limit/2, window)
 	if err == nil {
 		defer pRows.Close()
 		for pRows.Next() {
