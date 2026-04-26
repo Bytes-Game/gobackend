@@ -103,25 +103,41 @@ func TestAlgorithm_AllFields_CollectExpectedData(t *testing.T) {
 		}
 	})
 
-	// ── 2. SEEN FILTER — markShownBatch + filterUnseen ───────────────────────
+	// ── 2. SEEN FILTER — strict-drop path ────────────────────────────────────
+	// With ≥ seenFilterMinKeep unseen items, every seen item is dropped.
+	// (Graceful-fallback path — re-admitting seen items when catalog is
+	// exhausted — has dedicated coverage in seen_filter_test.go.)
 	t.Run("seenFilter", func(t *testing.T) {
-		items := []HomeFeedItem{
+		markShownBatch(userID, []HomeFeedItem{
 			{Type: "post", Post: &Post{ID: "p-seen-1", AuthorID: creatorA}},
-			{Type: "challenge", Challenge: &Challenge{ID: "c-seen-1", CreatorID: creatorB}},
-		}
-		markShownBatch(userID, items)
-		// One synthetic candidate matching what we just marked, one not.
+		})
+		// Build a candidate set with the seen one + plenty of fresh items so
+		// the unseen pool stays above the graceful-fallback floor.
 		scored := []ScoredItem{
 			{Item: HomeFeedItem{Type: "post", Post: &Post{ID: "p-seen-1", AuthorID: creatorA}}, Score: 0.9},
-			{Item: HomeFeedItem{Type: "post", Post: &Post{ID: "p-seen-2", AuthorID: creatorA}}, Score: 0.8},
+		}
+		for i := 0; i < seenFilterMinKeep+2; i++ {
+			scored = append(scored, ScoredItem{
+				Item: HomeFeedItem{Type: "post", Post: &Post{
+					ID: fmt.Sprintf("p-fresh-%d", i), AuthorID: creatorA,
+				}},
+				Score: 0.8 - float64(i)*0.01,
+			})
 		}
 		filtered := filterUnseenScored(userID, scored)
-		if len(filtered) != 1 || getItemID(filtered[0].Item) != "p-seen-2" {
-			t.Errorf("expected unseen 'p-seen-2', got %d items: %+v", len(filtered), filtered)
+		if len(filtered) != len(scored)-1 {
+			t.Errorf("expected %d items after strict drop, got %d", len(scored)-1, len(filtered))
 			record("seenFilter", "FAIL", fmt.Sprintf("kept %d items", len(filtered)))
-		} else {
-			record("seenFilter", "PASS", "drops seen, keeps unseen")
+			return
 		}
+		for _, si := range filtered {
+			if getItemID(si.Item) == "p-seen-1" {
+				t.Errorf("seen item p-seen-1 leaked into result")
+				record("seenFilter", "FAIL", "seen item leaked")
+				return
+			}
+		}
+		record("seenFilter", "PASS", "drops seen, keeps unseen")
 	})
 
 	// ── 3. CONTENT EMBEDDING CACHE ───────────────────────────────────────────

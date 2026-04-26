@@ -128,27 +128,61 @@ func filterUnseen(userID string, items []HomeFeedItem) []HomeFeedItem {
 	return out
 }
 
+// seenFilterMinKeep is the floor below which we stop dropping seen items.
+// If filtering everything seen would leave the page nearly empty (sparse
+// catalog, exhausted user, brand-new region), re-admit the best-scored
+// seen items so the user sees SOMETHING. Re-watching popular content is
+// normal behavior on Reels/TikTok — empty page is not.
+const seenFilterMinKeep = 8
+
 // filterUnseenScored is the ScoredItem variant used after ranking.
+//
+// Strategy:
+//  1. Walk items, separating unseen from seen (preserving order = score).
+//  2. If we have ≥ seenFilterMinKeep unseen, return them — same as before.
+//  3. If we have fewer, top up from the seen pile (highest-score first)
+//     so the user sees re-watches rather than an empty feed. The first
+//     `len(unseen)` slots are still strictly fresh; only the tail gets
+//     re-admitted seen content.
 func filterUnseenScored(userID string, items []ScoredItem) []ScoredItem {
 	seen := loadSeenSet(userID)
 	if len(seen) == 0 {
 		return items
 	}
-	out := make([]ScoredItem, 0, len(items))
-	dropped := 0
+	unseen := make([]ScoredItem, 0, len(items))
+	seenItems := make([]ScoredItem, 0, len(items))
 	for _, si := range items {
 		id := getItemID(si.Item)
 		if id == "" {
 			continue
 		}
 		if seen[seenMember(si.Item.Type, id)] {
-			dropped++
-			continue
+			seenItems = append(seenItems, si)
+		} else {
+			unseen = append(unseen, si)
 		}
-		out = append(out, si)
 	}
-	if metricSeenFiltered != nil && dropped > 0 {
-		metricSeenFiltered.Add(float64(dropped))
+	// Healthy case: enough unseen items to fill a page.
+	if len(unseen) >= seenFilterMinKeep {
+		if metricSeenFiltered != nil && len(seenItems) > 0 {
+			metricSeenFiltered.Add(float64(len(seenItems)))
+		}
+		return unseen
+	}
+	// Catalog exhausted (sparse data, power user, etc.): top up with
+	// best-scored seen items so the user gets re-watches instead of nothing.
+	out := make([]ScoredItem, 0, seenFilterMinKeep)
+	out = append(out, unseen...)
+	need := seenFilterMinKeep - len(unseen)
+	if need > len(seenItems) {
+		need = len(seenItems)
+	}
+	out = append(out, seenItems[:need]...)
+	if metricSeenFiltered != nil {
+		actuallyDropped := len(seenItems) - need
+		if actuallyDropped > 0 {
+			metricSeenFiltered.Add(float64(actuallyDropped))
+		}
 	}
 	return out
 }
