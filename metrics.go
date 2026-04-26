@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 	"time"
 
@@ -311,6 +313,28 @@ type statusRecorder struct {
 func (s *statusRecorder) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack passes through to the underlying ResponseWriter so WebSocket
+// upgrades work through the metrics middleware. Without this, every
+// gorilla/websocket Upgrade() call fails with "response writer does not
+// implement http.Hijacker" — which surfaces in the Flutter client as
+// "Connection ... was not upgraded to websocket". Net = the WS handshake
+// never completes and clients reconnect-loop forever.
+func (s *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := s.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
+}
+
+// Flush passes through Flusher for SSE / streaming endpoints (some admin
+// JSON streams use this). Same rationale as Hijack — middleware mustn't
+// break interface contracts the underlying writer supports.
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // statusClass flattens a numeric status to a class (2xx, 4xx, 5xx) so label
