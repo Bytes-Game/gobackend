@@ -3373,28 +3373,41 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 		{"365 days", 0, 0}, // last resort
 	}
 
-	var challengeItems, postItems []HomeFeedItem
+	// Post entity retired — cold-start now mixes "battles" (challenges that
+	// have at least one response) with "shorts" (challenges nobody has
+	// responded to yet) at roughly 70/30. Both are challenge items; the split
+	// just biases what kind of challenge a brand-new user sees first.
+	battleLimit := (limit * 7) / 10
+	shortLimit := limit - battleLimit
+	if battleLimit < 1 {
+		battleLimit = 1
+	}
+	if shortLimit < 1 {
+		shortLimit = 1
+	}
+	battleOffset := (offset * 7) / 10
+	shortOffset := offset - battleOffset
+
+	var battleItems, shortItems []HomeFeedItem
 	for _, tier := range tiers {
-		if len(challengeItems) == 0 {
-			challengeItems = coldStartChallengesTiered(limit/2, offset/2, tier.window, tier.minViews, tier.minLikes)
+		if len(battleItems) == 0 {
+			battleItems = coldStartChallengesTiered("battle", battleLimit, battleOffset, tier.window, tier.minViews, tier.minLikes)
 		}
-		if len(postItems) == 0 {
-			postItems = coldStartPostsTiered(limit/2, offset/2, tier.window, tier.minViews, tier.minLikes)
+		if len(shortItems) == 0 {
+			shortItems = coldStartChallengesTiered("short", shortLimit, shortOffset, tier.window, tier.minViews, tier.minLikes)
 		}
-		if len(challengeItems) > 0 && len(postItems) > 0 {
+		if len(battleItems) > 0 && len(shortItems) > 0 {
 			break
 		}
 	}
 
-	items := append(challengeItems, postItems...)
+	items := append(battleItems, shortItems...)
 
-	// Shuffle to mix challenges and posts.
+	// Shuffle to mix battles and shorts so the user doesn't see one big block
+	// of either kind.
 	rand.Shuffle(len(items), func(i, j int) {
 		items[i], items[j] = items[j], items[i]
 	})
-
-	// Enforce diversity: max 2 consecutive items of same type.
-	items = enforceDiversity(items)
 
 	hasMore := len(items) > limit
 	if hasMore {
@@ -3405,9 +3418,18 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 }
 
 // coldStartChallengesTiered runs one tier of the cold-start challenge query.
-func coldStartChallengesTiered(limit, offset int, window string, minViews, minLikes int) []HomeFeedItem {
+// kind is "battle" (challenges with at least one response) or "short"
+// (challenges nobody has responded to yet) — anything else means "all".
+func coldStartChallengesTiered(kind string, limit, offset int, window string, minViews, minLikes int) []HomeFeedItem {
 	if db == nil {
 		return nil
+	}
+	responseFilter := ""
+	switch kind {
+	case "battle":
+		responseFilter = "AND (SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id) > 0"
+	case "short":
+		responseFilter = "AND (SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id) = 0"
 	}
 	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
@@ -3423,6 +3445,7 @@ func coldStartChallengesTiered(limit, offset int, window string, minViews, minLi
 		AND c.created_at > NOW() - ($3::text)::interval
 		AND c.views >= $4
 		AND COALESCE(cl.likes,0) >= $5
+		`+responseFilter+`
 		ORDER BY (c.views + COALESCE(cl.likes,0) * 3) DESC, c.created_at DESC
 		LIMIT $1 OFFSET $2`, limit, offset, window, minViews, minLikes)
 	if err != nil {
@@ -3449,43 +3472,9 @@ func coldStartChallengesTiered(limit, offset int, window string, minViews, minLi
 	return items
 }
 
-// coldStartPostsTiered runs one tier of the cold-start post query.
-func coldStartPostsTiered(limit, offset int, window string, minViews, minLikes int) []HomeFeedItem {
-	if db == nil {
-		return nil
-	}
-	rows, err := db.Query(`
-		SELECT p.id, p.author_id, u.username, u.league, p.type, p.content_url,
-			p.thumbnail_url, p.caption, p.views, p.created_at,
-			COALESCE(pl.likes,0) as likes,
-			(SELECT COUNT(*) FROM comments WHERE post_id = p.id) as comment_count
-		FROM posts p
-		JOIN users u ON p.author_id = u.id
-		LEFT JOIN (SELECT post_id, COUNT(*) as likes FROM post_likes GROUP BY post_id) pl
-			ON pl.post_id = p.id
-		WHERE p.created_at > NOW() - ($3::text)::interval
-		AND p.views >= $4
-		AND COALESCE(pl.likes,0) >= $5
-		ORDER BY (p.views + COALESCE(pl.likes,0) * 3) DESC, p.created_at DESC
-		LIMIT $1 OFFSET $2`, limit, offset, window, minViews, minLikes)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var items []HomeFeedItem
-	for rows.Next() {
-		var post Post
-		var authorID int
-		var createdAt time.Time
-		rows.Scan(&post.ID, &authorID, &post.AuthorUsername, &post.AuthorLeague,
-			&post.Type, &post.ContentURL, &post.ThumbnailURL, &post.Caption,
-			&post.Views, &createdAt, &post.Likes, &post.Comments)
-		post.AuthorID = strconv.Itoa(authorID)
-		post.CreatedAt = createdAt.Format(time.RFC3339)
-		items = append(items, HomeFeedItem{Type: "post", Post: &post})
-	}
-	return items
-}
+// (coldStartPostsTiered retired — the home reels feed is challenge-only now.
+// What used to be the "post" cold-start branch is replaced by "shorts": the
+// kind="short" call into coldStartChallengesTiered above.)
 
 // enforceDiversity ensures no more than 2 consecutive items of the same type.
 func enforceDiversity(items []HomeFeedItem) []HomeFeedItem {
@@ -3812,6 +3801,11 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// Pagination
 	hasMore := len(composed) >= limit
 
+	// Attach top-response data so the client can render the opponent's
+	// video on a left-swipe for any challenge with responseCount > 0.
+	// One DB round-trip per page; safely no-ops on plain shorts.
+	populateTopResponsesScored(composed)
+
 	// Strip debug info if not requested
 	responseItems := make([]interface{}, 0, len(composed))
 	for _, item := range composed {
@@ -3947,34 +3941,9 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Posts from followed creators
-	pRows, err := db.Query(`
-		SELECT p.id, p.author_id, u.username, u.league, p.type, p.content_url,
-			p.thumbnail_url, p.caption, p.views, p.created_at,
-			COALESCE(pl.likes,0),
-			(SELECT COUNT(*) FROM comments WHERE post_id = p.id)
-		FROM posts p
-		JOIN users u ON p.author_id = u.id
-		LEFT JOIN (SELECT post_id, COUNT(*) as likes FROM post_likes GROUP BY post_id) pl
-			ON pl.post_id = p.id
-		WHERE p.author_id IN (SELECT following_id FROM follows WHERE follower_id = CAST($1 AS INT))
-		AND p.created_at > NOW() - INTERVAL '14 days'
-		ORDER BY p.created_at DESC
-		LIMIT $2`, userID, limit)
-	if err == nil {
-		defer pRows.Close()
-		for pRows.Next() {
-			var post Post
-			var authorID int
-			var createdAt time.Time
-			pRows.Scan(&post.ID, &authorID, &post.AuthorUsername, &post.AuthorLeague,
-				&post.Type, &post.ContentURL, &post.ThumbnailURL, &post.Caption,
-				&post.Views, &createdAt, &post.Likes, &post.Comments)
-			post.AuthorID = strconv.Itoa(authorID)
-			post.CreatedAt = createdAt.Format(time.RFC3339)
-			items = append(items, HomeFeedItem{Type: "post", Post: &post})
-		}
-	}
+	// (Posts-from-followed branch retired — the Following feed is now
+	// challenge-only just like the For You feed. If a followed creator only
+	// posted plain content historically, those rows simply don't show up.)
 
 	// Sort by created_at descending (chronological)
 	sort.Slice(items, func(i, j int) bool {
@@ -3997,6 +3966,11 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 
 	hasMore := len(items) >= limit
 	_ = followingSet
+
+	// Attach opponent video data for any challenge with responseCount > 0
+	// — same boundary call as SmartFeedHandler so the swipe-left UX works
+	// identically across For You / Following / Explore.
+	populateTopResponses(items)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4033,6 +4007,98 @@ func UserProfileHandler(w http.ResponseWriter, r *http.Request) {
 // ════════════════════════════════════════════════════════════════════════════════
 // HELPERS
 // ════════════════════════════════════════════════════════════════════════════════
+
+// populateTopResponses batch-fills the TopResponse* fields on every Challenge
+// in items that has at least one response. One DB round-trip per page, instead
+// of touching every candidate-source SQL query. Called at the feed-handler
+// boundary (SmartFeed / Following / Explore) right before JSON encoding.
+//
+// Picks the *newest* response per challenge as the "opponent" the client
+// shows when the user swipes left. Picking by "most-voted" is a future
+// upgrade — for now newest is the simplest signal that maps to the
+// "battle just heated up" mental model users expect.
+func populateTopResponses(items []HomeFeedItem) {
+	if db == nil || len(items) == 0 {
+		return
+	}
+	// Collect challenge IDs that need an opponent.
+	wantIDs := make([]int, 0, len(items))
+	idToIdx := make(map[int][]int) // challenge ID → indices in items (handles duplicates)
+	for i, it := range items {
+		if it.Type != "challenge" || it.Challenge == nil {
+			continue
+		}
+		if it.Challenge.ResponseCount <= 0 {
+			continue
+		}
+		cid, err := strconv.Atoi(it.Challenge.ID)
+		if err != nil {
+			continue
+		}
+		wantIDs = append(wantIDs, cid)
+		idToIdx[cid] = append(idToIdx[cid], i)
+	}
+	if len(wantIDs) == 0 {
+		return
+	}
+
+	// Build $1,$2,... placeholder list for the IN clause. Avoids pulling
+	// pq.Array as a dependency; the list size is bounded by page size (~30).
+	placeholders := make([]string, len(wantIDs))
+	args := make([]interface{}, len(wantIDs))
+	for i, id := range wantIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+	query := `
+		SELECT DISTINCT ON (cr.challenge_id)
+			cr.challenge_id, cr.video_url, COALESCE(cr.thumbnail_url, ''),
+			ru.username, ru.league
+		FROM challenge_responses cr
+		JOIN users ru ON cr.responder_id = ru.id
+		WHERE cr.challenge_id IN (` + strings.Join(placeholders, ",") + `)
+		ORDER BY cr.challenge_id, cr.created_at DESC`
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		log.Printf("populateTopResponses query error: %v", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var videoURL, thumbURL, username, league string
+		if err := rows.Scan(&cid, &videoURL, &thumbURL, &username, &league); err != nil {
+			continue
+		}
+		for _, idx := range idToIdx[cid] {
+			ch := items[idx].Challenge
+			if ch == nil {
+				continue
+			}
+			ch.TopResponseVideoUrl = videoURL
+			ch.TopResponseThumbnailUrl = thumbURL
+			ch.TopResponseUsername = username
+			ch.TopResponseLeague = league
+		}
+	}
+}
+
+// populateTopResponsesScored is the ScoredItem flavor used by handlers that
+// pass scored slices around (explore feed). Same DB hit, just unwraps the
+// underlying HomeFeedItem.
+func populateTopResponsesScored(items []ScoredItem) {
+	if len(items) == 0 {
+		return
+	}
+	plain := make([]HomeFeedItem, len(items))
+	for i, si := range items {
+		plain[i] = si.Item
+	}
+	populateTopResponses(plain)
+	// plain[i].Challenge points at the same struct as items[i].Item.Challenge,
+	// so the in-place mutation above is already visible to the caller — no
+	// copy-back needed. Listed explicitly to make that intent obvious.
+}
 
 func buildSocialSets(userID string) (following map[string]bool, fof map[string]bool) {
 	following = make(map[string]bool)
@@ -4104,10 +4170,43 @@ func fetchCandidates(userID string, limit int) []HomeFeedItem {
 }
 
 func fetchCandidatesWindowed(userID string, limit int, window string) []HomeFeedItem {
-	var items []HomeFeedItem
+	// Post entity retired — the home reels feed is challenge-only. Within the
+	// challenge pool we split candidates into two flavors:
+	//   * battles — challenges that have at least one response, i.e. someone
+	//     accepted the duel. These are the "main event" content.
+	//   * shorts  — challenges nobody has responded to yet. We surface these
+	//     so creators get traction (and so the feed has volume while the
+	//     content library is still small).
+	// Mix is biased ~70% battles / 30% shorts: battles are richer engagement
+	// surface, but shorts keep the catalog large enough to fill a session
+	// without repeating creators.
+	battleLimit := (limit * 7) / 10
+	shortLimit := limit - battleLimit
+	if battleLimit < 1 {
+		battleLimit = 1
+	}
+	if shortLimit < 1 {
+		shortLimit = 1
+	}
 
-	// Recent challenges
-	cRows, err := db.Query(`
+	items := fetchChallengesWindowedByKind(userID, "battle", battleLimit, window)
+	items = append(items, fetchChallengesWindowedByKind(userID, "short", shortLimit, window)...)
+	return items
+}
+
+// fetchChallengesWindowedByKind pulls recent challenges of a given kind
+// ("battle" = has responses, "short" = zero responses) for the recency
+// candidate source. Same projection as the old combined query, just split so
+// we can independently cap the two pools.
+func fetchChallengesWindowedByKind(userID, kind string, limit int, window string) []HomeFeedItem {
+	if limit <= 0 {
+		return nil
+	}
+	responseFilter := "(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id) > 0"
+	if kind == "short" {
+		responseFilter = "(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id) = 0"
+	}
+	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
 			c.views, COALESCE(cl.likes,0), c.created_at,
@@ -4121,57 +4220,30 @@ func fetchCandidatesWindowed(userID string, limit int, window string) []HomeFeed
 		AND c.status IN ('open','active','completed')
 		AND c.created_at > NOW() - ($3::text)::interval
 		AND c.creator_id != CAST($1 AS INT)
+		AND `+responseFilter+`
 		ORDER BY c.created_at DESC
-		LIMIT $2`, userID, limit/2, window)
-	if err == nil {
-		defer cRows.Close()
-		for cRows.Next() {
-			var ch Challenge
-			var creatorID, views, likes, rc int
-			var createdAt, expiresAt time.Time
-			cRows.Scan(&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
-				&ch.VideoURL, &ch.ThumbnailURL, &ch.Prefix, &ch.Subject,
-				&ch.Visibility, &ch.Status, &views, &likes,
-				&createdAt, &expiresAt, &rc)
-			ch.CreatorID = strconv.Itoa(creatorID)
-			ch.Views = views
-			ch.Likes = likes
-			ch.CreatedAt = createdAt.Format(time.RFC3339)
-			ch.ExpiresAt = expiresAt.Format(time.RFC3339)
-			ch.ResponseCount = rc
-			items = append(items, HomeFeedItem{Type: "challenge", Challenge: &ch})
-		}
+		LIMIT $2`, userID, limit, window)
+	if err != nil {
+		return nil
 	}
-
-	// Recent posts
-	pRows, err := db.Query(`
-		SELECT p.id, p.author_id, u.username, u.league, p.type, p.content_url,
-			p.thumbnail_url, p.caption, p.views, p.created_at,
-			COALESCE(pl.likes,0),
-			(SELECT COUNT(*) FROM comments WHERE post_id = p.id)
-		FROM posts p
-		JOIN users u ON p.author_id = u.id
-		LEFT JOIN (SELECT post_id, COUNT(*) as likes FROM post_likes GROUP BY post_id) pl
-			ON pl.post_id = p.id
-		WHERE p.author_id != CAST($1 AS INT)
-		AND p.created_at > NOW() - ($3::text)::interval
-		ORDER BY p.created_at DESC
-		LIMIT $2`, userID, limit/2, window)
-	if err == nil {
-		defer pRows.Close()
-		for pRows.Next() {
-			var post Post
-			var authorID int
-			var createdAt time.Time
-			pRows.Scan(&post.ID, &authorID, &post.AuthorUsername, &post.AuthorLeague,
-				&post.Type, &post.ContentURL, &post.ThumbnailURL, &post.Caption,
-				&post.Views, &createdAt, &post.Likes, &post.Comments)
-			post.AuthorID = strconv.Itoa(authorID)
-			post.CreatedAt = createdAt.Format(time.RFC3339)
-			items = append(items, HomeFeedItem{Type: "post", Post: &post})
-		}
+	defer rows.Close()
+	var items []HomeFeedItem
+	for rows.Next() {
+		var ch Challenge
+		var creatorID, views, likes, rc int
+		var createdAt, expiresAt time.Time
+		rows.Scan(&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
+			&ch.VideoURL, &ch.ThumbnailURL, &ch.Prefix, &ch.Subject,
+			&ch.Visibility, &ch.Status, &views, &likes,
+			&createdAt, &expiresAt, &rc)
+		ch.CreatorID = strconv.Itoa(creatorID)
+		ch.Views = views
+		ch.Likes = likes
+		ch.CreatedAt = createdAt.Format(time.RFC3339)
+		ch.ExpiresAt = expiresAt.Format(time.RFC3339)
+		ch.ResponseCount = rc
+		items = append(items, HomeFeedItem{Type: "challenge", Challenge: &ch})
 	}
-
 	return items
 }
 

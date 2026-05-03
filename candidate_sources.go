@@ -10,10 +10,11 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 // MULTI-SOURCE CANDIDATE GENERATION
 //
-// The old fetchCandidates pulled one bucket (50/50 recent challenges+posts)
-// and passed it to the ranker. That worked, but the ranker could only rank
-// what retrieval fed it — so users never saw things the single SQL recency
-// query didn't surface.
+// The old fetchCandidates pulled one bucket (recent challenges + recent
+// posts) and passed it to the ranker. That worked, but the ranker could only
+// rank what retrieval fed it — so users never saw things the single SQL
+// recency query didn't surface. (Posts have since been retired; the recency
+// source now splits its budget ~70/30 across battles and shorts.)
 //
 // This module runs SEVERAL retrievers in parallel (recency, trending,
 // following-graph, collaborative, embedding-neighbors) and merges their

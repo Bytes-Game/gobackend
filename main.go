@@ -197,12 +197,10 @@ func main() {
 	api.HandleFunc("/users/{username}", GetUserHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/follow", HandleFollowEvent).Methods("POST", "OPTIONS")
 	api.HandleFunc("/unfollow", HandleUnfollowEvent).Methods("POST", "OPTIONS")
-	api.HandleFunc("/feed", FeedHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/home", HomeFeedHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/posts/{userId}", UserPostsHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/like", HandleLikeEvent).Methods("POST", "OPTIONS")
-	api.HandleFunc("/comments", HandleCommentEvent).Methods("POST", "OPTIONS")
-	api.HandleFunc("/comments/{postId}", GetCommentsHandler).Methods("GET", "OPTIONS")
+	// Legacy post-centric routes retired (/feed, /home, /posts/{userId},
+	// /like, /comments) — the home reels feed now serves challenges only
+	// (battles + unaccepted-as-shorts) via /feed/smart, and per-challenge
+	// engagement uses /challenges/like + /challenges/{id}/comments.
 	api.HandleFunc("/challenges", CreateChallengeHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/arena", GetArenaChallengesHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/friends", GetFriendsChallengesHandler).Methods("GET", "OPTIONS")

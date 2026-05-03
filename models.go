@@ -153,6 +153,16 @@ type Challenge struct {
 	Category        string   `json:"category"`             // Primary: "comedy","motivation","sports","dance","music",etc.
 	EmotionTags     []string `json:"emotionTags,omitempty"` // ["happy","intense","inspiring"]
 	EnergyLevel     string   `json:"energyLevel"`           // "low","medium","high"
+
+	// Top response fields — populated by populateTopResponses() at the
+	// feed-handler boundary for any challenge with responseCount > 0. Lets
+	// the client render the opponent's video on a left-swipe without an
+	// extra round-trip. All four are omitempty so plain shorts (no
+	// responses) don't carry empty strings in the JSON payload.
+	TopResponseVideoUrl     string `json:"topResponseVideoUrl,omitempty"`
+	TopResponseThumbnailUrl string `json:"topResponseThumbnailUrl,omitempty"`
+	TopResponseUsername     string `json:"topResponseUsername,omitempty"`
+	TopResponseLeague       string `json:"topResponseLeague,omitempty"`
 }
 
 // HomeFeedItem wraps a post or challenge for the mixed home feed.

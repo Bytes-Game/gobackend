@@ -1351,35 +1351,9 @@ func IncrementChallengeViews(challengeID string) {
 	}
 }
 
-// GetHomeFeed returns a mixed feed: 3 challenges then 1 post, repeating.
-// Includes all active/open challenges and all posts, newest first.
-func GetHomeFeed() []HomeFeedItem {
-	// Fetch all displayable challenges (not expired if open).
-	challenges := queryChallenges(challengeBaseQuery + `
-	  Where (c.status IN ('active','completed') OR (c.status = 'open' AND c.created_at > NOW() - INTERVAL '24 hours'))
-      ORDER BY c.created_at DESC`)
-
-	// Fetch all posts newest first.
-	posts, _ := GetPostsPaginated(1, 100)
-
-	var result []HomeFeedItem
-	ci, pi := 0, 0
-	for ci < len(challenges) || pi < len(posts) {
-		// Add up to 3 challenges.
-		for j := 0; j < 3 && ci < len(challenges); j++ {
-			c := challenges[ci]
-			result = append(result, HomeFeedItem{Type: "challenge", Challenge: &c})
-			ci++
-		}
-		// Add 1 post.
-		if pi < len(posts) {
-			p := posts[pi]
-			result = append(result, HomeFeedItem{Type: "post", Post: &p})
-			pi++
-		}
-	}
-	return result
-}
+// (GetHomeFeed retired — the home reels feed is now served by SmartFeedHandler
+// (challenge-only, with the battles/shorts split). The old "3 challenges then
+// 1 post" interleave doesn't apply now that the post entity is gone.)
 
 // ---------------------------------------------------------------------------
 // Watch Events CRUD
@@ -1593,17 +1567,34 @@ func seedChallenges() {
 		{10, v15, "", "Who codes faster", "Bug Fix Race", "arena", "open", 4400, "2026-04-02T09:45:00Z"},
 
 		// === BATTLES (accepted — both challenger and opponent have videos) ===
-		{4, v14, "", "Who has better", "Strategy", "arena", "active", 4500, "2026-03-27T16:00:00Z"},      // challenge 31 — battle
-		{6, v15, "", "Who dances better", "Salsa", "arena", "active", 7200, "2026-03-28T10:00:00Z"},      // challenge 32 — battle
-		{10, v1, "", "Who sings better", "Pop Song", "arena", "active", 3100, "2026-03-26T19:00:00Z"},    // challenge 33 — battle
-		{1, v5, "", "Who flips better", "Pancake Flip", "arena", "active", 2900, "2026-03-30T08:00:00Z"}, // challenge 34 — battle
-		{9, v11, "", "Who plays better", "Drum Solo", "arena", "active", 5100, "2026-03-31T14:00:00Z"},   // challenge 35 — battle
-		{5, v3, "", "Who skates better", "Kickflip", "arena", "active", 6300, "2026-03-29T17:00:00Z"},    // challenge 36 — battle
-		{7, v9, "", "Who styles better", "Outfit Check", "arena", "active", 4700, "2026-03-30T19:00:00Z"},// challenge 37 — battle
+		// IDs 29-35: original 7 arena battles. Added 10 more (IDs 38-47) below
+		// the friends block so the 70/30 battle/short candidate split has
+		// enough inventory to actually surface battles in the For You feed.
+		{4, v14, "", "Who has better", "Strategy", "arena", "active", 4500, "2026-03-27T16:00:00Z"},      // ID 29
+		{6, v15, "", "Who dances better", "Salsa", "arena", "active", 7200, "2026-03-28T10:00:00Z"},      // ID 30
+		{10, v1, "", "Who sings better", "Pop Song", "arena", "active", 3100, "2026-03-26T19:00:00Z"},    // ID 31
+		{1, v5, "", "Who flips better", "Pancake Flip", "arena", "active", 2900, "2026-03-30T08:00:00Z"}, // ID 32
+		{9, v11, "", "Who plays better", "Drum Solo", "arena", "active", 5100, "2026-03-31T14:00:00Z"},   // ID 33
+		{5, v3, "", "Who skates better", "Kickflip", "arena", "active", 6300, "2026-03-29T17:00:00Z"},    // ID 34
+		{7, v9, "", "Who styles better", "Outfit Check", "arena", "active", 4700, "2026-03-30T19:00:00Z"},// ID 35
 
 		// === FRIENDS-ONLY (some open, some battles) ===
-		{2, v5, "", "Who is better", "Sniper", "friends", "open", 400, "2026-03-27T18:00:00Z"},
-		{8, v8, "", "Who cooks better", "Pasta", "friends", "active", 560, "2026-03-28T07:00:00Z"},        // challenge 39 — battle
+		{2, v5, "", "Who is better", "Sniper", "friends", "open", 400, "2026-03-27T18:00:00Z"},           // ID 36
+		{8, v8, "", "Who cooks better", "Pasta", "friends", "active", 560, "2026-03-28T07:00:00Z"},       // ID 37 — battle
+
+		// === MORE ARENA BATTLES — added to give the 70/30 battle/short
+		// candidate-pool split enough inventory to actually surface battles
+		// in the For You feed. IDs 38-47.
+		{2, v3, "", "Who's faster at", "Skateboarding", "arena", "active", 5400, "2026-04-01T08:00:00Z"},      // ID 38
+		{4, v6, "", "Who has the better", "Comedy Skit", "arena", "active", 8100, "2026-04-01T10:00:00Z"},     // ID 39
+		{7, v8, "", "Who plays better", "Piano Solo", "arena", "active", 4900, "2026-04-01T12:00:00Z"},        // ID 40
+		{1, v12, "", "Who can do a better", "Magic Trick", "arena", "active", 6700, "2026-04-01T14:00:00Z"},   // ID 41
+		{6, v9, "", "Who has the cleanest", "Free Throw", "arena", "active", 3300, "2026-04-01T16:00:00Z"},    // ID 42
+		{10, v14, "", "Who reviews better", "New Phone", "arena", "active", 7800, "2026-04-01T18:00:00Z"},     // ID 43
+		{3, v5, "", "Who paints better", "Sunset Scene", "arena", "active", 2400, "2026-04-01T20:00:00Z"},     // ID 44
+		{8, v7, "", "Who has the spookier", "Halloween Costume", "arena", "active", 5500, "2026-03-31T22:00:00Z"}, // ID 45
+		{9, v15, "", "Who has the better", "Workout Routine", "arena", "active", 4200, "2026-03-31T20:00:00Z"},    // ID 46
+		{5, v1, "", "Who tells better", "Bedtime Story", "arena", "active", 3700, "2026-03-31T18:00:00Z"},         // ID 47
 	}
 
 	for _, c := range data {
@@ -1655,6 +1646,17 @@ func seedChallenges() {
 		{33, 1}, {33, 3}, {33, 5}, {33, 7},
 		{34, 2}, {34, 4}, {34, 6}, {34, 8}, {34, 9}, {34, 10},
 		{35, 1}, {35, 3}, {35, 5}, {35, 8},
+		// new battle likes (IDs 38-47)
+		{38, 1}, {38, 3}, {38, 7}, {38, 9}, {38, 10},
+		{39, 2}, {39, 4}, {39, 6}, {39, 8}, {39, 10}, {39, 1}, {39, 5},
+		{40, 1}, {40, 4}, {40, 6}, {40, 8},
+		{41, 2}, {41, 3}, {41, 5}, {41, 7}, {41, 9},
+		{42, 1}, {42, 4}, {42, 7}, {42, 10},
+		{43, 2}, {43, 5}, {43, 8}, {43, 10}, {43, 1}, {43, 3},
+		{44, 1}, {44, 6}, {44, 9},
+		{45, 2}, {45, 4}, {45, 7}, {45, 8}, {45, 10},
+		{46, 1}, {46, 3}, {46, 6}, {46, 9},
+		{47, 2}, {47, 5}, {47, 8}, {47, 10},
 	}
 	for _, cl := range challengeLikes {
 		db.Exec(`INSERT INTO challenge_likes (challenge_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, cl[0], cl[1])
@@ -1669,14 +1671,26 @@ func seedChallenges() {
 		createdAt                string
 	}
 	responses := []sr{
-		{29, 2, v2, "", 3100, "2026-03-27T17:30:00Z"},    // player2 responds to shadowstrike
-		{30, 9, v7, "", 5800, "2026-03-28T11:30:00Z"},    // thunderbolt responds to stormchaser
-		{31, 3, v10, "", 2200, "2026-03-26T21:00:00Z"},   // player3 responds to cyberking
-		{32, 7, v12, "", 2700, "2026-03-30T10:00:00Z"},   // frostbyte responds to player1
-		{33, 4, v6, "", 4200, "2026-03-31T16:00:00Z"},    // shadowstrike responds to thunderbolt
-		{34, 10, v15, "", 5100, "2026-03-29T19:00:00Z"},  // cyberking responds to blazerunner
-		{35, 2, v4, "", 3900, "2026-03-30T21:00:00Z"},    // player2 responds to frostbyte
-		{37, 1, v3, "", 340, "2026-03-28T08:00:00Z"},     // player1 responds to nightowl (friends battle)
+		// Original 8 responses → response IDs 1-8 (in this insertion order).
+		{29, 2, v2, "", 3100, "2026-03-27T17:30:00Z"},    // resp 1 — player2 responds to shadowstrike
+		{30, 9, v7, "", 5800, "2026-03-28T11:30:00Z"},    // resp 2 — thunderbolt responds to stormchaser
+		{31, 3, v10, "", 2200, "2026-03-26T21:00:00Z"},   // resp 3 — player3 responds to cyberking
+		{32, 7, v12, "", 2700, "2026-03-30T10:00:00Z"},   // resp 4 — frostbyte responds to player1
+		{33, 4, v6, "", 4200, "2026-03-31T16:00:00Z"},    // resp 5 — shadowstrike responds to thunderbolt
+		{34, 10, v15, "", 5100, "2026-03-29T19:00:00Z"},  // resp 6 — cyberking responds to blazerunner
+		{35, 2, v4, "", 3900, "2026-03-30T21:00:00Z"},    // resp 7 — player2 responds to frostbyte
+		{37, 1, v3, "", 340, "2026-03-28T08:00:00Z"},     // resp 8 — player1 responds to nightowl (friends battle)
+		// New responses for the 10 added battles → response IDs 9-18.
+		{38, 5, v4, "", 4200, "2026-04-01T09:00:00Z"},    // resp 9  — blazerunner responds to player2
+		{39, 9, v11, "", 6300, "2026-04-01T11:00:00Z"},   // resp 10 — thunderbolt responds to shadowstrike
+		{40, 3, v2, "", 3800, "2026-04-01T13:00:00Z"},    // resp 11 — player3 responds to frostbyte
+		{41, 8, v10, "", 5100, "2026-04-01T15:00:00Z"},   // resp 12 — nightowl responds to player1
+		{42, 4, v15, "", 2900, "2026-04-01T17:00:00Z"},   // resp 13 — shadowstrike responds to stormchaser
+		{43, 6, v13, "", 6200, "2026-04-01T19:00:00Z"},   // resp 14 — stormchaser responds to cyberking
+		{44, 7, v6, "", 1900, "2026-04-01T21:00:00Z"},    // resp 15 — frostbyte responds to player3
+		{45, 10, v3, "", 4600, "2026-03-31T23:00:00Z"},   // resp 16 — cyberking responds to nightowl
+		{46, 1, v8, "", 3500, "2026-03-31T21:00:00Z"},    // resp 17 — player1 responds to thunderbolt
+		{47, 2, v9, "", 3100, "2026-03-31T19:00:00Z"},    // resp 18 — player2 responds to blazerunner
 	}
 	for _, r := range responses {
 		rt := freshTimestamp(r.createdAt)
@@ -1699,6 +1713,17 @@ func seedChallenges() {
 		{33, 5, 1}, {33, 5, 2}, {33, 5, 6}, {33, 5, 8}, {33, 5, 10},
 		{34, 6, 1}, {34, 6, 3}, {34, 6, 7}, {34, 6, 9},
 		{35, 7, 1}, {35, 7, 4}, {35, 7, 6}, {35, 7, 10},
+		// votes on the 10 newly added battles (IDs 38-47, response IDs 9-18)
+		{38, 9, 1}, {38, 9, 3}, {38, 9, 7}, {38, 9, 10},
+		{39, 10, 1}, {39, 10, 2}, {39, 10, 5}, {39, 10, 8}, {39, 10, 10},
+		{40, 11, 4}, {40, 11, 6}, {40, 11, 9},
+		{41, 12, 2}, {41, 12, 5}, {41, 12, 7}, {41, 12, 9},
+		{42, 13, 1}, {42, 13, 5}, {42, 13, 8}, {42, 13, 10},
+		{43, 14, 1}, {43, 14, 3}, {43, 14, 7}, {43, 14, 9},
+		{44, 15, 2}, {44, 15, 6}, {44, 15, 10},
+		{45, 16, 1}, {45, 16, 3}, {45, 16, 5}, {45, 16, 7}, {45, 16, 9},
+		{46, 17, 2}, {46, 17, 6}, {46, 17, 8},
+		{47, 18, 3}, {47, 18, 6}, {47, 18, 9},
 	}
 	for _, v := range votes {
 		db.Exec(
