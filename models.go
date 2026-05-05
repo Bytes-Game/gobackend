@@ -165,11 +165,55 @@ type Challenge struct {
 	TopResponseLeague       string `json:"topResponseLeague,omitempty"`
 }
 
-// HomeFeedItem wraps a post or challenge for the mixed home feed.
+// HomeFeedItem wraps a post, challenge, or suggested-accounts card for the
+// mixed home feed. Type discriminates which inner pointer is populated.
+//
+// Type values:
+//   - "challenge"         → Challenge populated
+//   - "post"              → Post populated (legacy; the home reels feed no
+//                            longer emits these but the type is kept so test
+//                            fixtures and any external callers still parse)
+//   - "suggestedAccounts" → SuggestedAccounts populated. Rendered by the
+//                            client as a non-video card showing 3–5 user
+//                            follow suggestions, interleaved into the feed
+//                            every ~8 items in TikTok / Instagram style.
 type HomeFeedItem struct {
-	Type      string     `json:"type"` // "challenge" or "post"
-	Challenge *Challenge `json:"challenge,omitempty"`
-	Post      *Post      `json:"post,omitempty"`
+	Type              string                 `json:"type"`
+	Challenge         *Challenge             `json:"challenge,omitempty"`
+	Post              *Post                  `json:"post,omitempty"`
+	SuggestedAccounts *SuggestedAccountsCard `json:"suggestedAccounts,omitempty"`
+}
+
+// SuggestedAccount is a slim user shape carried inside a SuggestedAccountsCard.
+// Slimmer than full User so the JSON payload stays small even when several
+// cards are interleaved across a page.
+type SuggestedAccount struct {
+	ID        string `json:"id"`
+	Username  string `json:"username"`
+	FullName  string `json:"fullName,omitempty"`
+	League    string `json:"league"`
+	Followers int    `json:"followers"`
+	Wins      int    `json:"wins"`
+	Losses    int    `json:"losses"`
+	// Why this user surfaced — one of "fof", "category", "popular", "league".
+	// Lets the client surface a small reason badge per row without the
+	// backend having to re-rank or look it up again.
+	Reason string `json:"reason,omitempty"`
+	// Number of accounts the recipient already follows who follow this user
+	// (0 if not driven by FoF). Powers a "Followed by 3 friends" badge.
+	FollowedByFriends int `json:"followedByFriends,omitempty"`
+}
+
+// SuggestedAccountsCard is one "Accounts to follow" card injected into the
+// home reels feed. The client renders it as a special tile (no video) with
+// a list of follow suggestions and an inline Follow button per row.
+type SuggestedAccountsCard struct {
+	// Stable card ID so the client can dedupe across pages and so analytics
+	// can attribute card-level events. Built as "sa_<userID>_<page>".
+	ID      string             `json:"id"`
+	Title   string             `json:"title"`  // e.g. "Accounts you might like"
+	Reason  string             `json:"reason"` // e.g. "Based on who you follow"
+	Users   []SuggestedAccount `json:"users"`
 }
 
 // ChallengeResponse represents someone accepting and responding to a challenge.

@@ -249,7 +249,8 @@ func exploreScore(cs *ContentScore, ns *negativeSignals) (float64, map[string]fl
 }
 
 // homeItemsToReelsResponse adapts ScoredItem to the JSON shape SmartFeedHandler
-// uses, so the same Flutter parser handles both endpoints.
+// uses, so the same Flutter parser handles both endpoints. Mirrors the same
+// "include only populated inner pointers" rule SmartFeedHandler enforces.
 func homeItemsToReelsResponse(items []ScoredItem) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(items))
 	for _, si := range items {
@@ -261,6 +262,9 @@ func homeItemsToReelsResponse(items []ScoredItem) []map[string]interface{} {
 		}
 		if si.Item.Challenge != nil {
 			entry["challenge"] = si.Item.Challenge
+		}
+		if si.Item.SuggestedAccounts != nil {
+			entry["suggestedAccounts"] = si.Item.SuggestedAccounts
 		}
 		out = append(out, entry)
 	}

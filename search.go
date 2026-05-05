@@ -2,33 +2,78 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/meilisearch/meilisearch-go"
 )
 
-// scoredUser is a helper struct just for sorting users with their search score.
-type scoredUser struct {
-	User  User
-	Score float64
+// ─────────────────────────────────────────────────────────────────────────────
+// SEARCH RANKER — TikTok / Instagram style.
+//
+// The previous handler dumped raw Meilisearch hits into a single list.
+// This version does what the big platforms actually do:
+//
+//   1. Hit Meilisearch for a generous shortlist per index (challenges + users).
+//   2. Apply a multi-signal RE-RANK on top of the lexical score:
+//        - Lexical relevance         (Meilisearch's _rankingScore)
+//        - Engagement                (log-normalized views + likes)
+//        - Recency                   (exponential decay, 14-day half-life)
+//        - Personalization           (does the user already follow / favor it)
+//        - Social proof              (FoF count for users; creator FoF for content)
+//        - Quality                   (followers for users, response count for challenges)
+//   3. Split challenges into BATTLES (responseCount > 0) and SHORTS
+//      (responseCount = 0) so the client can render distinct tabs that mirror
+//      the For You feed taxonomy.
+//   4. Capture the query into the user's recent-search list (already in place).
+//
+// Personalization is OPTIONAL — when userID is empty (anonymous) we skip the
+// user-relative signals and the response is still well-ranked by the
+// objective signals alone.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SearchResponse is the public shape returned by /search. The legacy
+// "challenges" + "users" keys are kept for backward compatibility with any
+// older client; new clients should consume "accounts" / "battles" / "shorts".
+type SearchResponse struct {
+	Accounts   []User      `json:"accounts"`
+	Battles    []Challenge `json:"battles"`
+	Shorts     []Challenge `json:"shorts"`
+	Challenges []Challenge `json:"challenges"` // legacy: battles + shorts merged
+	Users      []User      `json:"users"`      // legacy alias for accounts
 }
 
-// UnifiedSearchResponse wraps search results for challenges and users.
-type UnifiedSearchResponse struct {
-	Challenges []Challenge `json:"challenges"`
-	Users      []User      `json:"users"`
-}
+// per-section caps. Generous enough for an Instagram-style "Top" tab to
+// have something to interleave; bounded so the client doesn't have to
+// paginate inside the search response.
+const (
+	searchAccountCap   = 12
+	searchBattleCap    = 18
+	searchShortCap     = 18
+	searchMeiliPoolCap = 40 // pool we ask Meilisearch for, per index
+)
 
 // SearchHandler handles requests to the /search endpoint.
-// Supports ?q=query&type=all|users|challenges
+//   GET /search?q=query[&type=all|accounts|battles|shorts][&userId=X]
+//
+// The 'type' param narrows the response to a single section but leaves the
+// JSON shape stable — empty arrays for the sections you didn't ask for.
 func SearchHandler(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query().Get("q")
-	searchType := r.URL.Query().Get("type") // "all", "users", "challenges"
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	searchType := r.URL.Query().Get("type")
 	userID := r.URL.Query().Get("userId")
 
 	if query == "" {
-		http.Error(w, "Missing search query parameter 'q'", http.StatusBadRequest)
+		http.Error(w, `{"error":"missing search query parameter 'q'"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -36,114 +81,378 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 		searchType = "all"
 	}
 
-	// Tier 1.4: capture the query into the user's recent-search LIST so the
-	// feed ranker can bias toward matching categories/captions for 24h. Best
-	// effort — a Redis miss doesn't affect the search response.
+	// Best effort — record the query into the user's recent-search LIST so
+	// the For You ranker can bias toward this category for ~24h. Async to
+	// keep the search response latency down.
 	if userID != "" {
 		go RecordSearchQuery(userID, query)
 	}
 
-	// Try Meilisearch first
-	if meili != nil {
-		meiliResults := MeiliSearchAll(query, searchType)
-		if meiliResults != nil {
-			var challenges []Challenge
-			var users []User
+	// Pull personalization context once if we have a userID. All four lookups
+	// are cheap and request-local-cached.
+	var (
+		profile     *UserProfile
+		followingSet map[string]bool
+		fofSet      map[string]bool
+		viewerLeague string
+	)
+	if userID != "" {
+		profile, _ = getOrComputeProfile(userID)
+		followingSet, fofSet = buildSocialSets(userID)
+		viewerLeague = getLeagueFromProfile(userID)
+	}
 
-			for _, doc := range meiliResults {
-				docType, _ := doc["_type"].(string)
-				if docType == "challenge" {
-					challenges = append(challenges, meiliDocToChallenge(doc))
-				} else if docType == "user" {
-					users = append(users, meiliDocToUser(doc))
+	resp := SearchResponse{
+		Accounts: []User{},
+		Battles:  []Challenge{},
+		Shorts:   []Challenge{},
+	}
+
+	// Fetch + rerank ACCOUNTS.
+	if searchType == "all" || searchType == "accounts" || searchType == "users" {
+		resp.Accounts = rankSearchAccounts(query, userID, followingSet, fofSet, viewerLeague)
+	}
+
+	// Fetch + rerank CHALLENGES, then split into battles + shorts. We fetch
+	// once and split, rather than running two queries, since Meilisearch's
+	// lexical rank is the same either way.
+	if searchType == "all" || searchType == "battles" || searchType == "shorts" || searchType == "challenges" {
+		all := rankSearchChallenges(query, userID, profile, followingSet)
+		for _, ch := range all {
+			if ch.ResponseCount > 0 {
+				if len(resp.Battles) < searchBattleCap {
+					resp.Battles = append(resp.Battles, ch)
+				}
+			} else {
+				if len(resp.Shorts) < searchShortCap {
+					resp.Shorts = append(resp.Shorts, ch)
 				}
 			}
-
-			if challenges == nil {
-				challenges = []Challenge{}
-			}
-			if users == nil {
-				users = []User{}
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(UnifiedSearchResponse{
-				Challenges: challenges,
-				Users:      users,
-			})
-			return
 		}
+		// Also surface the merged list under the legacy "challenges" key so
+		// old clients keep working without a server-side breaking change.
+		merged := make([]Challenge, 0, len(resp.Battles)+len(resp.Shorts))
+		merged = append(merged, resp.Battles...)
+		merged = append(merged, resp.Shorts...)
+		resp.Challenges = merged
 	}
 
-	// Fallback: PostgreSQL search
-	var challenges []Challenge
-	var users []User
-
-	if searchType == "all" || searchType == "users" {
-		users = searchUsersFallback(query)
-	}
-	if searchType == "all" || searchType == "challenges" {
-		challenges = searchChallengesFallback(query)
-	}
-
-	if challenges == nil {
-		challenges = []Challenge{}
-	}
-	if users == nil {
-		users = []User{}
-	}
+	// Legacy alias.
+	resp.Users = resp.Accounts
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(UnifiedSearchResponse{
-		Challenges: challenges,
-		Users:      users,
-	})
+	json.NewEncoder(w).Encode(resp)
 }
 
-// searchUsersFallback uses the existing Levenshtein-based user search.
-func searchUsersFallback(query string) []User {
-	var scoredUsers []scoredUser
+// ─────────────────────────────────────────────────────────────────────────────
+// ACCOUNT RANKING
+// ─────────────────────────────────────────────────────────────────────────────
+
+// rankSearchAccounts fetches a generous Meilisearch shortlist of users
+// matching the query, then re-ranks with social + quality signals.
+func rankSearchAccounts(query, userID string, following, fof map[string]bool, viewerLeague string) []User {
+	hits := meiliSearchUsers(query, searchMeiliPoolCap)
+	if len(hits) == 0 {
+		hits = postgresSearchUsersFallback(query, searchMeiliPoolCap)
+	}
+	if len(hits) == 0 {
+		return []User{}
+	}
+
+	viewerLeagueIdx := leagueIndex(viewerLeague)
+
+	type scored struct {
+		User  User
+		Score float64
+	}
+	out := make([]scored, 0, len(hits))
+	for i, hit := range hits {
+		// Skip the viewer themselves — surfacing your own account is just
+		// noise in a search context.
+		if hit.User.ID == userID {
+			continue
+		}
+
+		// Lexical: the position-in-shortlist proxy decays exponentially.
+		// Meilisearch's _rankingScore would be ideal but the Go SDK doesn't
+		// expose it cleanly across all versions, so we use rank order
+		// (which is what _rankingScore drives anyway).
+		lex := math.Exp(-float64(i) / 8.0) // 1.0 at top, ~0.45 at i=8, ~0.20 at i=12
+
+		// Quality: log-popularity prior on follower count. Saturates fast so
+		// a 1M-follower account doesn't crush a 5k-follower exact match.
+		quality := logSafe(float64(hit.User.Followers)+1) / 6.0 // 0..1 over [1,1e6]
+
+		// Win-rate as a signal (battle accounts the user has a track record).
+		winRate := 0.0
+		total := hit.User.Wins + hit.User.Losses
+		if total > 0 {
+			winRate = float64(hit.User.Wins) / float64(total)
+		}
+
+		// Social proof — only when we know the viewer.
+		social := 0.0
+		if userID != "" {
+			if following[hit.User.ID] {
+				social = 0.30 // already following → top of list
+			} else if fof[hit.User.ID] {
+				social = 0.15 // friend-of-friend → strong signal
+			}
+		}
+
+		// League proximity — peers feel more relevant than super-elite
+		// accounts. Same/±1 league bonus.
+		leagueBonus := 0.0
+		if viewerLeagueIdx >= 0 {
+			theirIdx := leagueIndex(hit.User.League)
+			if theirIdx >= 0 {
+				diff := viewerLeagueIdx - theirIdx
+				if diff < 0 {
+					diff = -diff
+				}
+				if diff <= 1 {
+					leagueBonus = 0.05
+				}
+			}
+		}
+
+		score := lex + 0.20*quality + 0.10*winRate + social + leagueBonus
+		out = append(out, scored{User: hit.User, Score: score})
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	if len(out) > searchAccountCap {
+		out = out[:searchAccountCap]
+	}
+	users := make([]User, len(out))
+	for i, s := range out {
+		users[i] = s.User
+	}
+	return users
+}
+
+// userHit is a Meilisearch hit normalized into a User struct + the original
+// rank position.
+type userHit struct {
+	User User
+	// Rank position from Meilisearch (0-indexed). Used as a lexical-score
+	// proxy in the re-ranker.
+	Rank int
+}
+
+// meiliSearchUsers calls the users index. Returns nil on any error so the
+// fallback path can take over.
+func meiliSearchUsers(query string, limit int) []userHit {
+	if meili == nil {
+		return nil
+	}
+	res, err := meili.Index("users").Search(query, &meilisearch.SearchRequest{
+		Limit: int64(limit),
+	})
+	if err != nil {
+		return nil
+	}
+	out := make([]userHit, 0, len(res.Hits))
+	for i, hit := range res.Hits {
+		doc := decodeHit(hit)
+		out = append(out, userHit{User: meiliDocToUser(doc), Rank: i})
+	}
+	return out
+}
+
+// postgresSearchUsersFallback runs the legacy Levenshtein scorer when
+// Meilisearch is unconfigured. Same shape as the meili path.
+func postgresSearchUsersFallback(query string, limit int) []userHit {
+	scoredUsers := make([]scoredUser, 0)
 	allUsers := GetAllUsers()
 	for _, user := range allUsers {
-		score := calculateScore(user, query)
-		if score > 0 {
-			scoredUsers = append(scoredUsers, scoredUser{User: user, Score: score})
+		s := calculateScore(user, query)
+		if s > 0 {
+			scoredUsers = append(scoredUsers, scoredUser{User: user, Score: s})
 		}
 	}
-
-	sort.Slice(scoredUsers, func(i, j int) bool {
-		return scoredUsers[i].Score > scoredUsers[j].Score
-	})
-
-	if len(scoredUsers) > 20 {
-		scoredUsers = scoredUsers[:20]
+	sort.Slice(scoredUsers, func(i, j int) bool { return scoredUsers[i].Score > scoredUsers[j].Score })
+	if len(scoredUsers) > limit {
+		scoredUsers = scoredUsers[:limit]
 	}
-
-	result := make([]User, len(scoredUsers))
+	out := make([]userHit, len(scoredUsers))
 	for i, su := range scoredUsers {
-		result[i] = su.User
+		out[i] = userHit{User: su.User, Rank: i}
 	}
-	return result
+	return out
 }
 
-// searchChallengesFallback searches challenges by title/creator using simple substring matching.
-func searchChallengesFallback(query string) []Challenge {
+// ─────────────────────────────────────────────────────────────────────────────
+// CHALLENGE RANKING
+// ─────────────────────────────────────────────────────────────────────────────
+
+// rankSearchChallenges does the same lex + multi-signal re-rank for
+// challenges. Returned list is mixed (battles + shorts); caller splits.
+func rankSearchChallenges(query, userID string, profile *UserProfile, following map[string]bool) []Challenge {
+	hits := meiliSearchChallenges(query, searchMeiliPoolCap)
+	if len(hits) == 0 {
+		hits = postgresSearchChallengesFallback(query, searchMeiliPoolCap)
+	}
+	if len(hits) == 0 {
+		return nil
+	}
+
+	type scored struct {
+		Ch    Challenge
+		Score float64
+	}
+	out := make([]scored, 0, len(hits))
+	now := time.Now()
+
+	// Pre-compute the user's top categories from profile affinity so we don't
+	// loop through the map for every hit.
+	topCats := topCategories(profile, 3)
+
+	for i, hit := range hits {
+		ch := hit.Ch
+
+		// Lexical (rank-position decay).
+		lex := math.Exp(-float64(i) / 8.0)
+
+		// Engagement — log-normalized views + likes. Likes weighted 5x because
+		// they're an explicit positive signal vs. passive views.
+		eng := logSafe(float64(ch.Views)+5*float64(ch.Likes)+1) / 8.0 // 0..~1
+
+		// Recency — 14-day half-life. Search expects fresher results than For
+		// You does (you typically search for a current trend, not an
+		// evergreen video).
+		recency := 0.0
+		if t, err := time.Parse(time.RFC3339, ch.CreatedAt); err == nil {
+			ageDays := now.Sub(t).Hours() / 24.0
+			if ageDays < 0 {
+				ageDays = 0
+			}
+			recency = math.Exp(-ageDays / 14.0) // 1.0 at age=0, ~0.50 at 10d, ~0.14 at 28d
+		}
+
+		// Personalization — only when we have a profile.
+		personalBoost := 0.0
+		if profile != nil {
+			// Category-affinity match.
+			if ch.Category != "" {
+				if w, ok := profile.CategoryAffinity[ch.Category]; ok && w > 0 {
+					personalBoost += w * 0.15
+				}
+			}
+			// Following the creator? Strong personal signal.
+			if following != nil && following[ch.CreatorID] {
+				personalBoost += 0.10
+			}
+			// Top-category override — even if the affinity weight is small,
+			// reward results in the user's known interests.
+			if ch.Category != "" {
+				for _, tc := range topCats {
+					if tc == ch.Category {
+						personalBoost += 0.05
+						break
+					}
+				}
+			}
+		}
+		_ = userID // captured for future per-user reranking; unused in v1
+
+		// Quality nudge — a battle (responseCount > 0) is more interactive
+		// content than a static short. Tiny bonus so battles edge out shorts
+		// at near-tie lexical score, mirroring TikTok's preference for
+		// interactive results in search.
+		qualityNudge := 0.0
+		if ch.ResponseCount > 0 {
+			qualityNudge = 0.05
+		}
+
+		score := lex + 0.20*eng + 0.20*recency + personalBoost + qualityNudge
+		out = append(out, scored{Ch: ch, Score: score})
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	chs := make([]Challenge, len(out))
+	for i, s := range out {
+		chs[i] = s.Ch
+	}
+	return chs
+}
+
+// challengeHit is a Meilisearch hit normalized into a Challenge.
+type challengeHit struct {
+	Ch   Challenge
+	Rank int
+}
+
+func meiliSearchChallenges(query string, limit int) []challengeHit {
+	if meili == nil {
+		return nil
+	}
+	res, err := meili.Index("challenges").Search(query, &meilisearch.SearchRequest{
+		Limit: int64(limit),
+	})
+	if err != nil {
+		return nil
+	}
+	out := make([]challengeHit, 0, len(res.Hits))
+	for i, hit := range res.Hits {
+		doc := decodeHit(hit)
+		out = append(out, challengeHit{Ch: meiliDocToChallenge(doc), Rank: i})
+	}
+	return out
+}
+
+func postgresSearchChallengesFallback(query string, limit int) []challengeHit {
 	q := strings.ToLower(strings.TrimSpace(query))
 	allChallenges := GetArenaChallenges()
-	var results []Challenge
-
+	out := make([]challengeHit, 0)
 	for _, c := range allChallenges {
 		title := strings.ToLower(c.Prefix + " " + c.Subject)
 		creator := strings.ToLower(c.CreatorUsername)
 		if strings.Contains(title, q) || strings.Contains(creator, q) {
-			results = append(results, c)
+			out = append(out, challengeHit{Ch: c, Rank: len(out)})
+			if len(out) >= limit {
+				break
+			}
 		}
 	}
+	return out
+}
 
-	if len(results) > 20 {
-		results = results[:20]
+// topCategories returns the user's top-N categories by affinity weight.
+// Returns nil when the profile is missing or has no affinity data — the
+// caller treats that as "skip the top-cat boost".
+func topCategories(profile *UserProfile, n int) []string {
+	if profile == nil || len(profile.CategoryAffinity) == 0 {
+		return nil
 	}
-	return results
+	type cw struct {
+		cat string
+		w   float64
+	}
+	weights := make([]cw, 0, len(profile.CategoryAffinity))
+	for k, v := range profile.CategoryAffinity {
+		weights = append(weights, cw{cat: k, w: v})
+	}
+	sort.Slice(weights, func(i, j int) bool { return weights[i].w > weights[j].w })
+	if len(weights) > n {
+		weights = weights[:n]
+	}
+	out := make([]string, len(weights))
+	for i, w := range weights {
+		out[i] = w.cat
+	}
+	return out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LEGACY HELPERS (kept so existing callers keep compiling — they're used by
+// the fallback path above and by external code paths.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// scoredUser is a helper struct just for sorting users with their search score.
+type scoredUser struct {
+	User  User
+	Score float64
 }
 
 // meiliDocToChallenge converts a Meilisearch hit to a Challenge.
@@ -151,7 +460,7 @@ func meiliDocToChallenge(doc map[string]interface{}) Challenge {
 	return Challenge{
 		ID:              toString(doc["id"]),
 		CreatorID:       toString(doc["creatorId"]),
-		CreatorUsername:  toString(doc["creatorUsername"]),
+		CreatorUsername: toString(doc["creatorUsername"]),
 		CreatorLeague:   toString(doc["creatorLeague"]),
 		Prefix:          toString(doc["prefix"]),
 		Subject:         toString(doc["subject"]),
@@ -166,16 +475,15 @@ func meiliDocToChallenge(doc map[string]interface{}) Challenge {
 	}
 }
 
-// meiliDocToUser converts a Meilisearch hit to a User.
 func meiliDocToUser(doc map[string]interface{}) User {
 	return User{
-		ID:       toString(doc["id"]),
-		Username: toString(doc["username"]),
-		FullName: toString(doc["fullName"]),
-		League:   toString(doc["league"]),
+		ID:        toString(doc["id"]),
+		Username:  toString(doc["username"]),
+		FullName:  toString(doc["fullName"]),
+		League:    toString(doc["league"]),
 		Followers: toInt(doc["followers"]),
-		Wins:     toInt(doc["wins"]),
-		Losses:   toInt(doc["losses"]),
+		Wins:      toInt(doc["wins"]),
+		Losses:    toInt(doc["losses"]),
 	}
 }
 
@@ -210,7 +518,8 @@ func toInt(v interface{}) int {
 	}
 }
 
-// calculateScore calculates a relevance score for a user based on a search query.
+// calculateScore is the legacy Levenshtein-based user scorer. Kept for the
+// fallback path when Meilisearch is unavailable.
 func calculateScore(user User, query string) float64 {
 	var score float64
 	lowerQuery := strings.ToLower(strings.TrimSpace(query))

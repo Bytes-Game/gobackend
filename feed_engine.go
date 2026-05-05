@@ -3806,19 +3806,40 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// One DB round-trip per page; safely no-ops on plain shorts.
 	populateTopResponsesScored(composed)
 
-	// Strip debug info if not requested
+	// Interleave a "Suggested accounts" card into the feed. TikTok-style:
+	// one card injected at index 4 of page 1, and again every 8 items so
+	// long sessions see a fresh card per page without spam. Building the
+	// card costs ~3 DB round trips; we skip when the composed slice is too
+	// small to need an injection at all (cold-start safety net).
+	if len(composed) >= 5 {
+		composed = injectSuggestedAccountsCard(userID, page, composed)
+	}
+
+	// Strip debug info if not requested. Note: the entry includes every
+	// possible inner pointer, but Go's JSON encoder skips nil pointers when
+	// the struct field is omitempty — except map values are never omitted.
+	// To match HomeFeedItem's omitempty semantics we conditionally include
+	// the keys that are populated and leave the rest out.
 	responseItems := make([]interface{}, 0, len(composed))
 	for _, item := range composed {
 		if debug {
 			responseItems = append(responseItems, item)
-		} else {
-			responseItems = append(responseItems, map[string]interface{}{
-				"type":      item.Item.Type,
-				"challenge": item.Item.Challenge,
-				"post":      item.Item.Post,
-				"slotType":  item.SlotType,
-			})
+			continue
 		}
+		entry := map[string]interface{}{
+			"type":     item.Item.Type,
+			"slotType": item.SlotType,
+		}
+		if item.Item.Challenge != nil {
+			entry["challenge"] = item.Item.Challenge
+		}
+		if item.Item.Post != nil {
+			entry["post"] = item.Item.Post
+		}
+		if item.Item.SuggestedAccounts != nil {
+			entry["suggestedAccounts"] = item.Item.SuggestedAccounts
+		}
+		responseItems = append(responseItems, entry)
 	}
 
 	// Compute session hooks for client-side retention triggers
@@ -4081,6 +4102,39 @@ func populateTopResponses(items []HomeFeedItem) {
 			ch.TopResponseLeague = league
 		}
 	}
+}
+
+// injectSuggestedAccountsCard builds an "Accounts you might like" card for
+// this user and splices it into the composed slice at index 4 (TikTok's
+// canonical "after the user has had a chance to engage with content" slot).
+// On page 2+ we inject at index 6 so users who scroll deep keep getting fresh
+// suggestions without seeing the card in the same place every page. Returns
+// the composed slice unchanged if there are no suggestions to surface.
+func injectSuggestedAccountsCard(userID string, page int, composed []ScoredItem) []ScoredItem {
+	card := BuildSuggestedAccountsCard(userID, page)
+	if card == nil || len(card.Users) == 0 {
+		return composed
+	}
+	// Wrap the card in a ScoredItem so it travels through the same
+	// serialization path. Score field is unused for non-content items.
+	wrapped := ScoredItem{
+		Item: HomeFeedItem{
+			Type:              "suggestedAccounts",
+			SuggestedAccounts: card,
+		},
+	}
+	insertAt := 4
+	if page > 1 {
+		insertAt = 6
+	}
+	if insertAt > len(composed) {
+		insertAt = len(composed)
+	}
+	out := make([]ScoredItem, 0, len(composed)+1)
+	out = append(out, composed[:insertAt]...)
+	out = append(out, wrapped)
+	out = append(out, composed[insertAt:]...)
+	return out
 }
 
 // populateTopResponsesScored is the ScoredItem flavor used by handlers that
