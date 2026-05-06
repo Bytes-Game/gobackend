@@ -103,7 +103,9 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 	if userID != "" {
 		profile, _ = getOrComputeProfile(userID)
 		followingSet, fofSet = buildSocialSets(userID)
-		viewerLeague = getLeagueFromProfile(userID)
+		if u, ok := GetUserByID(userID); ok {
+			viewerLeague = u.League
+		}
 	}
 
 	resp := UnifiedSearchResponse{
@@ -163,7 +165,8 @@ func rankSearchAccounts(query, userID string, following, fof map[string]bool, vi
 		return []User{}
 	}
 
-	viewerLeagueIdx := leagueIndex(viewerLeague)
+	// leagueTier returns 0 for empty/unknown leagues; valid tiers are 1..5.
+	viewerLeagueIdx := leagueTier[viewerLeague]
 
 	type scored struct {
 		User  User
@@ -207,9 +210,9 @@ func rankSearchAccounts(query, userID string, following, fof map[string]bool, vi
 		// League proximity — peers feel more relevant than super-elite
 		// accounts. Same/±1 league bonus.
 		leagueBonus := 0.0
-		if viewerLeagueIdx >= 0 {
-			theirIdx := leagueIndex(hit.User.League)
-			if theirIdx >= 0 {
+		if viewerLeagueIdx > 0 {
+			theirIdx := leagueTier[hit.User.League]
+			if theirIdx > 0 {
 				diff := viewerLeagueIdx - theirIdx
 				if diff < 0 {
 					diff = -diff
