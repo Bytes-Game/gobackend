@@ -41,12 +41,19 @@ type candidateSource struct {
 // the 48h SQL trending which is daily-batch); it gets a meaningful slice
 // at the expense of pulling 5pp from each of recency / trending / collab.
 var defaultSourceWeights = map[string]float64{
-	"recency":         0.30,
-	"trending":        0.15,
+	"recency":          0.25,
+	"trending":         0.10,
 	"trendingRealtime": 0.15,
-	"follow":          0.15,
-	"collab":          0.10,
-	"embedding":       0.15,
+	"follow":           0.15,
+	"collab":           0.10,
+	"embedding":        0.15,
+	// searchAffinity uses the user's recent search history (captured by
+	// RecordSearchQuery) as a query against Meilisearch, then surfaces the
+	// best-matching live challenges as candidates. Closes the loop between
+	// "user explicitly asked for X" and "X shows up in their feed". Pulls
+	// 5pp from recency and 5pp from trending — those two bands have plenty
+	// of redundancy with the other sources, the search lane has none.
+	"searchAffinity": 0.10,
 }
 
 // multiSourceFetch runs all default sources in parallel and merges results,
@@ -150,6 +157,7 @@ func buildSourcesForCohort(cohort Cohort) []candidateSource {
 		{name: "follow", weight: weights["follow"], fetch: sourceFollowGraph},
 		{name: "collab", weight: weights["collab"], fetch: sourceCollaborative},
 		{name: "embedding", weight: weights["embedding"], fetch: sourceEmbeddingNeighbors},
+		{name: "searchAffinity", weight: weights["searchAffinity"], fetch: sourceSearchAffinity},
 	}
 }
 
@@ -194,6 +202,7 @@ func buildDefaultSources() []candidateSource {
 		{name: "follow", weight: defaultSourceWeights["follow"], fetch: sourceFollowGraph},
 		{name: "collab", weight: defaultSourceWeights["collab"], fetch: sourceCollaborative},
 		{name: "embedding", weight: defaultSourceWeights["embedding"], fetch: sourceEmbeddingNeighbors},
+		{name: "searchAffinity", weight: defaultSourceWeights["searchAffinity"], fetch: sourceSearchAffinity},
 	}
 }
 
@@ -455,3 +464,70 @@ func sourceEmbeddingNeighbors(userID string, limit int) []HomeFeedItem {
 // (e.g. pgvector). Keeps the build stable if callers are wired ahead of
 // a pluggable backend.
 var _ = fmt.Sprintf
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SOURCE 7: Search-affinity — Meilisearch-driven personalization signal.
+//
+// Closes the loop between explicit user intent (search queries they typed
+// into the Search tab) and the For You feed. Without this lane, a user who
+// searched "kickflip" yesterday only sees kickflip content if recency /
+// trending / follow-graph happen to surface it. This lane *guarantees* the
+// signal lands.
+//
+// Implementation:
+//   1. Read recent queries from the request-local negative-signal cache —
+//      already warmed by warmNegativeSignals at the top of SmartFeedHandler.
+//   2. For each of the top 2 most-recent queries, query Meilisearch's
+//      challenges index with the same multi-section pool size we use in the
+//      explicit search handler.
+//   3. Convert hits into HomeFeedItem and dedupe by challenge ID.
+//
+// Failure modes (all silent — this is one source of seven, never a hard
+// dependency):
+//   - Cache cold (no warm call): returns nil
+//   - No recent queries: returns nil
+//   - Meilisearch unconfigured: returns nil; the rest of the pipeline carries
+//   - DB row missing (challenge deleted between index write and request):
+//     skipped from results
+// ─────────────────────────────────────────────────────────────────────────────
+
+func sourceSearchAffinity(userID string, limit int) []HomeFeedItem {
+	if userID == "" || limit <= 0 {
+		return nil
+	}
+	ns := getNegativeSignals(userID)
+	if ns == nil || len(ns.recentQueries) == 0 {
+		return nil
+	}
+	// Take only the freshest 2 queries — older intent has decayed and
+	// produces stale candidates that compete poorly in the ranker.
+	queries := ns.recentQueries
+	if len(queries) > 2 {
+		queries = queries[:2]
+	}
+
+	// Per-query budget — half of the source's slot, rounded up so a single
+	// remaining query still pulls full pool size.
+	perQuery := (limit / len(queries)) + 1
+
+	seen := make(map[string]bool)
+	out := make([]HomeFeedItem, 0, limit)
+	for _, q := range queries {
+		if q == "" {
+			continue
+		}
+		hits := meiliSearchChallenges(q, perQuery)
+		for _, h := range hits {
+			if h.Ch.ID == "" || seen[h.Ch.ID] {
+				continue
+			}
+			seen[h.Ch.ID] = true
+			ch := h.Ch
+			out = append(out, HomeFeedItem{Type: "challenge", Challenge: &ch})
+			if len(out) >= limit {
+				return out
+			}
+		}
+	}
+	return out
+}

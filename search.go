@@ -36,10 +36,14 @@ import (
 // objective signals alone.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// SearchResponse is the public shape returned by /search. The legacy
+// UnifiedSearchResponse is the public shape returned by /search. The legacy
 // "challenges" + "users" keys are kept for backward compatibility with any
 // older client; new clients should consume "accounts" / "battles" / "shorts".
-type SearchResponse struct {
+//
+// (There's a separate `SearchResponse` in models.go used elsewhere for an
+// older user-only search response — kept distinct so we don't break callers
+// of that one.)
+type UnifiedSearchResponse struct {
 	Accounts   []User      `json:"accounts"`
 	Battles    []Challenge `json:"battles"`
 	Shorts     []Challenge `json:"shorts"`
@@ -102,7 +106,7 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 		viewerLeague = getLeagueFromProfile(userID)
 	}
 
-	resp := SearchResponse{
+	resp := UnifiedSearchResponse{
 		Accounts: []User{},
 		Battles:  []Challenge{},
 		Shorts:   []Challenge{},

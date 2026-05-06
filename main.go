@@ -226,6 +226,7 @@ func main() {
 	api.HandleFunc("/experiments/results", ExperimentResultsHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/users/similar", SimilarUsersHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/users/suggested", SuggestedUsersHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/suggestions/accepted", SuggestionAcceptedHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/watch", HandleWatchEvent).Methods("POST", "OPTIONS")
 	api.HandleFunc("/report", HandleReportEvent).Methods("POST", "OPTIONS")
 	api.HandleFunc("/admin/reseed", adminOnly(ReseedHandler)).Methods("POST", "OPTIONS")
