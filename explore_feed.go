@@ -236,7 +236,25 @@ func exploreScore(cs *ContentScore, ns *negativeSignals) (float64, map[string]fl
 	breakdown["popularity"] = popularity
 	breakdown["recency"] = recency
 
-	score := 0.4*quality + popularity + recency
+	// Battle vs short bias — same product reasoning as scoreForUser's
+	// battleBoost. Explore is even more vulnerable to the short flood
+	// because it has no follow-graph or collaborative lanes to pull battles
+	// in from. Magnitude here is half of For You's so explore stays
+	// recency-led overall, but battles still beat shorts at parity.
+	battleBoost := 0.0
+	if cs.ContentType == "challenge" {
+		if cs.ResponseCount > 0 {
+			battleBoost = 0.15
+			if cs.ResponseCount >= 5 {
+				battleBoost = 0.20
+			}
+		} else {
+			battleBoost = -0.05
+		}
+	}
+	breakdown["battleBoost"] = battleBoost
+
+	score := 0.4*quality + popularity + recency + battleBoost
 
 	// Negative signals — hard multipliers. Block on creator → 0 score; user
 	// reported the item → 0 score. Same as For You.

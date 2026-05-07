@@ -202,12 +202,15 @@ func loadHomeFeedItemByID(itemType, id string) (HomeFeedItem, bool) {
 	switch itemType {
 	case "challenge":
 		var ch Challenge
-		var creatorID, views, likes int
+		var creatorID, views, likes, respCount int
 		var createdAt time.Time
+		// Pull ResponseCount in the same row so realtime-trending battles
+		// arrive at the ranker tagged correctly (battleBoost depends on it).
 		err := db.QueryRow(`
 			SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 				c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
-				c.views, COALESCE(cl.likes, 0), c.created_at
+				c.views, COALESCE(cl.likes, 0), c.created_at,
+				(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id)
 			FROM challenges c
 			JOIN users u ON c.creator_id = u.id
 			LEFT JOIN (SELECT challenge_id, COUNT(*) AS likes FROM challenge_likes GROUP BY challenge_id) cl
@@ -215,7 +218,7 @@ func loadHomeFeedItemByID(itemType, id string) (HomeFeedItem, bool) {
 			WHERE c.id = $1`, id).Scan(
 			&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
 			&ch.VideoURL, &ch.ThumbnailURL, &ch.Prefix, &ch.Subject,
-			&ch.Visibility, &ch.Status, &views, &likes, &createdAt)
+			&ch.Visibility, &ch.Status, &views, &likes, &createdAt, &respCount)
 		if err != nil {
 			return HomeFeedItem{}, false
 		}
@@ -223,6 +226,7 @@ func loadHomeFeedItemByID(itemType, id string) (HomeFeedItem, bool) {
 		ch.Views = views
 		ch.Likes = likes
 		ch.CreatedAt = createdAt.Format(time.RFC3339)
+		ch.ResponseCount = respCount
 		return HomeFeedItem{Type: "challenge", Challenge: &ch}, true
 
 	case "post":

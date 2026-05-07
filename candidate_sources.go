@@ -249,10 +249,14 @@ func sourceTrending(userID string, limit int) []HomeFeedItem {
 // has any rows.
 func sourceTrendingWindowed(userID string, limit int, window string) []HomeFeedItem {
 	items := make([]HomeFeedItem, 0, limit)
+	// ResponseCount is fetched via correlated subquery so the ranker's
+	// battleBoost can correctly favor battles over shorts. Without this
+	// the field defaults to zero and trending battles look like shorts.
 	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
-			c.views, COALESCE(cl.likes, 0), c.created_at
+			c.views, COALESCE(cl.likes, 0), c.created_at,
+			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id)
 		FROM challenges c
 		JOIN users u ON c.creator_id = u.id
 		LEFT JOIN (SELECT challenge_id, COUNT(*) AS likes FROM challenge_likes GROUP BY challenge_id) cl
@@ -269,17 +273,18 @@ func sourceTrendingWindowed(userID string, limit int, window string) []HomeFeedI
 	defer rows.Close()
 	for rows.Next() {
 		var ch Challenge
-		var creatorID, views, likes int
+		var creatorID, views, likes, respCount int
 		var createdAt time.Time
 		if err := rows.Scan(&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
 			&ch.VideoURL, &ch.ThumbnailURL, &ch.Prefix, &ch.Subject,
-			&ch.Visibility, &ch.Status, &views, &likes, &createdAt); err != nil {
+			&ch.Visibility, &ch.Status, &views, &likes, &createdAt, &respCount); err != nil {
 			continue
 		}
 		ch.CreatorID = strconv.Itoa(creatorID)
 		ch.Views = views
 		ch.Likes = likes
 		ch.CreatedAt = createdAt.Format(time.RFC3339)
+		ch.ResponseCount = respCount
 		items = append(items, HomeFeedItem{Type: "challenge", Challenge: &ch})
 	}
 	return items
@@ -304,10 +309,13 @@ func sourceFollowGraph(userID string, limit int) []HomeFeedItem {
 
 func sourceFollowGraphWindowed(userID string, limit int, window string) []HomeFeedItem {
 	items := make([]HomeFeedItem, 0, limit)
+	// ResponseCount via correlated subquery — same reason as sourceTrendingWindowed:
+	// the ranker's battleBoost needs accurate response counts on every candidate.
 	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
-			c.views, COALESCE(cl.likes, 0), c.created_at
+			c.views, COALESCE(cl.likes, 0), c.created_at,
+			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id)
 		FROM challenges c
 		JOIN users u ON c.creator_id = u.id
 		JOIN follows f ON f.followed_id = c.creator_id
@@ -324,17 +332,18 @@ func sourceFollowGraphWindowed(userID string, limit int, window string) []HomeFe
 	defer rows.Close()
 	for rows.Next() {
 		var ch Challenge
-		var creatorID, views, likes int
+		var creatorID, views, likes, respCount int
 		var createdAt time.Time
 		if err := rows.Scan(&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
 			&ch.VideoURL, &ch.ThumbnailURL, &ch.Prefix, &ch.Subject,
-			&ch.Visibility, &ch.Status, &views, &likes, &createdAt); err != nil {
+			&ch.Visibility, &ch.Status, &views, &likes, &createdAt, &respCount); err != nil {
 			continue
 		}
 		ch.CreatorID = strconv.Itoa(creatorID)
 		ch.Views = views
 		ch.Likes = likes
 		ch.CreatedAt = createdAt.Format(time.RFC3339)
+		ch.ResponseCount = respCount
 		items = append(items, HomeFeedItem{Type: "challenge", Challenge: &ch})
 	}
 	return items
@@ -360,11 +369,13 @@ func sourceCollaborative(userID string, limit int) []HomeFeedItem {
 
 func sourceCollaborativeWindowed(userID string, limit int, window string) []HomeFeedItem {
 	items := make([]HomeFeedItem, 0, limit)
+	// ResponseCount via correlated subquery — same reason as the other sources.
 	rows, err := db.Query(`
 		SELECT DISTINCT ON (c.id)
 			c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
-			c.views, COALESCE(cl.likes, 0), c.created_at
+			c.views, COALESCE(cl.likes, 0), c.created_at,
+			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id)
 		FROM user_similarities us
 		JOIN feed_events fe ON fe.user_id = us.similar_user_id::text
 		JOIN challenges c ON c.id = fe.content_id::int AND fe.content_type = 'challenge'
@@ -384,17 +395,18 @@ func sourceCollaborativeWindowed(userID string, limit int, window string) []Home
 	defer rows.Close()
 	for rows.Next() {
 		var ch Challenge
-		var creatorID, views, likes int
+		var creatorID, views, likes, respCount int
 		var createdAt time.Time
 		if err := rows.Scan(&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
 			&ch.VideoURL, &ch.ThumbnailURL, &ch.Prefix, &ch.Subject,
-			&ch.Visibility, &ch.Status, &views, &likes, &createdAt); err != nil {
+			&ch.Visibility, &ch.Status, &views, &likes, &createdAt, &respCount); err != nil {
 			continue
 		}
 		ch.CreatorID = strconv.Itoa(creatorID)
 		ch.Views = views
 		ch.Likes = likes
 		ch.CreatedAt = createdAt.Format(time.RFC3339)
+		ch.ResponseCount = respCount
 		items = append(items, HomeFeedItem{Type: "challenge", Challenge: &ch})
 	}
 	return items

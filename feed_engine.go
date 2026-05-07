@@ -192,6 +192,13 @@ type ContentScore struct {
 	LikeCount          int               `json:"likeCount"`
 	CommentCount       int               `json:"commentCount"`
 	LastComputedAt     time.Time         `json:"lastComputedAt"`
+	// === Battle vs Short ===
+	// ResponseCount mirrors challenges.responseCount — > 0 means at least one
+	// person accepted the duel (this is a "battle"); 0 means a "short" that
+	// nobody responded to yet. The For You ranker uses this to bias the feed
+	// toward battles, which is the app's core engagement surface. Always 0
+	// for non-challenge content types.
+	ResponseCount      int               `json:"responseCount"`
 }
 
 // ScoredItem wraps a feed item with its computed score and assigned slot.
@@ -2040,7 +2047,7 @@ func getContentScore(contentID, contentType string) *ContentScore {
 		var subject, prefix, dbCategory, dbEnergy string
 		var emotionJSON []byte
 		var creatorID, league string
-		var followers, wins, losses int
+		var followers, wins, losses, respCount int
 		var createdAt time.Time
 		db.QueryRow(`
 			SELECT COALESCE(c.subject,''), COALESCE(c.prefix,''),
@@ -2048,12 +2055,14 @@ func getContentScore(contentID, contentType string) *ContentScore {
 				COALESCE(c.emotion_tags,'[]'::JSONB),
 				CAST(u.id AS TEXT), u.league,
 				(SELECT COUNT(*) FROM follows WHERE following_id = u.id),
-				u.wins, u.losses, c.created_at
+				u.wins, u.losses, c.created_at,
+				(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id)
 			FROM challenges c
 			JOIN users u ON c.creator_id = u.id
 			WHERE c.id = $1`, contentID).Scan(
 			&subject, &prefix, &dbCategory, &dbEnergy, &emotionJSON,
-			&creatorID, &league, &followers, &wins, &losses, &createdAt)
+			&creatorID, &league, &followers, &wins, &losses, &createdAt, &respCount)
+		cs.ResponseCount = respCount
 
 		if dbCategory != "" && dbCategory != "other" {
 			cs.Category = dbCategory
@@ -2336,6 +2345,37 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		}
 	}
 	breakdown["dwellIntentBoost"] = dwellBoost
+
+	// ── BATTLE BOOST (core product bias) ──
+	// devf is a head-to-head challenge app. A challenge with at least one
+	// response (a "battle") is the main event — two creators going at it,
+	// votable, watchable end-to-end. A challenge with zero responses is a
+	// "short": surfaced for content volume but not the primary surface we
+	// want users to associate with the app. Without an explicit battle bias,
+	// shorts dominate the feed because (a) every challenge starts as a short
+	// before it gets a response and (b) shorts vastly outnumber battles in
+	// any normal content library. This term makes the ranker prefer battles
+	// strongly — never a hard filter (we still need shorts to fill volume),
+	// but a thumb on the scale that's hard to outweigh.
+	battleBoost := 0.0
+	if cs.ContentType == "challenge" {
+		if cs.ResponseCount > 0 {
+			// Base battle bonus is large enough to lift a battle one or two
+			// rank steps over a comparable short. Logarithmic scaling on
+			// response count: a battle with 1 response gets +0.30; one with
+			// 5 responses gets ~+0.40; with 20+ ~+0.50 cap.
+			battleBoost = 0.30 + 0.10*math.Log1p(float64(cs.ResponseCount-1))/math.Log1p(20)
+			if battleBoost > 0.50 {
+				battleBoost = 0.50
+			}
+		} else {
+			// Light penalty on shorts so two equally-scored items always tie
+			// in favor of the battle. -0.10 is enough to break ties without
+			// pushing shorts off the feed entirely.
+			battleBoost = -0.10
+		}
+	}
+	breakdown["battleBoost"] = battleBoost
 
 	// ── SOCIAL-DRIVE WEIGHTING ──
 	// High SocialDrive users benefit more from social signal and tie-strength;
@@ -2772,7 +2812,7 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		hourBonus + emotionBonus + egoContextBonus + wellbeingBonus +
 		collabBonus + momentumBonus + variableReward + reentryBonus + streakBonus +
 		impressionPenalty + scrollBackBonus + completeBonus + loopBonus +
-		unmuteBonus + profileVisitBonus
+		unmuteBonus + profileVisitBonus + battleBoost
 
 	// ── LEARNING-TO-RANK DELTA (Tier 3.11) ──
 	// Small online-SGD residual that learns which score breakdowns correlate
@@ -4042,14 +4082,17 @@ func populateTopResponses(items []HomeFeedItem) {
 	if db == nil || len(items) == 0 {
 		return
 	}
-	// Collect challenge IDs that need an opponent.
+	// Collect every challenge ID — we used to skip when ResponseCount<=0,
+	// but candidate sources outside the recency lane don't populate that
+	// field, so genuine battles were silently treated as shorts. Letting
+	// the JOIN drive truth means a candidate from any lane (trending /
+	// follow / collab / embedding / searchAffinity) gets enriched if it
+	// actually has a response, and we self-correct ResponseCount from the
+	// row count below.
 	wantIDs := make([]int, 0, len(items))
 	idToIdx := make(map[int][]int) // challenge ID → indices in items (handles duplicates)
 	for i, it := range items {
 		if it.Type != "challenge" || it.Challenge == nil {
-			continue
-		}
-		if it.Challenge.ResponseCount <= 0 {
 			continue
 		}
 		cid, err := strconv.Atoi(it.Challenge.ID)
@@ -4071,10 +4114,15 @@ func populateTopResponses(items []HomeFeedItem) {
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 		args[i] = id
 	}
+	// Pull both the newest opponent (via DISTINCT ON) AND the total response
+	// count in one go. The total count makes ResponseCount self-healing for
+	// any item whose source SQL didn't populate it — battles from every lane
+	// land at the client tagged correctly.
 	query := `
 		SELECT DISTINCT ON (cr.challenge_id)
 			cr.challenge_id, cr.video_url, COALESCE(cr.thumbnail_url, ''),
-			ru.username, ru.league
+			ru.username, ru.league,
+			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = cr.challenge_id)
 		FROM challenge_responses cr
 		JOIN users ru ON cr.responder_id = ru.id
 		WHERE cr.challenge_id IN (` + strings.Join(placeholders, ",") + `)
@@ -4086,9 +4134,9 @@ func populateTopResponses(items []HomeFeedItem) {
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var cid int
+		var cid, totalCount int
 		var videoURL, thumbURL, username, league string
-		if err := rows.Scan(&cid, &videoURL, &thumbURL, &username, &league); err != nil {
+		if err := rows.Scan(&cid, &videoURL, &thumbURL, &username, &league, &totalCount); err != nil {
 			continue
 		}
 		for _, idx := range idToIdx[cid] {
@@ -4100,6 +4148,12 @@ func populateTopResponses(items []HomeFeedItem) {
 			ch.TopResponseThumbnailUrl = thumbURL
 			ch.TopResponseUsername = username
 			ch.TopResponseLeague = league
+			// Self-heal ResponseCount: if the candidate source didn't fetch
+			// it but the JOIN proves there's a response, surface the truth
+			// so the client renders the battle UI instead of a short.
+			if ch.ResponseCount < totalCount {
+				ch.ResponseCount = totalCount
+			}
 		}
 	}
 }
