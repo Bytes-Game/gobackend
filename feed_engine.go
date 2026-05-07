@@ -3428,15 +3428,27 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 	battleOffset := (offset * 7) / 10
 	shortOffset := offset - battleOffset
 
+	// Walk tiers from strictest to widest. Each kind is independent: we
+	// keep widening for battles even after shorts are full, and vice versa,
+	// so we don't end up with 1 battle + 9 shorts just because shorts were
+	// abundant in the strict window. The break condition is "both budgets
+	// met" — without that, the strict tier exiting early caused the cold-
+	// start feed to skew almost entirely to shorts in any test corpus where
+	// most battles happened to be older than the strict 14-day window.
+	//
+	// Re-fetching on each tier is safe: filters are monotonically inclusive
+	// (wider window + lower minViews/minLikes), so re-running with a wider
+	// tier returns a superset ordered by the same (views + likes*3) DESC
+	// scoring. We always keep the strongest results.
 	var battleItems, shortItems []HomeFeedItem
 	for _, tier := range tiers {
-		if len(battleItems) == 0 {
+		if len(battleItems) < battleLimit {
 			battleItems = coldStartChallengesTiered("battle", battleLimit, battleOffset, tier.window, tier.minViews, tier.minLikes)
 		}
-		if len(shortItems) == 0 {
+		if len(shortItems) < shortLimit {
 			shortItems = coldStartChallengesTiered("short", shortLimit, shortOffset, tier.window, tier.minViews, tier.minLikes)
 		}
-		if len(battleItems) > 0 && len(shortItems) > 0 {
+		if len(battleItems) >= battleLimit && len(shortItems) >= shortLimit {
 			break
 		}
 	}
