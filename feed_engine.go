@@ -475,9 +475,20 @@ func recordFeedEvent(event FeedEvent) error {
 		return nil
 	}
 
-	var metadataJSON []byte
+	// metadata MUST be a valid JSONB value — passing a nil []byte makes
+	// lib/pq encode it as SQL NULL, and the destination column doesn't
+	// accept NULL on this codepath (DEFAULT is only applied when the
+	// column is OMITTED from the INSERT, not when explicit NULL is sent).
+	// Without this guard every event that doesn't carry explicit metadata
+	// (which is the overwhelming majority — view, like, skip, complete
+	// from the Flutter client) silently fails the INSERT inside the
+	// recordFeedEvent goroutine, and the whole analytics pipeline ends up
+	// blind. Default to an empty JSON object so the row always lands.
+	metadataJSON := []byte("{}")
 	if len(event.Metadata) > 0 {
-		metadataJSON, _ = json.Marshal(event.Metadata)
+		if b, err := json.Marshal(event.Metadata); err == nil && len(b) > 0 {
+			metadataJSON = b
+		}
 	}
 
 	_, err := db.Exec(`
