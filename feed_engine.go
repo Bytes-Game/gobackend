@@ -247,7 +247,7 @@ const (
 	maxItemsPerCreator     = 3     // Diversity: max 3 items from same creator in one feed page
 	coldStartThreshold     = 15    // Users with <15 events are "cold start"
 	contentColdThreshold   = 5     // Content with <5 views is "cold start"
-	profileStalenessMin    = 60    // Recompute profile if older than 60 minutes
+	profileStalenessMin    = 5     // Recompute profile if older than 5 minutes — fast cohort transitions during onboarding (TikTok-style)
 	sessionTTLMin          = 30    // Redis session expires after 30 min inactivity
 
 	// === Resistance thresholds ===
@@ -561,6 +561,38 @@ func saveSessionState(state *SessionState) {
 		return
 	}
 	rdb.Set(rctx, key, data, time.Duration(sessionTTLMin)*time.Minute)
+}
+
+// applyRefreshSignal handles a pull-to-refresh from the client. Two effects:
+//
+//  1. Drop the per-user seen-content Redis ZSET so previously-shown items
+//     can resurface. Without this, the seen filter (12h TTL) keeps removing
+//     the same head-of-feed items from candidate pools, which is exactly
+//     what makes a refresh "feel" like nothing changed.
+//
+//  2. Reset the session's dedup counters — CategoriesSeen / CreatorsSeen /
+//     LastCategories / LastCreators. These accumulate as the user scrolls
+//     and the ranker uses them to penalize repeats. After a refresh the
+//     user's intent is "show me different stuff," so the prior fatigue
+//     signal would push us back toward the same not-yet-fatigued bucket
+//     and undermine the refresh.
+//
+// Other session signals (DopamineBudget, mood, strategy memory, lifecycle
+// counters) are intentionally preserved — those represent the user's
+// genuine state and should survive a refresh, just like in TikTok/IG.
+func applyRefreshSignal(userID, sessionID string) {
+	if rdb != nil && userID != "" {
+		_ = rdb.Del(rctx, seenKey(userID)).Err()
+	}
+	state := getSessionState(userID, sessionID)
+	if state == nil {
+		return
+	}
+	state.CategoriesSeen = make(map[string]int)
+	state.CreatorsSeen = make(map[string]int)
+	state.LastCategories = nil
+	state.LastCreators = nil
+	saveSessionState(state)
 }
 
 // updateSessionFromEvent processes a single event and updates the session state.
@@ -3654,6 +3686,13 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	pageStr := r.URL.Query().Get("page")
 	limitStr := r.URL.Query().Get("limit")
 	debug := r.URL.Query().Get("debug") == "true"
+	// refresh=true is the user's pull-to-refresh signal. Treat the same way
+	// TikTok/Instagram do: drop the seen-content filter, reset session dedup
+	// counters (so categoriesSeen/creatorsSeen fatigue doesn't drag from the
+	// pre-refresh feed), and let the candidate sources re-shuffle freely.
+	// Only honored on page=1 — refresh on a later page would either show a
+	// duplicate of page 1 or be confusing UI behavior.
+	refresh := r.URL.Query().Get("refresh") == "true"
 
 	if userID == "" {
 		http.Error(w, `{"error":"userId is required"}`, http.StatusBadRequest)
@@ -3670,6 +3709,15 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%s_%d", userID, time.Now().Unix()/1800)
+	}
+
+	// Apply the refresh signal up-front so every downstream stage sees a
+	// clean slate. We do NOT clear DopamineBudget, mood, or strategy memory
+	// — those are session-state useful even across a refresh; we only wipe
+	// the "what have I already shown / are we fatigued on this category"
+	// signals that would otherwise re-bias the new feed toward the old one.
+	if refresh && page == 1 {
+		applyRefreshSignal(userID, sessionID)
 	}
 
 	// Step 1: Load user profile
