@@ -3643,6 +3643,10 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	pageStr := r.URL.Query().Get("page")
 	limitStr := r.URL.Query().Get("limit")
 	debug := r.URL.Query().Get("debug") == "true"
+	// TEMP DEBUG: bypass the 60-min profile staleness cache so a freshly
+	// engaged user can be exercised end-to-end without waiting an hour.
+	// Will be removed after the bootstrap-fix verification lands.
+	forceRefresh := r.URL.Query().Get("forceRefresh") == "true"
 
 	if userID == "" {
 		http.Error(w, `{"error":"userId is required"}`, http.StatusBadRequest)
@@ -3662,7 +3666,13 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 1: Load user profile
-	profile, err := getOrComputeProfile(userID)
+	var profile *UserProfile
+	var err error
+	if forceRefresh {
+		profile, err = computeUserProfile(userID)
+	} else {
+		profile, err = getOrComputeProfile(userID)
+	}
 	if err != nil {
 		log.Printf("Profile error for %s: %v", userID, err)
 		profile = &UserProfile{
