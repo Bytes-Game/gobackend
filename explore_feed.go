@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
+	"math/rand"
 	"net/http"
 	"sort"
 	"strconv"
@@ -65,6 +67,19 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	if limit > 50 {
 		limit = 50
 	}
+	// Same TikTok-style refresh signal as SmartFeedHandler. Drops the
+	// seen-content filter and clears session dedup so the explore tab's
+	// pull-to-refresh visibly delivers fresh content. Anti-repeat top-3
+	// demotion + ±0.10 score jitter is applied below before sorting so
+	// the same item rarely lands at the head two refreshes in a row.
+	refresh := r.URL.Query().Get("refresh") == "true"
+	sessionID := r.URL.Query().Get("sessionId")
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("%s_%d", userID, time.Now().Unix()/1800)
+	}
+	if refresh && page == 1 {
+		applyRefreshSignal(userID, sessionID)
+	}
 
 	candidateLimit := limit * candidateMultiplier
 
@@ -123,6 +138,33 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// REFRESH JITTER + ANTI-REPEAT — same logic as SmartFeedHandler's
+	// page-1 refresh handling. Without this the user pulls-to-refresh on
+	// the search/explore tab and sees the same trending video at the top
+	// every time. ±0.10 jitter rotates near-ties; previous refresh's
+	// top-3 get -0.30/-0.20/-0.10 demotion so the head reliably changes.
+	if refresh && page == 1 {
+		prevTops := loadPrevRefreshTops(userID)
+		for i := range scored {
+			scored[i].Score += (rand.Float64() - 0.5) * 0.20
+			id := getItemID(scored[i].Item)
+			if id == "" {
+				continue
+			}
+			key := scored[i].Item.Type + ":" + id
+			if rank, ok := prevTops[key]; ok {
+				switch rank {
+				case 1:
+					scored[i].Score -= 0.30
+				case 2:
+					scored[i].Score -= 0.20
+				case 3:
+					scored[i].Score -= 0.10
+				}
+			}
+		}
+	}
+
 	sort.SliceStable(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
 
 	// Seen-filter. Same graceful fallback applies — if the user has scrolled
@@ -169,6 +211,11 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 			items = append(items, it.Item)
 		}
 		go markShownBatch(userID, items)
+		// Anti-repeat memory: remember the head of THIS refresh so the
+		// next refresh demotes them. Only on actual refresh requests.
+		if refresh && page == 1 {
+			go savePrevRefreshTops(userID, items)
+		}
 	}
 
 	// Attach opponent video data for any challenge with responseCount > 0
