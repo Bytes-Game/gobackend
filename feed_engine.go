@@ -3909,13 +3909,18 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			key := scored[i].Item.Type + ":" + id
 			if rank, ok := prevTops[key]; ok {
+				// Heavier demotion than the score-jitter range so a
+				// merely-above-average item that won last time loses to
+				// the next tier on the next refresh. With a small content
+				// corpus (where score gaps are tight) anything below
+				// -0.20 lets the same item keep winning by luck.
 				switch rank {
 				case 1:
-					scored[i].Score -= 0.15
+					scored[i].Score -= 0.30
 				case 2:
-					scored[i].Score -= 0.10
+					scored[i].Score -= 0.20
 				case 3:
-					scored[i].Score -= 0.05
+					scored[i].Score -= 0.10
 				}
 			}
 		}
