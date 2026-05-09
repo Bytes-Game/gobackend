@@ -3830,6 +3830,20 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		scored = append(scored, si)
 	}
 
+	// REFRESH JITTER — TikTok/IG-style "the head should look different on
+	// pull-to-refresh." Without this, two items whose computed scores are
+	// within ~0.05 of each other (which is most of the head, given how
+	// tightly bunched scores get) would deterministically sort the same way
+	// every refresh, defeating the user's expectation that refresh produces
+	// new content. Adding a uniform ±0.10 perturbation per item shuffles
+	// near-ties while still letting a clearly-better item win over a
+	// clearly-worse one. Only applied on a real refresh request, on page 1.
+	if refresh && page == 1 {
+		for i := range scored {
+			scored[i].Score += (rand.Float64() - 0.5) * 0.20
+		}
+	}
+
 	// Sort by score for initial ranking
 	sort.Slice(scored, func(i, j int) bool {
 		return scored[i].Score > scored[j].Score
