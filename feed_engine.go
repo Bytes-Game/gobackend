@@ -2047,7 +2047,7 @@ func getContentScore(contentID, contentType string) *ContentScore {
 		var subject, prefix, dbCategory, dbEnergy string
 		var emotionJSON []byte
 		var creatorID, league string
-		var followers, wins, losses, respCount int
+		var followers, wins, losses, respCount, chViews, chLikes int
 		var createdAt time.Time
 		db.QueryRow(`
 			SELECT COALESCE(c.subject,''), COALESCE(c.prefix,''),
@@ -2056,13 +2056,66 @@ func getContentScore(contentID, contentType string) *ContentScore {
 				CAST(u.id AS TEXT), u.league,
 				(SELECT COUNT(*) FROM follows WHERE following_id = u.id),
 				u.wins, u.losses, c.created_at,
-				(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id)
+				(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id),
+				COALESCE(c.views, 0),
+				(SELECT COUNT(*) FROM challenge_likes WHERE challenge_id = c.id)
 			FROM challenges c
 			JOIN users u ON c.creator_id = u.id
 			WHERE c.id = $1`, contentID).Scan(
 			&subject, &prefix, &dbCategory, &dbEnergy, &emotionJSON,
-			&creatorID, &league, &followers, &wins, &losses, &createdAt, &respCount)
+			&creatorID, &league, &followers, &wins, &losses, &createdAt, &respCount,
+			&chViews, &chLikes)
 		cs.ResponseCount = respCount
+
+		// ── Bootstrap counters from raw challenge counts when feed_events is sparse ──
+		//
+		// cs.ViewCount and cs.LikeCount above were filled from feed_events. In
+		// production those fill quickly, but for newly-seeded content (or any
+		// content created before the analytics pipeline went live) the
+		// challenge already has real views/likes recorded directly on the row.
+		// Without this fallback, coldContentBonus stays stuck at its maximum
+		// for every item in the corpus (everything looks "cold" because no
+		// feed_events view records exist), and the quality formula gates on
+		// totalInteractions>0 so it produces 0 for every challenge that
+		// hasn't been engaged with through the analytics layer yet.
+		//
+		// Take the max of the two so live traffic + analytics is preferred
+		// once it arrives, but we always have a meaningful baseline.
+		if chViews > cs.ViewCount {
+			cs.ViewCount = chViews
+		}
+		if chLikes > cs.LikeCount {
+			cs.LikeCount = chLikes
+		}
+
+		// If quality is still 0 but the challenge has real engagement, derive
+		// a small bootstrap quality from the like/view ratio. Capped at 0.4
+		// so a challenge with full feed_events analytics (which can hit ~0.7
+		// when shares + completions are high) still wins over the bootstrap.
+		// Min of 50 views to avoid spurious quality on never-seen content.
+		if cs.QualityScore == 0 && cs.ViewCount >= 50 {
+			likeRate := float64(cs.LikeCount) / float64(cs.ViewCount)
+			// Real apps see ~1-5% like rate; scale x20 so 5% maps to ~1.0
+			// then clamp at 0.4. Keeps the signal directional without
+			// overshadowing genuine analytics data.
+			bootstrap := math.Min(0.4, likeRate*20.0)
+			if bootstrap > 0 {
+				cs.QualityScore = bootstrap
+			}
+		}
+
+		// Synthetic trending fallback: when there's no recent feed_events
+		// engagement, use raw recent view velocity as a proxy. Items created
+		// in the last 48h with >100 views get a small trending lift; the cap
+		// keeps real feed_events-driven trending dominant once available.
+		if cs.TrendingScore == 0 && cs.ViewCount >= 100 {
+			ageHours := time.Since(createdAt).Hours()
+			if ageHours <= 48 && ageHours > 0 {
+				viewsPerHour := float64(cs.ViewCount) / ageHours
+				// 10 views/hour ≈ noteworthy for a small platform; cap at 0.3
+				cs.TrendingScore = math.Min(0.3, viewsPerHour/30.0)
+			}
+		}
 
 		if dbCategory != "" && dbCategory != "other" {
 			cs.Category = dbCategory
