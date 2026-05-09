@@ -595,6 +595,63 @@ func applyRefreshSignal(userID, sessionID string) {
 	saveSessionState(state)
 }
 
+// recentRefreshTopKey is the Redis key holding the IDs that landed at the
+// head of this user's last refreshed feed. We use it to penalize those
+// same items on the next refresh so the top item is almost guaranteed to
+// be different — the missing piece between "scores rotate within near-ties"
+// and "the visible video on screen actually changes when I pull-to-refresh."
+const recentRefreshTopKeyPrefix = "refresh_top:"
+const recentRefreshTopTTL = 10 * time.Minute
+const recentRefreshTopCount = 3 // remember top 3 so #1 AND #2 are demoted
+
+func recentRefreshTopKey(userID string) string {
+	return recentRefreshTopKeyPrefix + userID
+}
+
+// loadPrevRefreshTops returns the keys (contentType:contentID) that were at
+// the head of the previous refresh. Returns empty when nothing recorded.
+func loadPrevRefreshTops(userID string) map[string]int {
+	out := make(map[string]int)
+	if rdb == nil || userID == "" {
+		return out
+	}
+	vals, err := rdb.LRange(rctx, recentRefreshTopKey(userID), 0, -1).Result()
+	if err != nil {
+		return out
+	}
+	for i, v := range vals {
+		if v != "" {
+			out[v] = i + 1 // rank: 1 = was #1 last time
+		}
+	}
+	return out
+}
+
+// savePrevRefreshTops records the head of the just-served feed so the NEXT
+// refresh can demote them. Only call when the request was a refresh.
+func savePrevRefreshTops(userID string, items []HomeFeedItem) {
+	if rdb == nil || userID == "" || len(items) == 0 {
+		return
+	}
+	key := recentRefreshTopKey(userID)
+	pipe := rdb.Pipeline()
+	pipe.Del(rctx, key)
+	limit := recentRefreshTopCount
+	if limit > len(items) {
+		limit = len(items)
+	}
+	for i := 0; i < limit; i++ {
+		id := getItemID(items[i])
+		if id == "" {
+			continue
+		}
+		member := items[i].Type + ":" + id
+		pipe.RPush(rctx, key, member)
+	}
+	pipe.Expire(rctx, key, recentRefreshTopTTL)
+	_, _ = pipe.Exec(rctx)
+}
+
 // updateSessionFromEvent processes a single event and updates the session state.
 // This is where the psychology happens in real-time:
 // - Dopamine depletes with each item
@@ -3830,17 +3887,37 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		scored = append(scored, si)
 	}
 
-	// REFRESH JITTER — TikTok/IG-style "the head should look different on
-	// pull-to-refresh." Without this, two items whose computed scores are
-	// within ~0.05 of each other (which is most of the head, given how
-	// tightly bunched scores get) would deterministically sort the same way
-	// every refresh, defeating the user's expectation that refresh produces
-	// new content. Adding a uniform ±0.10 perturbation per item shuffles
-	// near-ties while still letting a clearly-better item win over a
-	// clearly-worse one. Only applied on a real refresh request, on page 1.
+	// REFRESH JITTER + ANTI-REPEAT — TikTok/IG-style "the head should look
+	// different on pull-to-refresh." Two effects when refresh=true on page 1:
+	//
+	//   * Uniform ±0.10 perturbation on every score so near-ties (most of
+	//     the head, given how tightly bunched scores get) reorder visibly
+	//     while a clearly-better item still beats a clearly-worse one.
+	//
+	//   * Demotion of the items that landed at the head of the previous
+	//     refresh: top1 -0.15, top2 -0.10, top3 -0.05. Big enough to
+	//     guarantee a different #1 most of the time, small enough that an
+	//     item that's dramatically better than every other candidate can
+	//     still keep its top spot if it actually deserves it.
 	if refresh && page == 1 {
+		prevTops := loadPrevRefreshTops(userID)
 		for i := range scored {
 			scored[i].Score += (rand.Float64() - 0.5) * 0.20
+			id := getItemID(scored[i].Item)
+			if id == "" {
+				continue
+			}
+			key := scored[i].Item.Type + ":" + id
+			if rank, ok := prevTops[key]; ok {
+				switch rank {
+				case 1:
+					scored[i].Score -= 0.15
+				case 2:
+					scored[i].Score -= 0.10
+				case 3:
+					scored[i].Score -= 0.05
+				}
+			}
 		}
 	}
 
@@ -3921,6 +3998,12 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 			items = append(items, it.Item)
 		}
 		go markShownBatch(userID, items)
+		// Refresh anti-repeat memory: remember the head of THIS refresh so
+		// the next refresh can demote them and surface different content
+		// at the top. Only saved on actual refresh requests.
+		if refresh && page == 1 {
+			go savePrevRefreshTops(userID, items)
+		}
 		// LTR stash with 1-based position so IPW can down-weight top-slot bias.
 		// Also stash the creator ID + source for per-creator residual
 		// calibration AND per-cohort source-blending reward at terminal-event
