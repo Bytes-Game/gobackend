@@ -323,6 +323,12 @@ func runMigrations() {
 	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN custom_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE posts ADD COLUMN custom_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 
+	-- Multi-bitrate video variants. Maps quality label → CDN URL.
+	-- video_url stays as the canonical/default URL so legacy readers keep
+	-- working; video_variants is the new path for adaptive playback.
+	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN video_variants JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN video_variants JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+
 	-- Extended personality dimensions on user_profiles
 	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN attention_span REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN binge_intensity REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
@@ -1056,11 +1062,19 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 	if len(payload.EmotionTags) == 0 {
 		emotionJSON = []byte("[]")
 	}
+	// Always write a non-nil JSONB blob — lib/pq's default nil-byte → SQL NULL
+	// translation collides with the column's JSONB type and the row gets
+	// rejected. Empty map serializes to {} which the JSONB column accepts and
+	// downstream readers treat as "no variants encoded yet".
+	variantsJSON, _ := json.Marshal(payload.VideoVariants)
+	if len(payload.VideoVariants) == 0 {
+		variantsJSON = []byte("{}")
+	}
 
 	err = db.QueryRow(
-		`INSERT INTO challenges (creator_id, video_url, thumbnail_url, prefix, subject, visibility, category, emotion_tags, energy_level)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, created_at`,
-		creatorID, payload.VideoURL, payload.ThumbnailURL, payload.Prefix, payload.Subject, payload.Visibility,
+		`INSERT INTO challenges (creator_id, video_url, video_variants, thumbnail_url, prefix, subject, visibility, category, emotion_tags, energy_level)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, created_at`,
+		creatorID, payload.VideoURL, variantsJSON, payload.ThumbnailURL, payload.Prefix, payload.Subject, payload.Visibility,
 		category, emotionJSON, energyLevel,
 	).Scan(&id, &createdAt)
 	if err != nil {
@@ -1220,6 +1234,7 @@ func GetChallengeResponses(challengeID string) []ChallengeResponse {
 	rows, err := db.Query(
 		`SELECT cr.id, cr.challenge_id, cr.responder_id, u.username, u.league,
 				COALESCE(cr.video_url, '') AS video_url,
+				COALESCE(cr.video_variants, '{}'::jsonb),
 				COALESCE(cr.thumbnail_url, '') AS thumbnail_url,
 				cr.views,
 				COALESCE(lc.cnt, 0) AS likes,
@@ -1246,11 +1261,16 @@ func GetChallengeResponses(challengeID string) []ChallengeResponse {
 		var relevance float64
 		var isHidden bool
 		var username, league, videoURL, thumbURL, caption string
+		var variantsRaw []byte
 		var createdAt time.Time
 		if rows.Scan(&id, &chalID, &respID, &username, &league,
-			&videoURL, &thumbURL, &views, &likes,
+			&videoURL, &variantsRaw, &thumbURL, &views, &likes,
 			&durationMs, &caption, &relevance, &offTopicFlags, &isHidden,
 			&createdAt) == nil {
+			var variants VideoVariants
+			if len(variantsRaw) > 0 {
+				_ = json.Unmarshal(variantsRaw, &variants)
+			}
 			result = append(result, ChallengeResponse{
 				ID:                strconv.Itoa(id),
 				ChallengeID:       strconv.Itoa(chalID),
@@ -1258,6 +1278,7 @@ func GetChallengeResponses(challengeID string) []ChallengeResponse {
 				ResponderUsername: username,
 				ResponderLeague:   league,
 				VideoURL:          videoURL,
+				VideoVariants:     variants,
 				ThumbnailURL:      thumbURL,
 				Views:             views,
 				Likes:             likes,
@@ -1288,13 +1309,23 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 	challenge, _ := GetChallengeByID(payload.ChallengeID)
 	relevance := computeRelevanceScore(challenge, payload.Caption)
 
+	// Marshal variants to JSONB. Default to '{}' (not nil) so lib/pq sends
+	// a real empty JSON object instead of NULL — keeps the COALESCE in
+	// populateTopResponses' SELECT and any other reader simple.
+	variantsJSON := []byte("{}")
+	if len(payload.VideoVariants) > 0 {
+		if buf, err := json.Marshal(payload.VideoVariants); err == nil {
+			variantsJSON = buf
+		}
+	}
+
 	var id int
 	var createdAt time.Time
 	err := db.QueryRow(
 		`INSERT INTO challenge_responses
-			(challenge_id, responder_id, video_url, thumbnail_url, duration_ms, caption, relevance_score)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, created_at`,
-		cid, rid, payload.VideoURL, payload.ThumbnailURL,
+			(challenge_id, responder_id, video_url, video_variants, thumbnail_url, duration_ms, caption, relevance_score)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, created_at`,
+		cid, rid, payload.VideoURL, variantsJSON, payload.ThumbnailURL,
 		payload.DurationMs, payload.Caption, relevance,
 	).Scan(&id, &createdAt)
 	if err != nil {
@@ -1313,6 +1344,7 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 		ResponderUsername: responder.Username,
 		ResponderLeague:   responder.League,
 		VideoURL:          payload.VideoURL,
+		VideoVariants:     payload.VideoVariants,
 		ThumbnailURL:      payload.ThumbnailURL,
 		DurationMs:        payload.DurationMs,
 		Caption:           payload.Caption,

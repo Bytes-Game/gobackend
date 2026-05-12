@@ -201,6 +201,11 @@ func main() {
 	// /like, /comments) — the home reels feed now serves challenges only
 	// (battles + unaccepted-as-shorts) via /feed/smart, and per-challenge
 	// engagement uses /challenges/like + /challenges/{id}/comments.
+	// Direct-to-R2 upload presigning. Mints AWS SigV4 PUT URLs for one or
+	// more variants (480p/720p/1080p video + thumbnail) so the mobile
+	// client uploads bytes directly to object storage without ever
+	// streaming them through Render.
+	api.HandleFunc("/media/presign", PresignMediaUploadHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges", CreateChallengeHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/arena", GetArenaChallengesHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/friends", GetFriendsChallengesHandler).Methods("GET", "OPTIONS")

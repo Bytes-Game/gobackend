@@ -135,8 +135,19 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		// Enrich battles with opponent (top-response) fields so the client
+		// can render the battle-indicator pill the moment the user taps a
+		// search result and lands inside the fullscreen reels viewer. Shorts
+		// have no responses by definition, so we only enrich battles. Same
+		// path the SmartFeed and Explore handlers use — keeps the JSON shape
+		// consistent across every surface that returns a Challenge.
+		if len(resp.Battles) > 0 {
+			populateTopResponsesChallenges(resp.Battles)
+		}
 		// Also surface the merged list under the legacy "challenges" key so
 		// old clients keep working without a server-side breaking change.
+		// Built AFTER enrichment so the legacy slice carries opponent fields
+		// too; otherwise old paths would silently lose the battle UI.
 		merged := make([]Challenge, 0, len(resp.Battles)+len(resp.Shorts))
 		merged = append(merged, resp.Battles...)
 		merged = append(merged, resp.Shorts...)

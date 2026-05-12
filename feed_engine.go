@@ -4344,9 +4344,15 @@ func populateTopResponses(items []HomeFeedItem) {
 	// count in one go. The total count makes ResponseCount self-healing for
 	// any item whose source SQL didn't populate it — battles from every lane
 	// land at the client tagged correctly.
+	// COALESCE(cr.video_variants, '{}'::jsonb) keeps Scan happy on rows
+	// that pre-date the multi-bitrate column (any older challenge_response
+	// row has NULL there). We unmarshal into a fresh VideoVariants per
+	// row so empty maps stay empty rather than carrying state between
+	// iterations of the loop.
 	query := `
 		SELECT DISTINCT ON (cr.challenge_id)
 			cr.challenge_id, cr.video_url, COALESCE(cr.thumbnail_url, ''),
+			COALESCE(cr.video_variants, '{}'::jsonb),
 			ru.username, ru.league,
 			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = cr.challenge_id)
 		FROM challenge_responses cr
@@ -4362,8 +4368,19 @@ func populateTopResponses(items []HomeFeedItem) {
 	for rows.Next() {
 		var cid, totalCount int
 		var videoURL, thumbURL, username, league string
-		if err := rows.Scan(&cid, &videoURL, &thumbURL, &username, &league, &totalCount); err != nil {
+		var variantsRaw []byte
+		if err := rows.Scan(&cid, &videoURL, &thumbURL, &variantsRaw, &username, &league, &totalCount); err != nil {
 			continue
+		}
+		// Decode variants leniently — a malformed payload should NOT
+		// drop the whole row, the client falls back to TopResponseVideoUrl
+		// when the variants map is empty.
+		var variants VideoVariants
+		if len(variantsRaw) > 0 {
+			if err := json.Unmarshal(variantsRaw, &variants); err != nil {
+				log.Printf("populateTopResponses: variants decode failed for cid=%d: %v", cid, err)
+				variants = nil
+			}
 		}
 		for _, idx := range idToIdx[cid] {
 			ch := items[idx].Challenge
@@ -4374,6 +4391,7 @@ func populateTopResponses(items []HomeFeedItem) {
 			ch.TopResponseThumbnailUrl = thumbURL
 			ch.TopResponseUsername = username
 			ch.TopResponseLeague = league
+			ch.TopResponseVideoVariants = variants
 			// Self-heal ResponseCount: if the candidate source didn't fetch
 			// it but the JOIN proves there's a response, surface the truth
 			// so the client renders the battle UI instead of a short.
@@ -4432,6 +4450,34 @@ func populateTopResponsesScored(items []ScoredItem) {
 	// plain[i].Challenge points at the same struct as items[i].Item.Challenge,
 	// so the in-place mutation above is already visible to the caller — no
 	// copy-back needed. Listed explicitly to make that intent obvious.
+}
+
+// populateTopResponsesChallenges is the []Challenge flavor used by handlers
+// that return raw challenge slices (e.g. /search). Wraps each element in a
+// throwaway HomeFeedItem whose Challenge pointer aims at the slice element,
+// so the mutations populateTopResponses performs land directly in the
+// caller's slice without a copy-back step.
+//
+// This exists so /search results render the battle indicator on the seed
+// video when the user taps a challenge thumbnail and lands inside the
+// fullscreen reels viewer — the viewer reads opponent fields off the
+// ChallengeModel passed in as the seed, and without this enrichment the
+// seed always looked like a plain short.
+func populateTopResponsesChallenges(challenges []Challenge) {
+	if len(challenges) == 0 {
+		return
+	}
+	plain := make([]HomeFeedItem, len(challenges))
+	for i := range challenges {
+		plain[i] = HomeFeedItem{
+			Type:      "challenge",
+			Challenge: &challenges[i],
+		}
+	}
+	populateTopResponses(plain)
+	// &challenges[i] is a stable address into the slice's backing array, so
+	// populateTopResponses' writes through plain[i].Challenge land in the
+	// caller's slice. Same pattern as populateTopResponsesScored above.
 }
 
 func buildSocialSets(userID string) (following map[string]bool, fof map[string]bool) {

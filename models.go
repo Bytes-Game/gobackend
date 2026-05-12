@@ -131,14 +131,25 @@ type CommentPayload struct {
 // challenge system
 // -------------------------------------------------------------------------------------
 
+// VideoVariants maps a quality label ("480p","720p","1080p") to its
+// fully-qualified CDN URL. Stored as JSONB in Postgres and serialized as a
+// plain JSON object on the wire so the client can pick the right quality
+// for the user's current network speed without an extra round-trip.
+//
+// Empty / nil means "no variants encoded yet" — fall back to VideoURL,
+// which is the canonical/default-quality URL kept for backward compat with
+// every reader that predates the multi-bitrate feature.
+type VideoVariants map[string]string
+
 // challenge represents an open challenge created by a user.
 type Challenge struct {
-	ID              string   `json:"id"`
-	CreatorID       string   `json:"creatorId"`
-	CreatorUsername string   `json:"creatorUsername"`
-	CreatorLeague   string   `json:"creatorLeague"`
-	VideoURL        string   `json:"videoUrl"`
-	ThumbnailURL    string   `json:"thumbnailUrl,omitempty"`
+	ID              string         `json:"id"`
+	CreatorID       string         `json:"creatorId"`
+	CreatorUsername string         `json:"creatorUsername"`
+	CreatorLeague   string         `json:"creatorLeague"`
+	VideoURL        string         `json:"videoUrl"`
+	VideoVariants   VideoVariants  `json:"videoVariants,omitempty"`
+	ThumbnailURL    string         `json:"thumbnailUrl,omitempty"`
 	Prefix          string   `json:"prefix"`              // "Who is better", "Which is best", etc.
 	Subject         string   `json:"subject"`             // "Dancer", "Painting", etc.
 	Visibility      string   `json:"visibility"`          // "arena" or "friends"
@@ -163,6 +174,12 @@ type Challenge struct {
 	TopResponseThumbnailUrl string `json:"topResponseThumbnailUrl,omitempty"`
 	TopResponseUsername     string `json:"topResponseUsername,omitempty"`
 	TopResponseLeague       string `json:"topResponseLeague,omitempty"`
+	// Adaptive-bitrate variants for the top response, mirroring the
+	// primary VideoVariants map. Empty when the response was uploaded
+	// before the multi-bitrate feature shipped — the client should
+	// fall back to TopResponseVideoUrl in that case (which is already
+	// the canonical/720p URL by convention).
+	TopResponseVideoVariants VideoVariants `json:"topResponseVideoVariants,omitempty"`
 }
 
 // HomeFeedItem wraps a post, challenge, or suggested-accounts card for the
@@ -218,13 +235,14 @@ type SuggestedAccountsCard struct {
 
 // ChallengeResponse represents someone accepting and responding to a challenge.
 type ChallengeResponse struct {
-	ID                string  `json:"id"`
-	ChallengeID       string  `json:"challengeId"`
-	ResponderID       string  `json:"responderld"`
-	ResponderUsername string  `json:"responderUsername"`
-	ResponderLeague   string  `json:"responderLeague"`
-	VideoURL          string  `json:"videoUrl"`
-	ThumbnailURL      string  `json:"thumbnailUrl,omitempty"`
+	ID                string         `json:"id"`
+	ChallengeID       string         `json:"challengeId"`
+	ResponderID       string         `json:"responderld"`
+	ResponderUsername string         `json:"responderUsername"`
+	ResponderLeague   string         `json:"responderLeague"`
+	VideoURL          string         `json:"videoUrl"`
+	VideoVariants     VideoVariants  `json:"videoVariants,omitempty"`
+	ThumbnailURL      string         `json:"thumbnailUrl,omitempty"`
 	Likes             int     `json:"likes"`
 	Views             int     `json:"views"`
 	CreatedAt         string  `json:"createdAt"`
@@ -238,16 +256,17 @@ type ChallengeResponse struct {
 
 // CreateChallengePayload is the request body for creating a challenge.
 type CreateChallengePayload struct {
-	CreatorID    string   `json:"creatorId"`
-	VideoURL     string   `json:"videoUrl"`
-	ThumbnailURL string   `json:"thumbnailUrl"`
-	Prefix       string   `json:"prefix"`
-	Subject      string   `json:"subject"`
-	Visibility   string   `json:"visibility"`   // "arena" or "friends"
-	VisibleTo    []string `json:"visibleTo"`    // friend IDs (empty = all)
-	Category     string   `json:"category"`     // "comedy","motivation","sports","dance",etc.
-	EmotionTags  []string `json:"emotionTags"`  // ["happy","intense","inspiring"]
-	EnergyLevel  string   `json:"energyLevel"`  // "low","medium","high"
+	CreatorID     string        `json:"creatorId"`
+	VideoURL      string        `json:"videoUrl"`
+	VideoVariants VideoVariants `json:"videoVariants,omitempty"` // optional multi-bitrate variants from device-side transcode
+	ThumbnailURL  string        `json:"thumbnailUrl"`
+	Prefix        string        `json:"prefix"`
+	Subject       string        `json:"subject"`
+	Visibility    string        `json:"visibility"`   // "arena" or "friends"
+	VisibleTo     []string      `json:"visibleTo"`    // friend IDs (empty = all)
+	Category      string        `json:"category"`     // "comedy","motivation","sports","dance",etc.
+	EmotionTags   []string      `json:"emotionTags"`  // ["happy","intense","inspiring"]
+	EnergyLevel   string        `json:"energyLevel"`  // "low","medium","high"
 }
 
 // ContentCategory defines the available categories for content.
@@ -339,10 +358,11 @@ var CaptionKeywordTags = map[string][]string{
 
 // AcceptChallengePayload is sent when a user accepts a challenge.
 type AcceptChallengePayload struct {
-	ChallengeID  string `json:"challengeId"`
-	ResponderID  string `json:"responderId"`
-	VideoURL     string `json:"videoUrl"`
-	ThumbnailURL string `json:"thumbnailUrl"`
+	ChallengeID   string        `json:"challengeId"`
+	ResponderID   string        `json:"responderId"`
+	VideoURL      string        `json:"videoUrl"`
+	VideoVariants VideoVariants `json:"videoVariants,omitempty"` // optional multi-bitrate variants from device-side transcode
+	ThumbnailURL  string        `json:"thumbnailUrl"`
 	// Tier-1 validation fields — required so the server can enforce length limits
 	// and store metadata for downstream relevance scoring.
 	DurationMs   int    `json:"durationMs"`
