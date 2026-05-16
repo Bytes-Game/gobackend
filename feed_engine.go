@@ -4841,7 +4841,23 @@ func getItemCreatedAt(item HomeFeedItem) time.Time {
 }
 
 // getContentEmotions returns the emotion tags for a piece of content.
+// Results are cached in Redis (6h TTL) — this function is called once per
+// candidate during feed ranking so the DB round-trip cost adds up fast.
 func getContentEmotions(contentID, contentType string) []string {
+	if contentID == "" {
+		return nil
+	}
+
+	cacheKey := contentEmotionRedisKey + contentType + ":" + contentID
+	if rdb != nil {
+		if s, err := rdb.Get(rctx, cacheKey).Result(); err == nil && s != "" {
+			var cached []string
+			if json.Unmarshal([]byte(s), &cached) == nil {
+				return cached
+			}
+		}
+	}
+
 	var emotionJSON []byte
 	if contentType == "challenge" {
 		db.QueryRow(`SELECT COALESCE(emotion_tags, '[]'::JSONB) FROM challenges WHERE id = $1`, contentID).Scan(&emotionJSON)
@@ -4850,6 +4866,12 @@ func getContentEmotions(contentID, contentType string) []string {
 	}
 	var emotions []string
 	json.Unmarshal(emotionJSON, &emotions)
+
+	if rdb != nil {
+		if js, err := json.Marshal(emotions); err == nil {
+			_ = rdb.Set(rctx, cacheKey, js, contentEmotionTTL).Err()
+		}
+	}
 	return emotions
 }
 

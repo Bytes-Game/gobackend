@@ -39,6 +39,13 @@ const (
 	// enough that any rare metadata edits propagate quickly.
 	contentEmbedRedisKey = "embed:content:"
 	contentEmbedTTL      = 6 * time.Hour
+
+	// Emotion tag cache. getContentEmotions is called O(candidates) times per
+	// feed request; caching avoids a DB round-trip per candidate.
+	// TTL matches the embedding cache — emotion tags rarely change and a stale
+	// tag for a few hours has negligible ranking impact.
+	contentEmotionRedisKey = "emotions:"
+	contentEmotionTTL      = 6 * time.Hour
 )
 
 // featureToken hashes a feature string into a specific slot in the vector.
