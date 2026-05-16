@@ -206,6 +206,15 @@ func main() {
 	// client uploads bytes directly to object storage without ever
 	// streaming them through Render.
 	api.HandleFunc("/media/presign", PresignMediaUploadHandler).Methods("POST", "OPTIONS")
+	// HLS background worker endpoints. /next-pending claims one
+	// transcode job (atomic SKIP LOCKED), /complete records the
+	// finished manifest URL, /fail returns the row to the queue so
+	// another worker can retry. All three require the X-Worker-Token
+	// header — workers authenticate via HLS_WORKER_TOKEN env var. See
+	// hls_worker_api.go for the contract details.
+	api.HandleFunc("/internal/hls/next-pending", workerAuthed(HLSNextPendingHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/internal/hls/complete", workerAuthed(HLSCompleteHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/internal/hls/fail", workerAuthed(HLSFailHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges", CreateChallengeHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/arena", GetArenaChallengesHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/friends", GetFriendsChallengesHandler).Methods("GET", "OPTIONS")

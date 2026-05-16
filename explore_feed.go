@@ -221,6 +221,8 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// Attach opponent video data for any challenge with responseCount > 0
 	// before serializing — keeps swipe-left UX consistent with For You.
 	populateTopResponsesScored(composed)
+	populateChallengeCommentCountsScored(composed)
+	populateHLSManifestURLsScored(composed)
 
 	// Response shape matches SmartFeedHandler so the Flutter widget reuses
 	// the same parsing path.

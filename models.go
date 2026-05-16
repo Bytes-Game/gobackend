@@ -149,6 +149,15 @@ type Challenge struct {
 	CreatorLeague   string         `json:"creatorLeague"`
 	VideoURL        string         `json:"videoUrl"`
 	VideoVariants   VideoVariants  `json:"videoVariants,omitempty"`
+	// HLS master manifest URL (.m3u8). Set by the background transcode
+	// worker once it has produced the segmented bitrate ladder for this
+	// challenge. When non-empty, the client should prefer this over
+	// VideoURL/VideoVariants — HLS gives sub-500ms time-to-first frame
+	// and mid-stream adaptive bitrate. Empty means the worker hasn't
+	// finished yet (or isn't deployed in this env) — clients fall back
+	// to the per-bitrate MP4 path automatically. omitempty keeps the
+	// payload tight for the (eventually rare) legacy case.
+	HLSManifestURL  string         `json:"hlsManifestUrl,omitempty"`
 	ThumbnailURL    string         `json:"thumbnailUrl,omitempty"`
 	Prefix          string   `json:"prefix"`              // "Who is better", "Which is best", etc.
 	Subject         string   `json:"subject"`             // "Dancer", "Painting", etc.
@@ -157,6 +166,11 @@ type Challenge struct {
 	Status          string   `json:"status"`              // "open", "active", "completed", "expired"
 	Likes           int      `json:"likes"`
 	Views           int      `json:"views"`
+	// Live count of comments on this challenge. Computed from
+	// challenge_comments at the feed-handler boundary so the reels right-rail
+	// can render the same digit the comment sheet shows. Omitempty keeps the
+	// payload tight for legacy callers that haven't started reading it.
+	CommentCount    int      `json:"commentCount,omitempty"`
 	CreatedAt       string   `json:"createdAt"`
 	ExpiresAt       string   `json:"expiresAt"`
 	ResponseCount   int      `json:"responseCount"`
@@ -168,8 +182,14 @@ type Challenge struct {
 	// Top response fields — populated by populateTopResponses() at the
 	// feed-handler boundary for any challenge with responseCount > 0. Lets
 	// the client render the opponent's video on a left-swipe without an
-	// extra round-trip. All four are omitempty so plain shorts (no
-	// responses) don't carry empty strings in the JSON payload.
+	// extra round-trip. All omitempty so plain shorts (no responses) don't
+	// carry empty strings in the JSON payload.
+	//
+	// TopResponseID is needed by the client's vote button — the vote
+	// endpoint takes (challengeId, responseId, voterId) and without the ID
+	// the home reels can't cast a vote without first fetching the
+	// challenge detail. Surfacing it inline keeps the vote tap one-shot.
+	TopResponseID           string `json:"topResponseId,omitempty"`
 	TopResponseVideoUrl     string `json:"topResponseVideoUrl,omitempty"`
 	TopResponseThumbnailUrl string `json:"topResponseThumbnailUrl,omitempty"`
 	TopResponseUsername     string `json:"topResponseUsername,omitempty"`

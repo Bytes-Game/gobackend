@@ -329,6 +329,26 @@ func runMigrations() {
 	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN video_variants JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN video_variants JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 
+	-- HLS master manifest URL produced by the background transcode worker.
+	-- Empty string means "worker hasn't transcoded this challenge yet" —
+	-- clients fall back to video_url / video_variants until the column
+	-- gets populated by the worker callback (POST /api/challenges/:id/hls-ready).
+	--
+	-- Stored as TEXT (not VARCHAR(N)) because R2 + custom-domain URLs can
+	-- be long once query params for cache-busting land. Default '' keeps
+	-- the column safe to NOT NULL filter on without a separate IS NULL leg.
+	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN hls_manifest_url TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN hls_manifest_url TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	-- Partial index so the transcode worker's "find next untranscoded
+	-- challenge" query is a fast index scan instead of a sequential one.
+	-- Filtering on the empty string is functionally the same as IS NULL
+	-- for our purposes and matches the DEFAULT above.
+	DO $$ BEGIN
+		CREATE INDEX IF NOT EXISTS challenges_pending_hls_idx
+			ON challenges (created_at)
+			WHERE hls_manifest_url = '';
+	EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
 	-- Extended personality dimensions on user_profiles
 	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN attention_span REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN binge_intensity REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
@@ -1391,7 +1411,14 @@ func IncrementChallengeViews(challengeID string) {
 // Watch Events CRUD
 // ---------------------------------------------------------------------------
 
-// RecordWatchEvent inserts a watch event for analytics.
+// RecordWatchEvent inserts a watch event for analytics. For challenge
+// content it ALSO bumps challenges.views so the displayed counter on the
+// home reels grows in real time — previously the only path that
+// incremented that counter was the challenge-detail page open
+// (challenge_handler.go:132), which meant a user could watch hundreds of
+// reels without ever moving the number on screen. Capped at one bump per
+// (user, challenge) day at the SQL level via a simple existence check
+// against watch_events to keep the count from inflating from rewatches.
 func RecordWatchEvent(payload WatchEventPayload) error {
 	uid, err := strconv.Atoi(payload.UserID)
 	if err != nil {
@@ -1402,12 +1429,36 @@ func RecordWatchEvent(payload WatchEventPayload) error {
 		return fmt.Errorf("invalid content ID")
 	}
 
+	// Check whether this user has already counted toward this challenge's
+	// view tally today. We look at watch_events directly instead of a
+	// dedicated table because the existing index on (user_id, content_id)
+	// makes this a sub-millisecond probe and avoids a schema migration.
+	shouldBumpViews := false
+	if payload.ContentType == "challenge" {
+		var prior int
+		_ = db.QueryRow(`
+			SELECT COUNT(*) FROM watch_events
+			WHERE user_id = $1 AND content_id = $2 AND content_type = 'challenge'
+			AND created_at > NOW() - INTERVAL '24 hours'`,
+			uid, cid).Scan(&prior)
+		shouldBumpViews = prior == 0
+	}
+
 	_, err = db.Exec(
 		`INSERT INTO watch_events (user_id, content_id, content_type, watch_time, completed)
 		 VALUES ($1,$2,$3,$4,$5)`,
 		uid, cid, payload.ContentType, payload.WatchTime, payload.Completed,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+
+	if shouldBumpViews {
+		// Best effort — a failure here shouldn't fail the analytics insert
+		// above, which is the source of truth for the recommender.
+		go IncrementChallengeViews(payload.ContentID)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

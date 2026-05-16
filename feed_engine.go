@@ -4071,6 +4071,15 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// video on a left-swipe for any challenge with responseCount > 0.
 	// One DB round-trip per page; safely no-ops on plain shorts.
 	populateTopResponsesScored(composed)
+	// Same boundary-call pattern for comment counts so the right-rail
+	// number on every challenge tile matches the comment sheet's truth.
+	populateChallengeCommentCountsScored(composed)
+	// And the HLS manifest URL — once the transcode worker has produced
+	// the segmented ladder, the client switches to HLS playback and
+	// gets sub-500ms time-to-first-frame + adaptive bitrate. Falls back
+	// to MP4 cleanly when the column is empty (worker not deployed, or
+	// challenge uploaded before the worker existed).
+	populateHLSManifestURLsScored(composed)
 
 	// Interleave a "Suggested accounts" card into the feed. TikTok-style:
 	// one card injected at index 4 of page 1, and again every 8 items so
@@ -4258,6 +4267,8 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 	// — same boundary call as SmartFeedHandler so the swipe-left UX works
 	// identically across For You / Following / Explore.
 	populateTopResponses(items)
+	populateChallengeCommentCounts(items)
+	populateHLSManifestURLs(items)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4349,9 +4360,14 @@ func populateTopResponses(items []HomeFeedItem) {
 	// row has NULL there). We unmarshal into a fresh VideoVariants per
 	// row so empty maps stay empty rather than carrying state between
 	// iterations of the loop.
+	// Pulls cr.id alongside the rest so the client can vote on this opponent
+	// directly from the home reels without a follow-up /challenges/{id}
+	// fetch — the vote endpoint's contract is (challengeId, responseId,
+	// voterId), and the response id is otherwise only available behind the
+	// detail page.
 	query := `
 		SELECT DISTINCT ON (cr.challenge_id)
-			cr.challenge_id, cr.video_url, COALESCE(cr.thumbnail_url, ''),
+			cr.challenge_id, cr.id, cr.video_url, COALESCE(cr.thumbnail_url, ''),
 			COALESCE(cr.video_variants, '{}'::jsonb),
 			ru.username, ru.league,
 			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = cr.challenge_id)
@@ -4366,10 +4382,10 @@ func populateTopResponses(items []HomeFeedItem) {
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var cid, totalCount int
+		var cid, rid, totalCount int
 		var videoURL, thumbURL, username, league string
 		var variantsRaw []byte
-		if err := rows.Scan(&cid, &videoURL, &thumbURL, &variantsRaw, &username, &league, &totalCount); err != nil {
+		if err := rows.Scan(&cid, &rid, &videoURL, &thumbURL, &variantsRaw, &username, &league, &totalCount); err != nil {
 			continue
 		}
 		// Decode variants leniently — a malformed payload should NOT
@@ -4382,11 +4398,13 @@ func populateTopResponses(items []HomeFeedItem) {
 				variants = nil
 			}
 		}
+		ridStr := strconv.Itoa(rid)
 		for _, idx := range idToIdx[cid] {
 			ch := items[idx].Challenge
 			if ch == nil {
 				continue
 			}
+			ch.TopResponseID = ridStr
 			ch.TopResponseVideoUrl = videoURL
 			ch.TopResponseThumbnailUrl = thumbURL
 			ch.TopResponseUsername = username
@@ -4452,6 +4470,163 @@ func populateTopResponsesScored(items []ScoredItem) {
 	// copy-back needed. Listed explicitly to make that intent obvious.
 }
 
+// populateChallengeCommentCounts batch-fills CommentCount on every Challenge
+// in items. Same one-round-trip pattern as populateTopResponses — challenges
+// don't carry a denormalized counter on their own row, so without this the
+// reels right-rail comment number would always read "0" and mislead users
+// into thinking nobody has commented.
+//
+// Called immediately after populateTopResponses at the feed-handler
+// boundary so both enrichments land before JSON encoding.
+func populateChallengeCommentCounts(items []HomeFeedItem) {
+	if db == nil || len(items) == 0 {
+		return
+	}
+	wantIDs := make([]int, 0, len(items))
+	idToIdx := make(map[int][]int)
+	for i, it := range items {
+		if it.Type != "challenge" || it.Challenge == nil {
+			continue
+		}
+		cid, err := strconv.Atoi(it.Challenge.ID)
+		if err != nil {
+			continue
+		}
+		wantIDs = append(wantIDs, cid)
+		idToIdx[cid] = append(idToIdx[cid], i)
+	}
+	if len(wantIDs) == 0 {
+		return
+	}
+	placeholders := make([]string, len(wantIDs))
+	args := make([]interface{}, len(wantIDs))
+	for i, id := range wantIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+	rows, err := db.Query(`
+		SELECT challenge_id, COUNT(*)
+		FROM challenge_comments
+		WHERE challenge_id IN (`+strings.Join(placeholders, ",")+`)
+		GROUP BY challenge_id`, args...)
+	if err != nil {
+		log.Printf("populateChallengeCommentCounts query error: %v", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, n int
+		if err := rows.Scan(&cid, &n); err != nil {
+			continue
+		}
+		for _, idx := range idToIdx[cid] {
+			ch := items[idx].Challenge
+			if ch == nil {
+				continue
+			}
+			ch.CommentCount = n
+		}
+	}
+}
+
+// populateChallengeCommentCountsScored mirrors populateTopResponsesScored —
+// it takes a ScoredItem slice (explore / smart) and runs the same
+// enrichment via the in-place HomeFeedItem trick.
+func populateChallengeCommentCountsScored(items []ScoredItem) {
+	if len(items) == 0 {
+		return
+	}
+	plain := make([]HomeFeedItem, len(items))
+	for i, si := range items {
+		plain[i] = si.Item
+	}
+	populateChallengeCommentCounts(plain)
+}
+
+// populateHLSManifestURLs batch-fills Challenge.HLSManifestURL on every
+// challenge in `items` whose row in the DB has a non-empty
+// hls_manifest_url column (i.e. the transcode worker has finished).
+//
+// Why it's a separate populate step (vs. just SELECTing the column in
+// every candidate-source query): there are 8+ candidate-source queries
+// across candidate_sources.go, explore_feed.go, and the smart feed
+// pipeline that build raw Challenge structs. Hand-editing all of them
+// would be a ton of churn and a bug magnet (one missed query = silent
+// HLS-not-used in that surface). One enrichment hop at the
+// feed-handler boundary is the same pattern populateTopResponses and
+// populateChallengeCommentCounts already use — and means new candidate
+// sources added later automatically get HLS for free.
+//
+// Safe-by-construction: if hls_manifest_url is empty in the DB (worker
+// hasn't finished, or this is a legacy challenge), we leave the
+// struct's field as the zero value (""). Client sees omitempty drop the
+// key and falls back to videoUrl / videoVariants.
+func populateHLSManifestURLs(items []HomeFeedItem) {
+	if db == nil || len(items) == 0 {
+		return
+	}
+	wantIDs := make([]int, 0, len(items))
+	idToIdx := make(map[int][]int)
+	for i, it := range items {
+		if it.Type != "challenge" || it.Challenge == nil {
+			continue
+		}
+		cid, err := strconv.Atoi(it.Challenge.ID)
+		if err != nil {
+			continue
+		}
+		wantIDs = append(wantIDs, cid)
+		idToIdx[cid] = append(idToIdx[cid], i)
+	}
+	if len(wantIDs) == 0 {
+		return
+	}
+	placeholders := make([]string, len(wantIDs))
+	args := make([]interface{}, len(wantIDs))
+	for i, id := range wantIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+	rows, err := db.Query(`
+		SELECT id, COALESCE(hls_manifest_url, '')
+		FROM challenges
+		WHERE id IN (`+strings.Join(placeholders, ",")+`)
+		  AND hls_manifest_url <> ''`, args...)
+	if err != nil {
+		log.Printf("populateHLSManifestURLs query error: %v", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var url string
+		if err := rows.Scan(&cid, &url); err != nil {
+			continue
+		}
+		for _, idx := range idToIdx[cid] {
+			ch := items[idx].Challenge
+			if ch == nil {
+				continue
+			}
+			ch.HLSManifestURL = url
+		}
+	}
+}
+
+// populateHLSManifestURLsScored is the ScoredItem-slice flavor used by
+// the smart/explore pipelines. Same in-place HomeFeedItem trick as
+// populateChallengeCommentCountsScored.
+func populateHLSManifestURLsScored(items []ScoredItem) {
+	if len(items) == 0 {
+		return
+	}
+	plain := make([]HomeFeedItem, len(items))
+	for i, si := range items {
+		plain[i] = si.Item
+	}
+	populateHLSManifestURLs(plain)
+}
+
 // populateTopResponsesChallenges is the []Challenge flavor used by handlers
 // that return raw challenge slices (e.g. /search). Wraps each element in a
 // throwaway HomeFeedItem whose Challenge pointer aims at the slice element,
@@ -4475,6 +4650,8 @@ func populateTopResponsesChallenges(challenges []Challenge) {
 		}
 	}
 	populateTopResponses(plain)
+	populateChallengeCommentCounts(plain)
+	populateHLSManifestURLs(plain)
 	// &challenges[i] is a stable address into the slice's backing array, so
 	// populateTopResponses' writes through plain[i].Challenge land in the
 	// caller's slice. Same pattern as populateTopResponsesScored above.
