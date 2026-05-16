@@ -1,0 +1,5 @@
+# Local worker secrets must never get pushed to GitHub. The .env file
+# contains the HLS_WORKER_TOKEN and R2 keys; if it leaks, anyone can
+# upload arbitrary files to your R2 bucket and (separately) DOS the
+# transcode queue by claiming + failing every job.
+.env
