@@ -308,6 +308,45 @@ func downloadTo(srcURL, dstPath string) error {
 	return err
 }
 
+// probeHasAudio uses ffprobe to detect whether `src` contains at least
+// one audio stream. We treat probe FAILURE as "audio present" (fail
+// open) — silently stripping audio from a video that actually has
+// audio would be a much worse bug than declaring a missing audio
+// rendition that the player skips.
+//
+// Why this exists: the symptom we're working around is uploaded reels
+// that play back silently with the player's AudioTrack starting,
+// flushing after ~60ms, stopping, and looping forever. Root cause: when
+// the source MP4 has no audio (e.g. a Realme/Redmi/Oppo phone whose
+// MediaCodec dropped audio during on-device compression — a known
+// MediaTek SoC bug — see video_processor_service.dart), the worker
+// would still declare `a:i` for every rendition in -var_stream_map.
+// FFmpeg's `-map 0:a:0?` (optional) silently skips the audio output,
+// but the master.m3u8 still REFERENCES audio renditions that don't
+// exist. The player then initializes an AudioTrack, fetches a zero-
+// byte audio segment, flushes, restarts — exactly the loop the user
+// reported.
+//
+// Fix: probe before transcoding, and only declare audio if it's
+// actually present.
+func probeHasAudio(src string) bool {
+	cmd := exec.Command("ffprobe",
+		"-v", "error",
+		"-select_streams", "a",
+		"-show_entries", "stream=codec_type",
+		"-of", "csv=p=0",
+		src,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		log.Printf("probeHasAudio: ffprobe failed for %s (%v) — assuming audio present", src, err)
+		return true
+	}
+	hasAudio := strings.Contains(string(out), "audio")
+	log.Printf("probeHasAudio: src=%s hasAudio=%v", src, hasAudio)
+	return hasAudio
+}
+
 // transcodeHLS shells out to FFmpeg to produce a master.m3u8 + per-
 // rendition .m3u8 + .ts segments. We use the var_stream_map + hls flags
 // to get the standard "master playlist with N variant playlists"
@@ -318,17 +357,28 @@ func downloadTo(srcURL, dstPath string) error {
 // 3.1 on the smallest ladder so even ancient phones decode them
 // without sweating, while upper ladders use main / high profiles for
 // efficiency.
+//
+// Audio handling: we probe `src` first and only declare audio renditions
+// if the source actually has audio. This avoids the silent-playback
+// loop bug described on probeHasAudio above.
 func transcodeHLS(src, outDir string) error {
+	hasAudio := probeHasAudio(src)
+
 	args := []string{
 		"-y", // overwrite existing files in outDir
 		"-i", src,
 	}
 
-	// One -map per rendition pair (video + audio). FFmpeg needs us to
-	// list every output mapping before any -filter / -c arguments for
-	// that output, so we build the args in a specific order.
+	// One -map per rendition. We map the audio stream too, but only
+	// when probe confirmed it's there — otherwise FFmpeg would emit
+	// a "Stream specifier matches no streams" warning and silently
+	// skip the audio output, leaving us with a video-only file but
+	// an audio-declaring master playlist (the bug).
 	for range ladder {
-		args = append(args, "-map", "0:v:0", "-map", "0:a:0?")
+		args = append(args, "-map", "0:v:0")
+		if hasAudio {
+			args = append(args, "-map", "0:a:0")
+		}
 	}
 
 	// Per-rendition encode settings.
@@ -344,16 +394,30 @@ func transcodeHLS(src, outDir string) error {
 			"-g", fmt.Sprintf("%d", segmentSeconds*30), // keyframe every segment
 			"-keyint_min", fmt.Sprintf("%d", segmentSeconds*30),
 			"-sc_threshold", "0",
-			"-c:a:"+idx, "aac",
-			"-b:a:"+idx, fmt.Sprintf("%dk", r.audioBps/1000),
-			"-ac:a:"+idx, "2",
 		)
+		if hasAudio {
+			args = append(args,
+				"-c:a:"+idx, "aac",
+				"-b:a:"+idx, fmt.Sprintf("%dk", r.audioBps/1000),
+				"-ac:a:"+idx, "2",
+				"-ar:a:"+idx, "48000", // normalize to 48kHz — MTK decoders
+				//                       handle 48000 more reliably than the
+				//                       44100 some Android cameras emit.
+			)
+		}
 	}
 
-	// var_stream_map ties each (v,a) pair to a named variant.
+	// var_stream_map ties each (v,a) pair to a named variant. When the
+	// source has no audio we omit a:i so the master playlist declares
+	// video-only variants — the player won't try to fetch a phantom
+	// audio rendition.
 	varMap := make([]string, 0, len(ladder))
 	for i, r := range ladder {
-		varMap = append(varMap, fmt.Sprintf("v:%d,a:%d,name:%s", i, i, r.label))
+		if hasAudio {
+			varMap = append(varMap, fmt.Sprintf("v:%d,a:%d,name:%s", i, i, r.label))
+		} else {
+			varMap = append(varMap, fmt.Sprintf("v:%d,name:%s", i, r.label))
+		}
 	}
 	args = append(args,
 		"-var_stream_map", strings.Join(varMap, " "),

@@ -172,6 +172,11 @@ func main() {
 	InitDatabase()
 	InitRedis()
 	InitMeilisearch()
+	// Build the challenge-subject autocomplete index. Runs the
+	// curated-vocab + existing-challenge merge in the background so
+	// it doesn't block startup; the handler degrades to the in-binary
+	// vocabulary if a request lands before the index finishes seeding.
+	go seedChallengeSubjects()
 	registerMetrics()
 	startSimilarityWorker()
 	startImpressionAggregator()
@@ -220,6 +225,7 @@ func main() {
 	api.HandleFunc("/challenges/friends", GetFriendsChallengesHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/accept", AcceptChallengeHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/like", LikeChallengeHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/challenges/delete", DeleteChallengeHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/vote", VoteChallengeHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/comments", AddChallengeCommentHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/responses/{id}/flag", FlagResponseHandler).Methods("POST", "OPTIONS")
@@ -236,6 +242,34 @@ func main() {
 	api.HandleFunc("/events", TrackEventHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/events/batch", TrackBatchEventsHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/profile", UserProfileHandler).Methods("GET", "OPTIONS")
+	// Challenge-creation autocomplete. Two surfaces — prefix (small,
+	// curated, in-memory) and subject (large, Meilisearch-backed +
+	// popularity-ranked). See suggest_handlers.go for the ranking.
+	api.HandleFunc("/suggest/challenge-prefix", SuggestChallengePrefixHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/suggest/challenge-subject", SuggestChallengeSubjectHandler).Methods("GET", "OPTIONS")
+	// Profile editing — PATCH /users/{id} accepting any subset of
+	// {fullName, bio, visibility, settings}. Authorization happens
+	// inside the handler (path-id must match body userId until
+	// session auth lands). See profile_handlers.go.
+	api.HandleFunc("/users/{id}", UpdateUserProfileHandler).Methods("PATCH", "OPTIONS")
+	// Activity surfaces — paginated list of challenges the user has
+	// liked / watched. Cursor-based on the action timestamp so the
+	// page stays stable as the user keeps engaging.
+	api.HandleFunc("/users/{id}/likes", GetLikedChallengesHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/users/{id}/history", GetWatchHistoryHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/users/{id}/history", DeleteWatchHistoryHandler).Methods("DELETE", "OPTIONS")
+	// Block list management. Blocking tears down follow edges in
+	// both directions inside one transaction so the recommender
+	// stops seeing the blocked user's content on the next page load.
+	api.HandleFunc("/blocks", BlockUserHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/unblock", UnblockUserHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/users/{id}/blocks", ListBlockedUsersHandler).Methods("GET", "OPTIONS")
+	// TOTP-based 2FA. Enroll mints a fresh secret + recovery codes
+	// (returned ONCE in plaintext), verify activates the row,
+	// disable requires proving knowledge of a current code.
+	api.HandleFunc("/users/{id}/totp/enroll", EnrollTOTPHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/users/{id}/totp/verify", VerifyTOTPHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/users/{id}/totp/disable", DisableTOTPHandler).Methods("POST", "OPTIONS")
 	api.HandleFunc("/experiments", ExperimentsListHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/experiments/results", ExperimentResultsHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/users/similar", SimilarUsersHandler).Methods("GET", "OPTIONS")

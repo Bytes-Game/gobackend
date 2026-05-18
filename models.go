@@ -13,6 +13,26 @@ type User struct {
 	Wins          int      `json:"wins"`
 	Losses        int      `json:"losses"`
 	League        string   `json:"league"`
+	// Bio is shown on the profile page. Empty string means "user
+	// hasn't set one" — render an "Add a bio" CTA on own profile,
+	// nothing on others. omitempty keeps the wire format tight for
+	// the (eventually rare) no-bio case.
+	Bio string `json:"bio,omitempty"`
+	// Account visibility — "public" (default) or "friends". When
+	// "friends" the user's profile detail and challenge content
+	// should only be returned to viewers in the user's follower
+	// list. Filtering is enforced at the handler boundary so the
+	// recommender doesn't see private content either.
+	Visibility string `json:"visibility,omitempty"`
+	// User-level settings — theme, language, etc. Free-form so we
+	// can add toggles without a schema migration per feature.
+	// Auth/security state (TOTP secret, recovery codes) lives in a
+	// separate table for least-privilege access — don't put it here.
+	Settings map[string]any `json:"settings,omitempty"`
+	// True iff the user has finished TOTP 2FA enrollment. Surfaces
+	// in /profile so the client can render the "2FA on" badge in
+	// the settings sheet without a second round-trip.
+	TwoFactorEnabled bool `json:"twoFactorEnabled,omitempty"`
 }
 
 // SearchResponse wraps search results with total count for pagination.

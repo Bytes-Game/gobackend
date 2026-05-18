@@ -81,6 +81,11 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Index in Meilisearch
 	go IndexChallenge(challenge)
+	// Bump the autocomplete popularity counter for this subject so
+	// the next typer who matches it gets it ranked higher. Fire-and-
+	// forget: a hiccup in the suggest index never blocks the create
+	// response.
+	go recordSubjectUsage(challenge.Subject)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -312,6 +317,56 @@ func LikeChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"liked":       liked,
 		"likes":       count,
+		"challengeId": payload.ChallengeID,
+	})
+}
+
+// DeleteChallengeHandler removes a challenge the caller created.
+// POST /api/v1/challenges/delete body:{ challengeId, userId }
+//
+// Authorization is creator-only: we fetch the challenge first and
+// reject the request unless `userId` matches `challenge.CreatorID`.
+// Admin / moderator delete uses a separate endpoint with its own auth
+// path; this handler is purely the "user deletes their own post" flow.
+//
+// On success: the DB cascades through all child rows (responses,
+// likes, votes, comments, saves, hls jobs). The R2 storage objects
+// are NOT deleted here — see DeleteChallengeByID's docstring for the
+// rationale (decoupled cleanup job).
+func DeleteChallengeHandler(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		ChallengeID string `json:"challengeId"`
+		UserID      string `json:"userId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if payload.ChallengeID == "" || payload.UserID == "" {
+		http.Error(w, "challengeId and userId are required", http.StatusBadRequest)
+		return
+	}
+
+	challenge, found := GetChallengeByID(payload.ChallengeID)
+	if !found {
+		http.Error(w, "Challenge not found", http.StatusNotFound)
+		return
+	}
+	if challenge.CreatorID != payload.UserID {
+		// 403 (not 401) — the user IS authenticated, they just don't
+		// own this resource.
+		http.Error(w, "Only the creator can delete this challenge", http.StatusForbidden)
+		return
+	}
+
+	if err := DeleteChallengeByID(payload.ChallengeID); err != nil {
+		http.Error(w, "Failed to delete: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"deleted":     true,
 		"challengeId": payload.ChallengeID,
 	})
 }

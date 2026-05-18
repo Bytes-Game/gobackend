@@ -372,6 +372,54 @@ func runMigrations() {
 		created_at  TIMESTAMPTZ DEFAULT NOW(),
 		PRIMARY KEY (response_id, user_id)
 	);
+
+	-- Profile bio + user-level settings (theme, language, etc.).
+	-- bio gets a dedicated column because it's shown on every profile
+	-- view; settings is JSONB so we can ship new toggles without a
+	-- migration per feature. Keep auth/security state OUT of settings —
+	-- TOTP secrets live in their own table for least-privilege access.
+	DO $$ BEGIN ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE users ADD COLUMN settings JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	-- Account visibility: 'public' (default, anyone can see) | 'friends'
+	-- (only followers see your posts and profile detail). Stored as a
+	-- column so the feed-time WHERE clause can filter by index lookup
+	-- without parsing JSON.
+	DO $$ BEGIN ALTER TABLE users ADD COLUMN visibility VARCHAR(20) DEFAULT 'public'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+
+	-- user_blocks: A blocks B → A never sees B's content, B can't DM A.
+	-- Bidirectional enforcement happens at query-time (filter both
+	-- legs). Keeping this as a thin table (just blocker_id, blocked_id)
+	-- means add/remove is O(1) and lookup joins against the user table
+	-- stay cheap.
+	CREATE TABLE IF NOT EXISTS user_blocks (
+		blocker_id  INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		blocked_id  INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		created_at  TIMESTAMPTZ DEFAULT NOW(),
+		PRIMARY KEY (blocker_id, blocked_id),
+		CHECK (blocker_id <> blocked_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks(blocked_id);
+
+	-- TOTP-based 2FA. One row per user once they've enrolled. Kept in a
+	-- separate table from users so the SELECT * lookups elsewhere never
+	-- accidentally leak the secret, and so we can add column-level
+	-- revoke later if we move to a hosted secrets manager.
+	--
+	-- secret: base32-encoded shared secret (the QR-code payload).
+	-- recovery_codes: 10 single-use backup codes, stored SHA-256-hashed
+	--   so a DB read can't bypass 2FA. (Codes are 80-bit random base32
+	--   themselves, so the entropy is in the code, not the hash —
+	--   bcrypt would be overkill and adds a dep.)
+	-- last_used_at: prevents replaying a freshly-used 6-digit code
+	--   within the same 30s window.
+	CREATE TABLE IF NOT EXISTS user_totp (
+		user_id        INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+		secret         TEXT NOT NULL,
+		recovery_codes JSONB NOT NULL DEFAULT '[]',
+		enrolled_at    TIMESTAMPTZ DEFAULT NOW(),
+		last_used_at   TIMESTAMPTZ,
+		is_active      BOOLEAN DEFAULT FALSE
+	);
 	`
 	if _, err := db.Exec(alterStmts); err != nil {
 		log.Printf("Warning: alter table issue: %v", err)
@@ -430,6 +478,18 @@ func runMigrations() {
 	CREATE INDEX IF NOT EXISTS idx_experiment_exposures_exp ON experiment_exposures(experiment_id, variant_id);
 	CREATE INDEX IF NOT EXISTS idx_experiment_exposures_user ON experiment_exposures(user_id, experiment_id);
 	CREATE INDEX IF NOT EXISTS idx_user_similarities_user ON user_similarities(user_id, similarity_score DESC);
+
+	-- /users/{id}/likes — reverse lookup of challenges a user liked,
+	-- newest-first. challenge_likes already has (challenge_id, user_id)
+	-- as PK; this index serves the (user_id, created_at DESC) query.
+	CREATE INDEX IF NOT EXISTS idx_challenge_likes_user_time
+		ON challenge_likes(user_id, created_at DESC);
+
+	-- /users/{id}/history — same idea for watch_events. The existing
+	-- idx_watch_events_user_id is on user_id alone which works but
+	-- forces a sort; this composite gives us index-order results.
+	CREATE INDEX IF NOT EXISTS idx_watch_events_user_time
+		ON watch_events(user_id, created_at DESC);
 	`
 	if _, err := db.Exec(indexes); err != nil {
 		log.Printf("Warning: index creation issue: %v", err)
@@ -443,16 +503,33 @@ func runMigrations() {
 // --------------------------------------------------------------------------
 
 // readUser scans basic user columns and enriches with follower count + following list
-// Use for single-user lookups (3 queries total).
-func readUser(id int, username, pw, fullName string, wins, losses int, league string) User {
+// Use for single-user lookups (3 queries total + 1 for TOTP-enabled flag).
+//
+// bio/visibility/settings are read in this constructor — the cost is
+// one trivial column read per profile lookup vs. a follow-up round
+// trip per call site. TOTP enabled state is checked in a separate
+// (indexed PK lookup) query because user_totp is a sensitive table
+// and we want the access to be auditable from a single chokepoint.
+func readUser(id int, username, pw, fullName, bio, visibility, settingsJSON string, wins, losses int, league string) User {
 	u := User{
-		ID:       strconv.Itoa(id),
-		Username: username,
-		password: pw,
-		FullName: fullName,
-		Wins:     wins,
-		Losses:   losses,
-		League:   league,
+		ID:         strconv.Itoa(id),
+		Username:   username,
+		password:   pw,
+		FullName:   fullName,
+		Bio:        bio,
+		Visibility: visibility,
+		Wins:       wins,
+		Losses:     losses,
+		League:     league,
+	}
+	// Settings JSON. Empty/invalid → no map (omitempty drops it on
+	// the wire). We don't fail the whole user fetch on a bad blob
+	// — a parser hiccup shouldn't take down the profile page.
+	if settingsJSON != "" && settingsJSON != "{}" {
+		var s map[string]any
+		if json.Unmarshal([]byte(settingsJSON), &s) == nil {
+			u.Settings = s
+		}
 	}
 
 	// Followers count
@@ -472,6 +549,16 @@ func readUser(id int, username, pw, fullName string, wins, losses int, league st
 	if u.FollowingList == nil {
 		u.FollowingList = []string{}
 	}
+
+	// TOTP-enabled flag — sourced from the dedicated user_totp table
+	// (see least-privilege rationale in the table comment). EXISTS
+	// keeps it as an index-only lookup; we never need the secret on
+	// the profile read path.
+	_ = db.QueryRow(
+		`SELECT EXISTS (SELECT 1 FROM user_totp WHERE user_id=$1 AND is_active=TRUE)`,
+		id,
+	).Scan(&u.TwoFactorEnabled)
+
 	return u
 }
 
@@ -511,17 +598,27 @@ func enrichUsers(users []User) {
 }
 
 // GetuserByUsername returns a fully enriched user, looked up by username.
+//
+// The SELECT now pulls bio/visibility/settings alongside the legacy
+// fields so the profile page doesn't have to make a second round-trip
+// for them. COALESCE(settings::text, '{}') keeps the JSON-decode path
+// in readUser simple even if a freshly-inserted user pre-dates the
+// migration that added the column default.
 func GetUserByUsername(username string) (User, bool) {
 	var id, wins, losses int
-	var uname, pw, fullName, league string
+	var uname, pw, fullName, bio, visibility, settings, league string
 	err := db.QueryRow(
-		`SELECT id, username, password, full_name, wins, losses, league FROM users WHERE username = $1`,
+		`SELECT id, username, password, full_name,
+		        COALESCE(bio,''), COALESCE(visibility,'public'),
+		        COALESCE(settings::text,'{}'),
+		        wins, losses, league
+		   FROM users WHERE username = $1`,
 		username,
-	).Scan(&id, &uname, &pw, &fullName, &wins, &losses, &league)
+	).Scan(&id, &uname, &pw, &fullName, &bio, &visibility, &settings, &wins, &losses, &league)
 	if err != nil {
 		return User{}, false
 	}
-	return readUser(id, uname, pw, fullName, wins, losses, league), true
+	return readUser(id, uname, pw, fullName, bio, visibility, settings, wins, losses, league), true
 }
 
 // GetUserByID returns a fully enriched user, looked up by string ID.
@@ -531,15 +628,19 @@ func GetUserByID(idStr string) (User, bool) {
 		return User{}, false
 	}
 	var wins, losses int
-	var uname, pw, fullName, league string
+	var uname, pw, fullName, bio, visibility, settings, league string
 	err = db.QueryRow(
-		`SELECT id, username, password, full_name, wins, losses, league FROM users WHERE id = $1`,
+		`SELECT id, username, password, full_name,
+		        COALESCE(bio,''), COALESCE(visibility,'public'),
+		        COALESCE(settings::text,'{}'),
+		        wins, losses, league
+		   FROM users WHERE id = $1`,
 		idInt,
-	).Scan(&idInt, &uname, &pw, &fullName, &wins, &losses, &league)
+	).Scan(&idInt, &uname, &pw, &fullName, &bio, &visibility, &settings, &wins, &losses, &league)
 	if err != nil {
 		return User{}, false
 	}
-	return readUser(idInt, uname, pw, fullName, wins, losses, league), true
+	return readUser(idInt, uname, pw, fullName, bio, visibility, settings, wins, losses, league), true
 }
 
 // UserExists checks whether a username is already taken.
@@ -1069,14 +1170,29 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 
 	var id int
 	var createdAt time.Time
-	// Default energy level if not provided
-	energyLevel := payload.EnergyLevel
-	if energyLevel == "" {
-		energyLevel = "medium"
-	}
 	category := payload.Category
 	if category == "" {
 		category = inferCategory(payload.Subject, payload.Prefix, "")
+	}
+	// Energy level: derived server-side from category + subject +
+	// caption + creator baseline. See energy_classifier.go for the
+	// weighted-scoring breakdown. Older clients that still send an
+	// explicit value win — we honor it both for transition smoothness
+	// and so a deliberate authoring choice can override the rule
+	// table when the creator really does know better.
+	energyLevel := payload.EnergyLevel
+	if energyLevel == "" {
+		// We pass the creator ID so the classifier can fold in the
+		// "modal energy of their last 5 challenges" signal — a strong
+		// zero-shot prior that beats text-only on edge-case subjects.
+		// First-time creators degrade cleanly: the baseline lookup
+		// returns "" and the rest of the signals decide.
+		energyLevel = deriveEnergyLevelWithCreator(
+			category,
+			payload.Subject,
+			payload.Prefix+" "+payload.Subject,
+			payload.CreatorID,
+		)
 	}
 	emotionJSON, _ := json.Marshal(payload.EmotionTags)
 	if len(payload.EmotionTags) == 0 {
@@ -1240,6 +1356,37 @@ func GetChallengeByID(idStr string) (Challenge, bool) {
 		return Challenge{}, false
 	}
 	return results[0], true
+}
+
+// DeleteChallengeByID removes a challenge row. Responses, likes,
+// votes, comments, saves, and HLS rows all live in child tables that
+// declare ON DELETE CASCADE against challenges(id) — see the schema
+// in this file — so a single DELETE here garbage-collects every
+// derived row in one transaction. We deliberately do NOT touch R2:
+// the orphaned video/thumbnail objects will be reaped by a separate
+// scheduled cleanup job (TODO) that diff's the bucket against the
+// live challenge_id set. Doing the R2 delete inline would couple
+// every UI delete to network latency + S3 sigv4 signing, and a
+// failed bucket delete would leave the DB and storage out of sync
+// with no easy recovery.
+//
+// Authorization (creator-only) is enforced at the handler layer,
+// NOT here, so internal callers (admin moderation, scheduled GC)
+// can use this directly.
+func DeleteChallengeByID(idStr string) error {
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		return fmt.Errorf("invalid challenge id %q: %w", idStr, err)
+	}
+	res, err := db.Exec(`DELETE FROM challenges WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("no challenge with id %d", id)
+	}
+	return nil
 }
 
 // GetChallengeResponses returns all responses to a challenge.
