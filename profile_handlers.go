@@ -54,6 +54,15 @@ func UpdateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Profile edits are rare. 60/hr is generous (one minute apart on
+	// average), burst of 3 covers a quick typo-fix sequence. Anything
+	// faster than that is either UI-glitch retries or someone
+	// brute-forcing username availability via the same endpoint.
+	if !allowAction(payload.UserID, "profile_edit") {
+		writeRateLimited(w, "profile_edit")
+		return
+	}
+
 	// Validate. Empty bio/fullName ARE valid (means "clear it") — we
 	// only reject when the supplied value is invalid (too long, bad
 	// chars). The pointer-of-string form lets us distinguish "field
@@ -470,6 +479,14 @@ func BlockUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.BlockerID == payload.BlockedID {
 		http.Error(w, "cannot block yourself", http.StatusBadRequest)
+		return
+	}
+
+	// 20 blocks/min per user. Block-bombing was real on early TikTok
+	// — users would block every account that liked a controversial
+	// rival to mute them on each other's mentions. Bucket it.
+	if !allowAction(payload.BlockerID, "block") {
+		writeRateLimited(w, "block")
 		return
 	}
 

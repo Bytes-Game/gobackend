@@ -64,6 +64,12 @@ type Notification struct {
 	Type      string `json:"type"`
 	Message   string `json:"message"`
 	Timestamp string `json:"timestamp"`
+	// VideoURL carries a content URL for invisible "prefetch hint"
+	// notifications (Type == "next_reel_hint"). Omitted on all
+	// human-visible notifications. The mobile WebSocket wrapper sees
+	// this type, hands the URL to VideoPlayerService.prefetch(), and
+	// suppresses surfacing it to the user.
+	VideoURL string `json:"videoUrl,omitempty"`
 }
 
 // ChatMessage represents a direct message between two users.

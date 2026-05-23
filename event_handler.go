@@ -18,6 +18,13 @@ func HandleFollowEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-user follow rate-limit. Catches follow-bombing without
+	// blocking organic follow flurries (burst is 5 in actionLimitTable).
+	if !allowAction(payload.FollowerID, "follow") {
+		writeRateLimited(w, "follow")
+		return
+	}
+
 	if err := ProcessFollowEvent(payload); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -40,6 +47,14 @@ func HandleUnfollowEvent(w http.ResponseWriter, r *http.Request) {
 	var payload UnfollowEventPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Same per-user gate as follow. Unfollow-bombing is rarer but
+	// not unheard of as a way to escape recommender memory by
+	// resetting affinity.
+	if !allowAction(payload.UnfollowerID, "unfollow") {
+		writeRateLimited(w, "unfollow")
 		return
 	}
 
@@ -90,6 +105,14 @@ func HandleWatchEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fire a server-side prefetch hint over WebSocket so the client
+	// can warm a VideoPlayerController for the user's next likely
+	// reel BEFORE they swipe. Async + best-effort — never blocks the
+	// watch-event ack. See next_reel_hint.go for throttle + filtering.
+	if payload.ContentType == "challenge" && payload.ContentID != "" {
+		go SendNextReelHint(payload.UserID, payload.ContentID)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Watch event recorded"})
@@ -106,6 +129,15 @@ func HandleReportEvent(w http.ResponseWriter, r *http.Request) {
 
 	if payload.ReporterID == "" || payload.TargetID == "" || payload.Reason == "" {
 		http.Error(w, "reporterId, targetId, and reason are required", http.StatusBadRequest)
+		return
+	}
+
+	// 10 reports/hour per user. The most common abuse here is
+	// retaliatory mass-reporting to silence a rival; this cap makes
+	// the strategy infeasible without slowing legitimate reporting
+	// (rare enough that a real user maxing this is itself a flag).
+	if !allowAction(payload.ReporterID, "report") {
+		writeRateLimited(w, "report")
 		return
 	}
 

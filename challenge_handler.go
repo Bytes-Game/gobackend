@@ -67,6 +67,13 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 5 challenge creates per hour per user. Burst of 2 so back-to-back
+	// posts during a creative streak don't get throttled.
+	if !allowAction(payload.CreatorID, "challenge_create") {
+		writeRateLimited(w, "challenge_create")
+		return
+	}
+
 	challenge, err := CreateChallenge(payload)
 	if err != nil {
 		http.Error(w, "Failed to create challenge: "+err.Error(), http.StatusInternalServerError)
@@ -176,6 +183,14 @@ func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 30 accepts per hour per user. Higher than challenge_create
+	// because responding is a lighter act, but still bounded so a
+	// script can't churn out filler responses.
+	if !allowAction(payload.ResponderID, "challenge_accept") {
+		writeRateLimited(w, "challenge_accept")
+		return
+	}
+
 	// League restriction: verify the responder is within ±2 tiers of the challenge creator
 	challenge, found := GetChallengeByID(payload.ChallengeID)
 	if !found {
@@ -220,6 +235,13 @@ func VoteChallengeHandler(w http.ResponseWriter, r *http.Request) {
 
 	if payload.ChallengeID == "" || payload.ResponseID == "" || payload.VoterID == "" {
 		http.Error(w, "challengeId, responseId, and voterId are required", http.StatusBadRequest)
+		return
+	}
+
+	// 30 votes/min per user — comfortably above realistic engagement
+	// but blocks vote-stuffing scripts that try to swing leaderboards.
+	if !allowAction(payload.VoterID, "vote") {
+		writeRateLimited(w, "vote")
 		return
 	}
 
@@ -274,6 +296,13 @@ func AddChallengeCommentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ~20 comments/min per user. Burst of 8 covers a back-and-forth
+	// discussion thread without breaking real conversation pacing.
+	if !allowAction(payload.UserID, "comment") {
+		writeRateLimited(w, "comment")
+		return
+	}
+
 	comment, err := AddChallengeComment(payload.ChallengeID, payload.UserID, payload.Username, payload.Text)
 	if err != nil {
 		http.Error(w, "Failed to add comment: "+err.Error(), http.StatusInternalServerError)
@@ -308,6 +337,14 @@ func LikeChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// ~60 likes/min per user. High enough for an enthusiastic skim
+	// through the feed; low enough to catch bot-scripted heart spam
+	// that's the easiest way to game the like-leaderboard.
+	if !allowAction(payload.UserID, "like") {
+		writeRateLimited(w, "like")
 		return
 	}
 
