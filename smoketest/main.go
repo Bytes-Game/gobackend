@@ -46,7 +46,9 @@ type step struct {
 type runner struct {
 	base   string
 	user   string
+	pass   string
 	target string
+	token  string // session token captured by stepLogin; attached to every request
 	client *http.Client
 	passed int
 	failed int
@@ -54,13 +56,15 @@ type runner struct {
 
 func main() {
 	base := flag.String("base", "http://localhost:8081", "Backend base URL")
-	user := flag.String("user", "smoketest_user", "User ID to run as")
+	user := flag.String("user", "smoketest_user", "Username to log in as (must be a real account)")
+	pass := flag.String("pass", "", "Password for -user (required: every protected endpoint now needs a session token)")
 	target := flag.String("target", "smoketest_creator", "Creator / target user ID for neg-signal tests")
 	flag.Parse()
 
 	r := &runner{
 		base:   strings.TrimRight(*base, "/"),
 		user:   *user,
+		pass:   *pass,
 		target: *target,
 		// 30s accommodates Render / Railway / Fly free-tier cold starts.
 		client: &http.Client{Timeout: 30 * time.Second},
@@ -68,6 +72,8 @@ func main() {
 
 	steps := []step{
 		{"health", r.stepHealth},
+		// login must run first — it captures the token every later step needs.
+		{"login → session token", r.stepLogin},
 		{"users roster", r.stepUsers},
 		{"feed/smart baseline", r.stepFeedBaseline},
 		{"track view event", r.stepTrackView},
@@ -102,6 +108,41 @@ func main() {
 
 func (r *runner) stepHealth() error {
 	return r.expectStatus("GET", "/health", nil, 200, nil)
+}
+
+// stepLogin authenticates and stashes the session token. Every subsequent step
+// sends it as a bearer token (attached in expectStatusPredicate); the backend
+// now derives identity from the token, not from the userId in query/body.
+func (r *runner) stepLogin() error {
+	if r.pass == "" {
+		return fmt.Errorf("no -pass provided: protected endpoints require a session token, so a real login is mandatory")
+	}
+	body, _ := json.Marshal(map[string]any{"username": r.user, "password": r.pass})
+	req, err := http.NewRequest("POST", r.base+"/login", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("login request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("login got %d: %s", resp.StatusCode, string(raw))
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return fmt.Errorf("decode login: %w", err)
+	}
+	if out.Token == "" {
+		return fmt.Errorf("login succeeded but returned no token")
+	}
+	r.token = out.Token
+	return nil
 }
 
 func (r *runner) stepUsers() error {
@@ -251,6 +292,10 @@ func (r *runner) expectStatusPredicate(method, path string, body any, pred func(
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	// Attach the session token to every request once login has captured it.
+	if r.token != "" {
+		req.Header.Set("Authorization", "Bearer "+r.token)
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {

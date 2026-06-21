@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -41,9 +43,22 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Mint a signed session token. From here on the client authenticates every
+	// protected request with this token (Authorization: Bearer <token>) and the
+	// server derives identity from it — never from a client-supplied userId.
+	token, err := issueToken(user.ID, user.Username)
+	if err != nil {
+		// Almost always means JWT_SECRET is unset — fail closed rather than hand
+		// back a session the protected routes will reject anyway.
+		log.Printf("token issuance failed for %s: %v", creds.Username, err)
+		http.Error(w, "Login temporarily unavailable", http.StatusInternalServerError)
+		return
+	}
+
 	// Create the response payload — no longer sending all users for security.
 	response := map[string]interface{}{
 		"user":     user,
+		"token":    token,
 		"allUsers": []User{},
 	}
 
@@ -61,11 +76,22 @@ func ReseedHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "reseeded"})
 }
 
-// GetAllUsersHandler returns a list of all users.
+// GetAllUsersHandler returns a bounded page of users.
+// GET /api/v1/users?page=&limit=  (limit default 50, capped at 100).
+//
+// Previously this returned the ENTIRE users table and the client called it on
+// every login — an unbounded query that does not survive growth. It's paginated
+// now; callers that need the whole set (background indexers) use GetAllUsers
+// directly server-side.
 func GetAllUsersHandler(w http.ResponseWriter, r *http.Request) {
+	limit := parseIntOrDefault(r.URL.Query().Get("limit"), 50, 100)
+	page := parseIntOrDefault(r.URL.Query().Get("page"), 1, 1_000_000)
+	users := GetUsersPaginated(limit, (page-1)*limit)
+	if users == nil {
+		users = []User{}
+	}
 	w.Header().Set("Content-Type", "application/json")
-	allUsers := GetAllUsers()
-	if err := json.NewEncoder(w).Encode(allUsers); err != nil {
+	if err := json.NewEncoder(w).Encode(users); err != nil {
 		http.Error(w, "Failed to encode users", http.StatusInternalServerError)
 	}
 }
@@ -120,12 +146,79 @@ type bucket struct {
 	lastCheck time.Time
 }
 
+// limiterRegistry tracks every rateLimiter created so a single background
+// janitor can sweep idle buckets out of all of them. Without this the buckets
+// maps grow unbounded (one entry per distinct client/user forever) and leak
+// memory — at scale that's an eventual OOM.
+var (
+	limiterRegistryMu sync.Mutex
+	limiterRegistry   []*rateLimiter
+)
+
 func newRateLimiter(rps float64, burst int) *rateLimiter {
-	return &rateLimiter{
+	rl := &rateLimiter{
 		buckets:  make(map[string]*bucket),
 		rate:     rps,
 		capacity: burst,
 	}
+	limiterRegistryMu.Lock()
+	limiterRegistry = append(limiterRegistry, rl)
+	limiterRegistryMu.Unlock()
+	return rl
+}
+
+// cleanup evicts buckets untouched for longer than maxIdle. A bucket idle that
+// long has already refilled to full capacity, so dropping it loses no state —
+// the next request from that key just recreates a full bucket.
+func (rl *rateLimiter) cleanup(maxIdle time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	for k, b := range rl.buckets {
+		if now.Sub(b.lastCheck) > maxIdle {
+			delete(rl.buckets, k)
+		}
+	}
+}
+
+// startLimiterJanitor periodically sweeps idle buckets out of every registered
+// limiter (the global per-IP one plus every per-action one). One goroutine for
+// all of them. Single-instance by design — when this runs on multiple replicas
+// each keeps its own buckets; move to a Redis-backed limiter before scaling out.
+func startLimiterJanitor() {
+	go func() {
+		tk := time.NewTicker(5 * time.Minute)
+		defer tk.Stop()
+		for range tk.C {
+			limiterRegistryMu.Lock()
+			snapshot := append([]*rateLimiter(nil), limiterRegistry...)
+			limiterRegistryMu.Unlock()
+			for _, rl := range snapshot {
+				rl.cleanup(15 * time.Minute)
+			}
+		}
+	}()
+}
+
+// clientIP returns the real caller IP for rate-limit keying. Behind Render (and
+// most proxies) the connecting socket is the proxy, so r.RemoteAddr is useless
+// — every client collapses to one bucket. The proxy forwards the real client in
+// X-Forwarded-For ("client, proxy1, …"); we take the left-most entry. Falls back
+// to the RemoteAddr host (port stripped) for direct/local connections.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
+		return xr
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 func (rl *rateLimiter) allow(key string) bool {
@@ -157,8 +250,7 @@ func (rl *rateLimiter) allow(key string) bool {
 func rateLimitMiddleware(limiter *rateLimiter) mux.MiddlewareFunc {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := r.RemoteAddr
-			if !limiter.allow(ip) {
+			if !limiter.allow(clientIP(r)) {
 				http.Error(w, "Too many requests", http.StatusTooManyRequests)
 				return
 			}
@@ -172,6 +264,9 @@ func main() {
 	InitDatabase()
 	InitRedis()
 	InitMeilisearch()
+	// Warn loudly (but don't crash) if the session-token signing key is missing,
+	// so it's noticed at boot rather than on the first failed login.
+	checkAuthConfig()
 	// Build the challenge-subject autocomplete index. Runs the
 	// curated-vocab + existing-challenge merge in the background so
 	// it doesn't block startup; the handler degrades to the in-binary
@@ -189,6 +284,9 @@ func main() {
 	initPushSender()
 	startNotificationDispatcher()
 	startNotificationTriggers()
+	// Evict idle rate-limiter buckets so the in-memory limiter maps don't grow
+	// without bound (one entry per client/user forever).
+	startLimiterJanitor()
 
 	r := mux.NewRouter()
 
@@ -200,8 +298,8 @@ func main() {
 	api := r.PathPrefix("/api/v1").Subrouter()
 	api.HandleFunc("/users", GetAllUsersHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/users/{username}", GetUserHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/follow", HandleFollowEvent).Methods("POST", "OPTIONS")
-	api.HandleFunc("/unfollow", HandleUnfollowEvent).Methods("POST", "OPTIONS")
+	api.HandleFunc("/follow", authed(HandleFollowEvent)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/unfollow", authed(HandleUnfollowEvent)).Methods("POST", "OPTIONS")
 	// Legacy post-centric routes retired (/feed, /home, /posts/{userId},
 	// /like, /comments) — the home reels feed now serves challenges only
 	// (battles + unaccepted-as-shorts) via /feed/smart, and per-challenge
@@ -210,7 +308,7 @@ func main() {
 	// more variants (480p/720p/1080p video + thumbnail) so the mobile
 	// client uploads bytes directly to object storage without ever
 	// streaming them through Render.
-	api.HandleFunc("/media/presign", PresignMediaUploadHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/media/presign", authed(PresignMediaUploadHandler)).Methods("POST", "OPTIONS")
 	// HLS background worker endpoints. /next-pending claims one
 	// transcode job (atomic SKIP LOCKED), /complete records the
 	// finished manifest URL, /fail returns the row to the queue so
@@ -220,28 +318,28 @@ func main() {
 	api.HandleFunc("/internal/hls/next-pending", workerAuthed(HLSNextPendingHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/internal/hls/complete", workerAuthed(HLSCompleteHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/internal/hls/fail", workerAuthed(HLSFailHandler)).Methods("POST", "OPTIONS")
-	api.HandleFunc("/challenges", CreateChallengeHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/challenges", authed(CreateChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/arena", GetArenaChallengesHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/challenges/friends", GetFriendsChallengesHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/challenges/accept", AcceptChallengeHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/challenges/like", LikeChallengeHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/challenges/delete", DeleteChallengeHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/challenges/vote", VoteChallengeHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/challenges/comments", AddChallengeCommentHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/challenges/responses/{id}/flag", FlagResponseHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/challenges/friends", authed(GetFriendsChallengesHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/challenges/accept", authed(AcceptChallengeHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/challenges/like", authed(LikeChallengeHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/challenges/delete", authed(DeleteChallengeHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/challenges/vote", authed(VoteChallengeHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/challenges/comments", authed(AddChallengeCommentHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/challenges/responses/{id}/flag", authed(FlagResponseHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/votes", GetVoteResultsHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/comments", GetChallengeCommentsHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/{id}", GetChallengeDetailHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/feed/recommended", RecommendedFeedHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/feed/following", FollowingFeedHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/feed/recommended", authed(RecommendedFeedHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/feed/following", authed(FollowingFeedHandler)).Methods("GET", "OPTIONS")
 	// Psychology-based recommendation engine (v2)
-	api.HandleFunc("/feed/smart", SmartFeedHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/feed/following/v2", FollowingFeedV2Handler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/feed/explore", ExploreFeedHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/feed/smart", authed(SmartFeedHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/feed/following/v2", authed(FollowingFeedV2Handler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/feed/explore", authed(ExploreFeedHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/categories", CategoriesHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/events", TrackEventHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/events/batch", TrackBatchEventsHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/profile", UserProfileHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/events", authed(TrackEventHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/events/batch", authed(TrackBatchEventsHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/profile", authed(UserProfileHandler)).Methods("GET", "OPTIONS")
 	// Challenge-creation autocomplete. Two surfaces — prefix (small,
 	// curated, in-memory) and subject (large, Meilisearch-backed +
 	// popularity-ranked). See suggest_handlers.go for the ranking.
@@ -251,32 +349,35 @@ func main() {
 	// {fullName, bio, visibility, settings}. Authorization happens
 	// inside the handler (path-id must match body userId until
 	// session auth lands). See profile_handlers.go.
-	api.HandleFunc("/users/{id}", UpdateUserProfileHandler).Methods("PATCH", "OPTIONS")
+	api.HandleFunc("/users/{id}", authed(UpdateUserProfileHandler)).Methods("PATCH", "OPTIONS")
 	// Activity surfaces — paginated list of challenges the user has
 	// liked / watched. Cursor-based on the action timestamp so the
 	// page stays stable as the user keeps engaging.
-	api.HandleFunc("/users/{id}/likes", GetLikedChallengesHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/users/{id}/history", GetWatchHistoryHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/users/{id}/history", DeleteWatchHistoryHandler).Methods("DELETE", "OPTIONS")
+	// Paginated social-graph lists for any user (logged-in callers only).
+	api.HandleFunc("/users/{id}/followers", authed(GetFollowersHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/users/{id}/following", authed(GetFollowingHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/users/{id}/likes", authed(GetLikedChallengesHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/users/{id}/history", authed(GetWatchHistoryHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/users/{id}/history", authed(DeleteWatchHistoryHandler)).Methods("DELETE", "OPTIONS")
 	// Block list management. Blocking tears down follow edges in
 	// both directions inside one transaction so the recommender
 	// stops seeing the blocked user's content on the next page load.
-	api.HandleFunc("/blocks", BlockUserHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/unblock", UnblockUserHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/users/{id}/blocks", ListBlockedUsersHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/blocks", authed(BlockUserHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/unblock", authed(UnblockUserHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/users/{id}/blocks", authed(ListBlockedUsersHandler)).Methods("GET", "OPTIONS")
 	// TOTP-based 2FA. Enroll mints a fresh secret + recovery codes
 	// (returned ONCE in plaintext), verify activates the row,
 	// disable requires proving knowledge of a current code.
-	api.HandleFunc("/users/{id}/totp/enroll", EnrollTOTPHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/users/{id}/totp/verify", VerifyTOTPHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/users/{id}/totp/disable", DisableTOTPHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/users/{id}/totp/enroll", authed(EnrollTOTPHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/users/{id}/totp/verify", authed(VerifyTOTPHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/users/{id}/totp/disable", authed(DisableTOTPHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/experiments", ExperimentsListHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/experiments/results", ExperimentResultsHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/users/similar", SimilarUsersHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/users/suggested", SuggestedUsersHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/suggestions/accepted", SuggestionAcceptedHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/watch", HandleWatchEvent).Methods("POST", "OPTIONS")
-	api.HandleFunc("/report", HandleReportEvent).Methods("POST", "OPTIONS")
+	api.HandleFunc("/experiments/results", authed(ExperimentResultsHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/users/similar", authed(SimilarUsersHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/users/suggested", authed(SuggestedUsersHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/suggestions/accepted", authed(SuggestionAcceptedHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/watch", authed(HandleWatchEvent)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/report", authed(HandleReportEvent)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/admin/reseed", adminOnly(ReseedHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/admin/funnels", adminOnly(AdminFunnelsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/errors", adminOnly(AdminErrorsHandler)).Methods("GET", "OPTIONS")
@@ -284,30 +385,32 @@ func main() {
 	api.HandleFunc("/admin/golden_hour", adminOnly(AdminGoldenHourHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/online", adminOnly(AdminOnlineUsersHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/diagnostics", adminOnly(AdminDiagnosticsHandler)).Methods("GET", "OPTIONS")
-	api.HandleFunc("/unblock", HandleUnblockEvent).Methods("POST", "OPTIONS")
 
 	// Push notifications: token registration, prefs, click tracking.
-	api.HandleFunc("/notifications/register", HandleRegisterPushToken).Methods("POST", "OPTIONS")
+	// /unregister and /clicked are intentionally unauthenticated: the push token
+	// (resp. notification id) is itself the capability, and both must work during
+	// logout / from a tapped system notification when no session is in context.
+	api.HandleFunc("/notifications/register", authed(HandleRegisterPushToken)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/notifications/unregister", HandleUnregisterPushToken).Methods("POST", "OPTIONS")
-	api.HandleFunc("/notifications/prefs", HandleGetNotificationPrefs).Methods("GET", "OPTIONS")
-	api.HandleFunc("/notifications/prefs", HandleSetNotificationPrefs).Methods("POST", "OPTIONS")
+	api.HandleFunc("/notifications/prefs", authed(HandleGetNotificationPrefs)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/notifications/prefs", authed(HandleSetNotificationPrefs)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/notifications/clicked", HandleNotificationClicked).Methods("POST", "OPTIONS")
 
 	// Creator insights — feedback loop for creators to understand reach.
-	api.HandleFunc("/creator/insights", HandleCreatorInsightsOverview).Methods("GET", "OPTIONS")
-	api.HandleFunc("/creator/insights/content", HandleCreatorInsightsPerContent).Methods("GET", "OPTIONS")
+	api.HandleFunc("/creator/insights", authed(HandleCreatorInsightsOverview)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/creator/insights/content", authed(HandleCreatorInsightsPerContent)).Methods("GET", "OPTIONS")
 
 	r.HandleFunc("/admin", adminOnly(AdminDashboardHandler)).Methods("GET")
-	api.HandleFunc("/chat/send", SendMessageHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/chat/conversations/{userId}", GetConversationsHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/chat/messages/{userId}/{otherUserId}", GetMessagesHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/chat/read", MarkReadHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/chat/edit", EditMessageHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/chat/delete", DeleteMessageHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/chat/forward", ForwardMessageHandler).Methods("POST", "OPTIONS")
+	api.HandleFunc("/chat/send", authed(SendMessageHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/chat/conversations/{userId}", authed(GetConversationsHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/chat/messages/{userId}/{otherUserId}", authed(GetMessagesHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/chat/read", authed(MarkReadHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/chat/edit", authed(EditMessageHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/chat/delete", authed(DeleteMessageHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/chat/forward", authed(ForwardMessageHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/chat/online/{username}", OnlineStatusHandler).Methods("GET", "OPTIONS")
-	api.HandleFunc("/save", SaveChallengeHandler).Methods("POST", "OPTIONS")
-	api.HandleFunc("/saved/{userId}", GetSavedChallengesHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/save", authed(SaveChallengeHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/saved/{userId}", authed(GetSavedChallengesHandler)).Methods("GET", "OPTIONS")
 
 	r.HandleFunc("/login", LoginHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")

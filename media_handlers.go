@@ -19,7 +19,6 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -85,7 +84,8 @@ func PresignMediaUploadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	payload.UserID = strings.TrimSpace(payload.UserID)
+	// The uploader is the authenticated user, not a client-supplied id.
+	payload.UserID = authUserID(r)
 	if payload.UserID == "" {
 		http.Error(w, "userId is required", http.StatusBadRequest)
 		return

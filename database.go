@@ -1,12 +1,14 @@
 package main
 
 import (
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -314,6 +316,7 @@ func runMigrations() {
 	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN edited_at TIMESTAMPTZ; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE users ADD COLUMN last_seen TIMESTAMPTZ DEFAULT NOW(); EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN category VARCHAR(30) DEFAULT 'other'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN emotion_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN energy_level VARCHAR(10) DEFAULT 'medium'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
@@ -562,19 +565,67 @@ func readUser(id int, username, pw, fullName, bio, visibility, settingsJSON stri
 	return u
 }
 
-// enrichUsers batch-populates Followers and FollowingList for a slice of users
-// using only one extra DB query (much faster for lists).
+// enrichUsers batch-populates Followers and FollowingList for a page of users.
+// It reads only the follows rows that reference someone on the page (the IN
+// lists are bounded by the caller's page size), rather than scanning the whole
+// follows table — which at scale dwarfs any single page. Whole-set callers that
+// genuinely need every follow use enrichUsersAll instead.
 func enrichUsers(users []User) {
 	if len(users) == 0 {
 		return
 	}
 
+	// Bounded IN list of the page's user IDs — same placeholder-building
+	// convention as populateTopResponses, which avoids a pq.Array dependency.
+	// The one id set scopes both directions: follower_id IN (...) gathers each
+	// page user's full following list, following_id IN (...) their full
+	// follower count.
+	placeholders := make([]string, 0, len(users))
+	args := make([]interface{}, 0, len(users))
+	for i := range users {
+		id, err := strconv.Atoi(users[i].ID)
+		if err != nil {
+			continue
+		}
+		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)+1))
+		args = append(args, id)
+	}
+	if len(args) == 0 {
+		return
+	}
+	inList := strings.Join(placeholders, ",")
+	rows, err := db.Query(
+		`SELECT follower_id, following_id FROM follows
+		  WHERE follower_id IN (`+inList+`) OR following_id IN (`+inList+`)`,
+		args...,
+	)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	applyFollows(users, rows)
+}
+
+// enrichUsersAll batch-populates Followers and FollowingList with a single scan
+// of the whole follows table. Used only by whole-set callers (GetAllUsers),
+// where every user is already in hand and binding every id as a query parameter
+// would both cost more than the scan and risk exceeding the protocol's
+// parameter limit.
+func enrichUsersAll(users []User) {
+	if len(users) == 0 {
+		return
+	}
 	rows, err := db.Query(`SELECT follower_id, following_id FROM follows`)
 	if err != nil {
 		return
 	}
 	defer rows.Close()
+	applyFollows(users, rows)
+}
 
+// applyFollows consumes (follower_id, following_id) rows and writes each user's
+// follower count and following list back into the slice.
+func applyFollows(users []User, rows *sql.Rows) {
 	followingMap := make(map[string][]string) // follower → []following
 	followerCount := make(map[string]int)     // user → count of followers
 
@@ -650,19 +701,59 @@ func UserExists(username string) bool {
 	return exists
 }
 
-// IsValidUser checks credentials (plain-text comparison - hash in production).
+// IsValidUser checks credentials against the bcrypt hash in password_hash.
+//
+// Migration path off the old plaintext scheme: a legacy row has an empty
+// password_hash and a plaintext password. On the first successful login for
+// such a row we verify the plaintext (constant-time), then upgrade it — write
+// the bcrypt hash and WIPE the plaintext column. This is zero-downtime and
+// spreads the rehash cost across logins instead of a non-scalable bulk job at
+// boot. Once upgraded, only the bcrypt path is ever taken.
 func IsValidUser(username, password string) bool {
-	var exists bool
-	db.QueryRow(
-		`SELECT EXISTS(SELECT 1 FROM users WHERE username = $1 AND password = $2)`,
-		username, password,
-	).Scan(&exists)
-	return exists
+	var stored, hash string
+	err := db.QueryRow(
+		`SELECT password, COALESCE(password_hash,'') FROM users WHERE username = $1`,
+		username,
+	).Scan(&stored, &hash)
+	if err != nil {
+		return false
+	}
+
+	if hash != "" {
+		return checkPassword(hash, password)
+	}
+
+	// Legacy plaintext row. A row with neither a hash nor a stored password has
+	// no credential on file — reject, so a blank-password attempt can't match an
+	// empty column via the constant-time compare below.
+	if stored == "" {
+		return false
+	}
+	// Constant-time compare to avoid leaking length/content via timing, then
+	// migrate to bcrypt and clear the plaintext.
+	if subtle.ConstantTimeCompare([]byte(stored), []byte(password)) != 1 {
+		return false
+	}
+	if h, herr := hashPassword(password); herr == nil {
+		if _, uerr := db.Exec(
+			`UPDATE users SET password_hash = $1, password = '' WHERE username = $2`,
+			h, username,
+		); uerr != nil {
+			// Non-fatal: the login still succeeds; we just retry the upgrade
+			// next time. Worst case the plaintext lingers one more login.
+			log.Printf("password upgrade failed for %s: %v", username, uerr)
+		}
+	}
+	return true
 }
 
-// GetAllUsers returns every user, batch-enriched with follow data.
+// GetAllUsers returns every user, batch-enriched with follow data. Used by the
+// background jobs that legitimately need the whole set (Meilisearch indexing,
+// notification fan-out, search fallback). The password column is intentionally
+// NOT selected — nothing here needs it and it shouldn't sit in memory. The
+// client-facing roster uses the bounded GetUsersPaginated instead.
 func GetAllUsers() []User {
-	rows, err := db.Query(`SELECT id, username, password, full_name, wins, losses, league FROM users ORDER BY id`)
+	rows, err := db.Query(`SELECT id, username, full_name, wins, losses, league FROM users ORDER BY id`)
 	if err != nil {
 		log.Printf("GetAllUsers error: %v", err)
 		return nil
@@ -672,12 +763,47 @@ func GetAllUsers() []User {
 	var result []User
 	for rows.Next() {
 		var id, wins, losses int
-		var uname, pw, fullName, league string
-		if rows.Scan(&id, &uname, &pw, &fullName, &wins, &losses, &league) == nil {
+		var uname, fullName, league string
+		if rows.Scan(&id, &uname, &fullName, &wins, &losses, &league) == nil {
 			result = append(result, User{
 				ID:       strconv.Itoa(id),
 				Username: uname,
-				password: pw,
+				FullName: fullName,
+				Wins:     wins,
+				Losses:   losses,
+				League:   league,
+			})
+		}
+	}
+
+	enrichUsersAll(result)
+	return result
+}
+
+// GetUsersPaginated returns one ordered page of users (no password), enriched
+// with follow data. This is the client-facing roster query — the old hot path
+// loaded the entire users table on every login, which does not scale; the
+// client now requests a bounded page.
+func GetUsersPaginated(limit, offset int) []User {
+	rows, err := db.Query(
+		`SELECT id, username, full_name, wins, losses, league
+		   FROM users ORDER BY id LIMIT $1 OFFSET $2`,
+		limit, offset,
+	)
+	if err != nil {
+		log.Printf("GetUsersPaginated error: %v", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var result []User
+	for rows.Next() {
+		var id, wins, losses int
+		var uname, fullName, league string
+		if rows.Scan(&id, &uname, &fullName, &wins, &losses, &league) == nil {
+			result = append(result, User{
+				ID:       strconv.Itoa(id),
+				Username: uname,
 				FullName: fullName,
 				Wins:     wins,
 				Losses:   losses,
@@ -688,6 +814,58 @@ func GetAllUsers() []User {
 
 	enrichUsers(result)
 	return result
+}
+
+// followUserPage runs a follows-join query (one direction) and returns a page
+// of the joined users. dir is the column to match the subject on
+// ("following_id" for followers-of-subject, "follower_id" for following-of-
+// subject) and pick is the column naming the other party to return.
+func followUserPage(subjectID string, matchCol, pickCol string, limit, offset int) []User {
+	uid, err := strconv.Atoi(subjectID)
+	if err != nil {
+		return nil
+	}
+	// matchCol/pickCol are not user input — they're fixed literals chosen by the
+	// two callers below — so interpolating them into the SQL is safe.
+	q := `SELECT u.id, u.username, u.full_name, u.wins, u.losses, u.league
+	        FROM follows f JOIN users u ON u.id = f.` + pickCol + `
+	       WHERE f.` + matchCol + ` = $1
+	       ORDER BY f.created_at DESC
+	       LIMIT $2 OFFSET $3`
+	rows, err := db.Query(q, uid, limit, offset)
+	if err != nil {
+		log.Printf("followUserPage error: %v", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var result []User
+	for rows.Next() {
+		var id, wins, losses int
+		var uname, fullName, league string
+		if rows.Scan(&id, &uname, &fullName, &wins, &losses, &league) == nil {
+			result = append(result, User{
+				ID:       strconv.Itoa(id),
+				Username: uname,
+				FullName: fullName,
+				Wins:     wins,
+				Losses:   losses,
+				League:   league,
+			})
+		}
+	}
+	enrichUsers(result)
+	return result
+}
+
+// GetFollowers returns a page of users who follow subjectID.
+func GetFollowers(subjectID string, limit, offset int) []User {
+	return followUserPage(subjectID, "following_id", "follower_id", limit, offset)
+}
+
+// GetFollowing returns a page of users that subjectID follows.
+func GetFollowing(subjectID string, limit, offset int) []User {
+	return followUserPage(subjectID, "follower_id", "following_id", limit, offset)
 }
 
 // --------------------------------------------------------------------------------
@@ -1003,10 +1181,18 @@ func seedUsers() {
 		{"cyberking", "pass10", "Cyber King", "Platinum", 100, 25},
 	}
 	for _, u := range data {
+		// Seed with a bcrypt hash and an empty plaintext column so a fresh DB
+		// never has a password at rest. Dev still logs in with the plaintext
+		// values above (pass1…pass10) — they're just hashed when stored.
+		hash, err := hashPassword(u.password)
+		if err != nil {
+			log.Printf("seed: hashing password for %s failed: %v", u.username, err)
+			continue
+		}
 		db.Exec(
-			`INSERT INTO users (username, password, full_name, wins, losses, league)
-			 VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
-			u.username, u.password, u.fullName, u.wins, u.losses, u.league,
+			`INSERT INTO users (username, password, password_hash, full_name, wins, losses, league)
+			 VALUES ($1,'',$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
+			u.username, hash, u.fullName, u.wins, u.losses, u.league,
 		)
 	}
 }

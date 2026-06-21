@@ -334,6 +334,8 @@ func TrackEventHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid event payload"}`, http.StatusBadRequest)
 		return
 	}
+	// Attribute the event to the authenticated user, ignoring any body userId.
+	event.UserID = authUserID(r)
 
 	// Lifecycle events legitimately have no contentId (the user wasn't watching
 	// anything when they backgrounded/returned). Allow those past the check.
@@ -442,9 +444,13 @@ func TrackBatchEventsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
 		return
 	}
+	// Every event in the batch is attributed to the authenticated user — a
+	// client can't smuggle in events authored as someone else.
+	uid := authUserID(r)
 
 	go func() {
 		for _, event := range payload.Events {
+			event.UserID = uid
 			if event.SessionID == "" {
 				event.SessionID = fmt.Sprintf("%s_%d", event.UserID, time.Now().Unix()/1800)
 			}
@@ -3738,7 +3744,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := r.URL.Query().Get("userId")
+	userID := authUserID(r)
 	sessionID := r.URL.Query().Get("sessionId")
 	pageStr := r.URL.Query().Get("page")
 	limitStr := r.URL.Query().Get("limit")
@@ -4178,7 +4184,7 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := r.URL.Query().Get("userId")
+	userID := authUserID(r)
 	pageStr := r.URL.Query().Get("page")
 	limitStr := r.URL.Query().Get("limit")
 
@@ -4286,7 +4292,7 @@ func UserProfileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := r.URL.Query().Get("userId")
+	userID := authUserID(r)
 	if userID == "" {
 		http.Error(w, `{"error":"userId is required"}`, http.StatusBadRequest)
 		return

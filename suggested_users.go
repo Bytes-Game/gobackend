@@ -531,7 +531,7 @@ func SuggestedUsersHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	userID := r.URL.Query().Get("userId")
+	userID := authUserID(r)
 	pageStr := r.URL.Query().Get("page")
 	if userID == "" {
 		http.Error(w, `{"error":"userId is required"}`, http.StatusBadRequest)

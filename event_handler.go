@@ -17,6 +17,8 @@ func HandleFollowEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The follower is whoever the token says it is — never trust the body.
+	payload.FollowerID = authUserID(r)
 
 	// Per-user follow rate-limit. Catches follow-bombing without
 	// blocking organic follow flurries (burst is 5 in actionLimitTable).
@@ -49,6 +51,8 @@ func HandleUnfollowEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The actor is the authenticated user, not a client-supplied id.
+	payload.UnfollowerID = authUserID(r)
 
 	// Same per-user gate as follow. Unfollow-bombing is rarer but
 	// not unheard of as a way to escape recommender memory by
@@ -94,6 +98,8 @@ func HandleWatchEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Attribute the watch to the authenticated user, ignoring any body userId.
+	payload.UserID = authUserID(r)
 
 	if payload.ContentType == "" || payload.ContentID == "" || payload.UserID == "" {
 		http.Error(w, "userId, contentId, and contentType are required", http.StatusBadRequest)
@@ -126,6 +132,8 @@ func HandleReportEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The reporter is the authenticated user; never let the body name someone else.
+	payload.ReporterID = authUserID(r)
 
 	if payload.ReporterID == "" || payload.TargetID == "" || payload.Reason == "" {
 		http.Error(w, "reporterId, targetId, and reason are required", http.StatusBadRequest)
@@ -165,27 +173,6 @@ func HandleReportEvent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(report)
-}
-
-// HandleUnblockEvent reverses a previous block so the creator can re-appear
-// in the user's feed. POST /api/v1/unblock { userId, creatorId }.
-func HandleUnblockEvent(w http.ResponseWriter, r *http.Request) {
-	var payload struct {
-		UserID    string `json:"userId"`
-		CreatorID string `json:"creatorId"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if payload.UserID == "" || payload.CreatorID == "" {
-		http.Error(w, "userId and creatorId are required", http.StatusBadRequest)
-		return
-	}
-	go UnmarkBlocked(payload.UserID, payload.CreatorID)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
 // isHardBlockReason decides whether a report reason is severe enough that the

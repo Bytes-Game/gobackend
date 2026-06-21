@@ -36,6 +36,16 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Authenticate the socket. Browsers can't set an Authorization header on a
+	// WebSocket handshake, so the client passes its session token as a query
+	// param. The token's username must match the path — otherwise a caller could
+	// open a socket as someone else and receive their realtime chat/notifications.
+	claims, err := parseToken(r.URL.Query().Get("token"))
+	if err != nil || claims.Username != username {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("Failed to upgrade connection for %s: %v", username, err)

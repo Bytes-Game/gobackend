@@ -247,6 +247,8 @@ func FlagResponseHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
+	// The flagger is the authenticated user.
+	payload.UserID = authUserID(r)
 	userID, err := strconv.Atoi(payload.UserID)
 	if err != nil {
 		http.Error(w, "invalid userId", http.StatusBadRequest)

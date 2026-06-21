@@ -46,13 +46,13 @@ func UpdateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	// User can only edit their own profile. Until session auth lands
-	// the client passes userId in the body; we require it to match
-	// the path id so a forged body can't masquerade as someone else.
-	if payload.UserID == "" || payload.UserID != pathID {
-		http.Error(w, "userId does not match path", http.StatusForbidden)
+	// You may only edit your own profile — identity comes from the token,
+	// and the path id must match it.
+	uid, ok := requirePathUser(w, r, pathID)
+	if !ok {
 		return
 	}
+	payload.UserID = uid
 
 	// Profile edits are rare. 60/hr is generous (one minute apart on
 	// average), burst of 3 covers a quick typo-fix sequence. Anything
@@ -158,6 +158,47 @@ func UpdateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // ════════════════════════════════════════════════════════════════════
+// Followers / Following
+// ════════════════════════════════════════════════════════════════════
+
+// GetFollowersHandler — GET /api/v1/users/{id}/followers?page=&limit=
+//
+// Returns a bounded page of the accounts that follow {id}. Replaces the old
+// client behaviour of fetching the ENTIRE users table and filtering by
+// followingList in Dart — which is both slow and incorrect once the roster
+// exceeds one page.
+func GetFollowersHandler(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	if id == "" {
+		http.Error(w, "missing user id", http.StatusBadRequest)
+		return
+	}
+	limit := parseIntOrDefault(r.URL.Query().Get("limit"), 30, 100)
+	page := parseIntOrDefault(r.URL.Query().Get("page"), 1, 1_000_000)
+	users := GetFollowers(id, limit, (page-1)*limit)
+	if users == nil {
+		users = []User{}
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+// GetFollowingHandler — GET /api/v1/users/{id}/following?page=&limit=
+func GetFollowingHandler(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	if id == "" {
+		http.Error(w, "missing user id", http.StatusBadRequest)
+		return
+	}
+	limit := parseIntOrDefault(r.URL.Query().Get("limit"), 30, 100)
+	page := parseIntOrDefault(r.URL.Query().Get("page"), 1, 1_000_000)
+	users := GetFollowing(id, limit, (page-1)*limit)
+	if users == nil {
+		users = []User{}
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+// ════════════════════════════════════════════════════════════════════
 // Liked videos
 // ════════════════════════════════════════════════════════════════════
 
@@ -172,6 +213,10 @@ func GetLikedChallengesHandler(w http.ResponseWriter, r *http.Request) {
 	userID := vars["id"]
 	if userID == "" {
 		http.Error(w, "missing user id", http.StatusBadRequest)
+		return
+	}
+	// A user's liked list is private — only the owner may read it.
+	if _, ok := requirePathUser(w, r, userID); !ok {
 		return
 	}
 	// challenge_likes.user_id is INT; bind as int so PostgreSQL can
@@ -282,6 +327,10 @@ func GetWatchHistoryHandler(w http.ResponseWriter, r *http.Request) {
 	userID := vars["id"]
 	if userID == "" {
 		http.Error(w, "missing user id", http.StatusBadRequest)
+		return
+	}
+	// Watch history is private — only the owner may read it.
+	if _, ok := requirePathUser(w, r, userID); !ok {
 		return
 	}
 	// watch_events.user_id and challenges.id are both INT columns;
@@ -428,8 +477,8 @@ func DeleteWatchHistoryHandler(w http.ResponseWriter, r *http.Request) {
 		UserID string `json:"userId"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&payload)
-	if payload.UserID == "" || payload.UserID != userID {
-		http.Error(w, "userId does not match path", http.StatusForbidden)
+	// Identity comes from the session token; the path id must be the caller's own.
+	if _, ok := requirePathUser(w, r, userID); !ok {
 		return
 	}
 	// Same int-cast as the GET — DELETE … WHERE user_id = $1 must
@@ -473,6 +522,8 @@ func BlockUserHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
+	// The blocker is the authenticated user.
+	payload.BlockerID = authUserID(r)
 	if payload.BlockerID == "" || payload.BlockedID == "" {
 		http.Error(w, "blockerId and blockedId required", http.StatusBadRequest)
 		return
@@ -534,6 +585,8 @@ func UnblockUserHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
+	// The unblocker is the authenticated user.
+	payload.BlockerID = authUserID(r)
 	if payload.BlockerID == "" || payload.BlockedID == "" {
 		http.Error(w, "blockerId and blockedId required", http.StatusBadRequest)
 		return
@@ -555,6 +608,10 @@ func ListBlockedUsersHandler(w http.ResponseWriter, r *http.Request) {
 	userID := vars["id"]
 	if userID == "" {
 		http.Error(w, "missing user id", http.StatusBadRequest)
+		return
+	}
+	// The block list is private — only the owner may read it.
+	if _, ok := requirePathUser(w, r, userID); !ok {
 		return
 	}
 	rows, err := db.Query(
@@ -618,8 +675,8 @@ func EnrollTOTPHandler(w http.ResponseWriter, r *http.Request) {
 		UserID string `json:"userId"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&payload)
-	if payload.UserID == "" || payload.UserID != userID {
-		http.Error(w, "userId does not match path", http.StatusForbidden)
+	// Identity comes from the session token; the path id must be the caller's own.
+	if _, ok := requirePathUser(w, r, userID); !ok {
 		return
 	}
 
@@ -689,8 +746,8 @@ func VerifyTOTPHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	if payload.UserID == "" || payload.UserID != userID {
-		http.Error(w, "userId does not match path", http.StatusForbidden)
+	// Identity comes from the session token; the path id must be the caller's own.
+	if _, ok := requirePathUser(w, r, userID); !ok {
 		return
 	}
 	if payload.Code == "" {
@@ -753,8 +810,8 @@ func DisableTOTPHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	if payload.UserID == "" || payload.UserID != userID {
-		http.Error(w, "userId does not match path", http.StatusForbidden)
+	// Identity comes from the session token; the path id must be the caller's own.
+	if _, ok := requirePathUser(w, r, userID); !ok {
 		return
 	}
 

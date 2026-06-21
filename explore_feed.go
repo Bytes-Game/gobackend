@@ -57,7 +57,7 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := r.URL.Query().Get("userId")
+	userID := authUserID(r)
 	if userID == "" {
 		http.Error(w, `{"error":"userId required"}`, http.StatusBadRequest)
 		return

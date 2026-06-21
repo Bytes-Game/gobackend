@@ -22,7 +22,9 @@ func HandleCreatorInsightsOverview(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	creatorID := r.URL.Query().Get("creatorId")
+	// Insights are always for the authenticated creator — never a
+	// client-named creatorId (which would leak another creator's analytics).
+	creatorID := authUserID(r)
 	if creatorID == "" {
 		http.Error(w, "creatorId required", http.StatusBadRequest)
 		return
@@ -50,7 +52,7 @@ func HandleCreatorInsightsPerContent(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	creatorID := r.URL.Query().Get("creatorId")
+	creatorID := authUserID(r)
 	contentType := r.URL.Query().Get("type")
 	contentID := r.URL.Query().Get("id")
 	if creatorID == "" || contentType == "" || contentID == "" {

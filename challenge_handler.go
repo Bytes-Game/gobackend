@@ -61,6 +61,8 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The creator is the authenticated user, never a client-supplied id.
+	payload.CreatorID = authUserID(r)
 
 	if payload.Prefix == "" || payload.Subject == "" {
 		http.Error(w, "prefix and subject are required", http.StatusBadRequest)
@@ -113,7 +115,8 @@ func GetArenaChallengesHandler(w http.ResponseWriter, r *http.Request) {
 // GetFriendsChallengesHandler returns friends-only challenges visible to requesting user.
 // GET /api/v1/challenges/friends?userId=x
 func GetFriendsChallengesHandler(w http.ResponseWriter, r *http.Request) {
-	userID := r.URL.Query().Get("userId")
+	// Identity comes from the session token, not the query string.
+	userID := authUserID(r)
 	if userID == "" {
 		http.Error(w, "userId query parameter required", http.StatusBadRequest)
 		return
@@ -182,6 +185,8 @@ func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The responder is the authenticated user.
+	payload.ResponderID = authUserID(r)
 
 	// 30 accepts per hour per user. Higher than challenge_create
 	// because responding is a lighter act, but still bounded so a
@@ -232,6 +237,8 @@ func VoteChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The voter is the authenticated user.
+	payload.VoterID = authUserID(r)
 
 	if payload.ChallengeID == "" || payload.ResponseID == "" || payload.VoterID == "" {
 		http.Error(w, "challengeId, responseId, and voterId are required", http.StatusBadRequest)
@@ -290,6 +297,12 @@ func AddChallengeCommentHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
+	// Author identity (id + display name) comes from the token, not the body,
+	// so a caller can't post a comment under someone else's name.
+	payload.UserID = authUserID(r)
+	if u := authUsername(r); u != "" {
+		payload.Username = u
+	}
 
 	if payload.Text == "" {
 		http.Error(w, "text is required", http.StatusBadRequest)
@@ -339,6 +352,8 @@ func LikeChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
+	// The liker is the authenticated user.
+	payload.UserID = authUserID(r)
 
 	// ~60 likes/min per user. High enough for an enthusiastic skim
 	// through the feed; low enough to catch bot-scripted heart spam
@@ -379,6 +394,8 @@ func DeleteChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
+	// Ownership is checked below against the trusted (token) user id.
+	payload.UserID = authUserID(r)
 	if payload.ChallengeID == "" || payload.UserID == "" {
 		http.Error(w, "challengeId and userId are required", http.StatusBadRequest)
 		return

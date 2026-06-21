@@ -44,6 +44,8 @@ func HandleRegisterPushToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
+	// Register the token against the authenticated user.
+	body.UserID = authUserID(r)
 	if err := registerDeviceToken(body.UserID, body.Token, body.Platform); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -76,7 +78,7 @@ func HandleGetNotificationPrefs(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	userID := r.URL.Query().Get("userId")
+	userID := authUserID(r)
 	if userID == "" {
 		http.Error(w, "userId required", http.StatusBadRequest)
 		return
@@ -97,6 +99,8 @@ func HandleSetNotificationPrefs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
+	// Prefs always belong to the authenticated user.
+	p.UserID = authUserID(r)
 	if p.UserID == "" {
 		http.Error(w, "userId required", http.StatusBadRequest)
 		return

@@ -26,6 +26,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	jwt "github.com/golang-jwt/jwt/v5"
 )
 
 type config struct {
@@ -99,6 +101,16 @@ func main() {
 		endpoints: strings.Split(*endpointsCSV, ","),
 	}
 
+	// Protected endpoints now require a session token. We mint one per virtual
+	// user locally (signed with the same JWT_SECRET the server validates with)
+	// so the load profile keeps its per-user distribution without funnelling
+	// every worker through /login first.
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		fmt.Println("⚠️  JWT_SECRET not set — minted tokens won't validate and every " +
+			"request will 401. Set JWT_SECRET to the value the target backend uses.")
+	}
+
 	fmt.Printf("── devb loadtest ── base=%s users=%d rps=%d duration=%s endpoints=%v\n\n",
 		cfg.base, cfg.users, cfg.rps, cfg.duration, cfg.endpoints)
 
@@ -148,19 +160,20 @@ func main() {
 		go func(idx int) {
 			defer wg.Done()
 			userID := fmt.Sprintf("lt_user_%d", idx)
+			token := mintToken(userID, secret)
 			for {
 				select {
 				case ep, ok := <-work:
 					if !ok {
 						return
 					}
-					a.add(hit(client, cfg.base, ep, userID))
+					a.add(hit(client, cfg.base, ep, userID, token))
 				case <-done:
 					// Drain remaining work in the channel so we don't lose observations.
 					for {
 						select {
 						case ep := <-work:
-							a.add(hit(client, cfg.base, ep, userID))
+							a.add(hit(client, cfg.base, ep, userID, token))
 						default:
 							return
 						}
@@ -220,15 +233,38 @@ var (
 	dropped int64
 )
 
-func hit(client *http.Client, base, path, userID string) result {
+// mintToken builds an HS256 session token for a virtual user, signed with the
+// same secret the backend validates against. Mirrors the server's issueToken so
+// loadtest can authenticate without a /login round-trip per user.
+func mintToken(userID, secret string) string {
+	claims := jwt.RegisteredClaims{
+		Subject:   userID,
+		IssuedAt:  jwt.NewNumericDate(time.Now()),
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(2 * time.Hour)),
+	}
+	tok, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
+	if err != nil {
+		return ""
+	}
+	return tok
+}
+
+func hit(client *http.Client, base, path, userID, token string) result {
 	url := base + path
 	if !strings.Contains(path, "?") {
 		url += "?userId=" + userID
 	} else {
 		url += "&userId=" + userID
 	}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return result{latencyMs: 0, status: 0, err: err}
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	t0 := time.Now()
-	resp, err := client.Get(url)
+	resp, err := client.Do(req)
 	dur := time.Since(t0).Seconds() * 1000
 	if err != nil {
 		return result{latencyMs: dur, status: 0, err: err}

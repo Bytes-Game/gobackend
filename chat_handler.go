@@ -26,6 +26,8 @@ func SendMessageHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
+	// The sender is the authenticated user — you can't send as someone else.
+	payload.SenderID = authUserID(r)
 
 	senderID, _ := strconv.Atoi(payload.SenderID)
 	receiverID, _ := strconv.Atoi(payload.ReceiverID)
@@ -75,6 +77,10 @@ func SendMessageHandler(w http.ResponseWriter, r *http.Request) {
 // GetMessagesHandler handles GET /api/v1/chat/messages/{userId}/{otherUserId}
 func GetMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
+	// You may only read your own conversations.
+	if _, ok := requirePathUser(w, r, vars["userId"]); !ok {
+		return
+	}
 	userID, _ := strconv.Atoi(vars["userId"])
 	otherID, _ := strconv.Atoi(vars["otherUserId"])
 
@@ -106,6 +112,9 @@ func GetMessagesHandler(w http.ResponseWriter, r *http.Request) {
 // GetConversationsHandler handles GET /api/v1/chat/conversations/{userId}
 func GetConversationsHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
+	if _, ok := requirePathUser(w, r, vars["userId"]); !ok {
+		return
+	}
 	userID, _ := strconv.Atoi(vars["userId"])
 
 	conversations := GetConversations(userID)
@@ -127,8 +136,16 @@ func MarkReadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid body", http.StatusBadRequest)
 		return
 	}
+	// The receiver (the one marking messages read) is the authenticated user.
+	payload.ReceiverID = authUserID(r)
 	sID, _ := strconv.Atoi(payload.SenderID)
 	rID, _ := strconv.Atoi(payload.ReceiverID)
+	// Reject a non-numeric senderId with a clear 400 instead of silently
+	// no-op'ing — matches SendMessageHandler / EditMessageHandler.
+	if sID == 0 {
+		http.Error(w, "senderId must be a valid integer", http.StatusBadRequest)
+		return
+	}
 	MarkMessagesRead(sID, rID)
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, `{"ok":true}`)
@@ -145,6 +162,8 @@ func EditMessageHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid body", http.StatusBadRequest)
 		return
 	}
+	// Only the author may edit; the author is the authenticated user.
+	payload.SenderID = authUserID(r)
 	msgID, _ := strconv.Atoi(payload.MessageID)
 	senderID, _ := strconv.Atoi(payload.SenderID)
 	if msgID == 0 || senderID == 0 || payload.Text == "" {
@@ -169,6 +188,8 @@ func DeleteMessageHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid body", http.StatusBadRequest)
 		return
 	}
+	// Only the author may delete; the author is the authenticated user.
+	payload.SenderID = authUserID(r)
 	msgID, _ := strconv.Atoi(payload.MessageID)
 	senderID, _ := strconv.Atoi(payload.SenderID)
 	if msgID == 0 || senderID == 0 {
@@ -195,6 +216,8 @@ func ForwardMessageHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid body", http.StatusBadRequest)
 		return
 	}
+	// The forwarder is the authenticated user.
+	payload.SenderID = authUserID(r)
 	msgID, _ := strconv.Atoi(payload.MessageID)
 	senderID, _ := strconv.Atoi(payload.SenderID)
 	receiverID, _ := strconv.Atoi(payload.ReceiverID)
@@ -249,6 +272,8 @@ func SaveChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid body", http.StatusBadRequest)
 		return
 	}
+	// The saver is the authenticated user.
+	payload.UserID = authUserID(r)
 	saved, err := ToggleSaveChallenge(payload.UserID, payload.ChallengeID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -265,7 +290,10 @@ func SaveChallengeHandler(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/saved/{userId}
 func GetSavedChallengesHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	userID := vars["userId"]
+	userID, ok := requirePathUser(w, r, vars["userId"])
+	if !ok {
+		return
+	}
 
 	challenges := GetSavedChallenges(userID)
 	if challenges == nil {

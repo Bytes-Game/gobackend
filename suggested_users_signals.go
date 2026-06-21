@@ -144,6 +144,8 @@ func SuggestionAcceptedHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 		return
 	}
+	// The accepting user is the authenticated one.
+	p.UserID = authUserID(r)
 	if p.UserID == "" || p.Lane == "" {
 		http.Error(w, `{"error":"userId and lane are required"}`, http.StatusBadRequest)
 		return
