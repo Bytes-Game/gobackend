@@ -281,6 +281,7 @@ func main() {
 	startTrendingPruner()
 	startBootstrapPoolWorker()
 	startWatchRatioFlusher()
+	startEmbeddingBackfillWorker()
 	initPushSender()
 	startNotificationDispatcher()
 	startNotificationTriggers()

@@ -555,6 +555,25 @@ func runMigrations() {
 		log.Printf("Warning: challenge counter denormalization issue: %v", err)
 	}
 
+	// pgvector ANN (optional). If the `vector` extension can be created (Render's
+	// managed Postgres, incl. free tier, supports it), add a vector(32) embedding
+	// column so the embedding retrieval source can do a true nearest-neighbor
+	// scan over the WHOLE catalog instead of cosine-reranking the recency pool.
+	// Fully optional + tolerant: if the role can't create the extension,
+	// pgvectorAvailable stays false and sourceEmbeddingNeighbors falls back to
+	// the in-process cosine rerank — nothing breaks. The embedding column is
+	// populated by startEmbeddingBackfillWorker(), not at request time.
+	pgvectorAvailable = false
+	if _, err := db.Exec(`
+		CREATE EXTENSION IF NOT EXISTS vector;
+		ALTER TABLE challenges ADD COLUMN IF NOT EXISTS embedding vector(32);
+	`); err != nil {
+		log.Printf("pgvector not enabled (%v) — embedding retrieval uses in-process cosine rerank", err)
+	} else {
+		pgvectorAvailable = true
+		log.Println("pgvector enabled: challenges.embedding ready for ANN retrieval")
+	}
+
 	log.Println("Database migrations completed")
 }
 

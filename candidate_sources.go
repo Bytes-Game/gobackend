@@ -418,6 +418,15 @@ func sourceEmbeddingNeighbors(userID string, limit int) []HomeFeedItem {
 	if db == nil {
 		return nil
 	}
+	// Prefer the pgvector ANN path when available: it searches the WHOLE catalog
+	// (including older semantically-similar content), not just the recency pool.
+	// Falls through to the in-process cosine rerank below when pgvector isn't
+	// enabled or returns nothing.
+	if pgvectorAvailable {
+		if items := sourceEmbeddingANN(userID, limit); len(items) > 0 {
+			return items
+		}
+	}
 	uv := getUserEmbedding(userID)
 	if userEmbeddingIsCold(uv) {
 		return nil
