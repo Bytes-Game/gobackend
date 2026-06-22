@@ -571,6 +571,12 @@ func BlockUserHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "commit failed", http.StatusInternalServerError)
 		return
 	}
+	// Mirror the block into the Redis blocked-creators set the ranker actually
+	// reads (negativeCreatorPenalty zeroes blocked creators). Without this the
+	// button-block updated user_blocks but never hid the creator's content from
+	// the feed — blocking via the UI did nothing to ranking. Synchronous so the
+	// very next feed request already excludes them.
+	MarkBlocked(payload.BlockerID, payload.BlockedID)
 	writeJSON(w, http.StatusOK, map[string]any{"blocked": true})
 }
 
@@ -599,6 +605,9 @@ func UnblockUserHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Keep the ranker's Redis blocked-creators set in sync so the creator can
+	// reappear in the feed after an unblock.
+	UnmarkBlocked(payload.BlockerID, payload.BlockedID)
 	writeJSON(w, http.StatusOK, map[string]any{"unblocked": true})
 }
 
