@@ -3383,16 +3383,19 @@ func moodDrivenPattern(mood string) []string {
 func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]bool) []ScoredItem {
 	// Bucket items by their best-fit slot type
 	buckets := map[string][]ScoredItem{
-		slotHook:      {},
-		slotSocial:    {},
-		slotDiscovery: {},
-		slotTrending:  {},
-		slotChallenge: {},
-		slotCooldown:  {},
-		slotEgoBoost:  {},
-		slotCliffhang: {},
-		slotSurprise:  {},
-		slotRival:     {},
+		slotHook:       {},
+		slotSocial:     {},
+		slotDiscovery:  {},
+		slotTrending:   {},
+		slotChallenge:  {},
+		slotCooldown:   {},
+		slotEgoBoost:   {},
+		slotCliffhang:  {},
+		slotSurprise:   {},
+		slotRival:      {},
+		slotNostalgic:  {},
+		slotFavCreator: {},
+		slotFreshBlood: {},
 	}
 
 	for _, item := range scored {
@@ -3422,8 +3425,12 @@ func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]
 			buckets[slotChallenge] = append(buckets[slotChallenge], item)
 		}
 
-		// Cooldown: low energy content — gentle, relaxing items
-		if bd["energyFit"] > 0.7 && item.Item.Type == "post" {
+		// Cooldown: gentle, relaxing items. The feed is challenge-only now, so
+		// the old `Type == "post"` gate left this bucket permanently empty (and
+		// with it the calming mood patterns). Select on a strong energy-fit OR
+		// an explicitly calming emotion tag so challenges can fill it.
+		if bd["energyFit"] > 0.7 || hasEmotionTag(item, "chill") ||
+			hasEmotionTag(item, "satisfying") || hasEmotionTag(item, "wholesome") {
 			buckets[slotCooldown] = append(buckets[slotCooldown], item)
 		}
 
@@ -3454,6 +3461,28 @@ func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]
 		} else if bd["social"] < 0.1 && item.Item.Type == "challenge" {
 			// Non-friend challenge creators are potential rivals
 			buckets[slotRival] = append(buckets[slotRival], item)
+		}
+
+		// Nostalgic: proven personal favorites — content from creators/categories
+		// the user has completed, looped, scrolled back to, or unmuted before.
+		// Without this bucket the calming/nostalgic strategies and the
+		// frustrated/bored mood patterns silently degraded to generic hook content.
+		if bd["completeBonus"] > 0 || bd["scrollBackBonus"] > 0 ||
+			bd["loopBonus"] > 0 || bd["unmuteBonus"] > 0 {
+			buckets[slotNostalgic] = append(buckets[slotNostalgic], item)
+		}
+
+		// Fav creator: the user's top creators — strong creator affinity or a
+		// recent profile visit. Powers the creator_focus strategy.
+		if bd["creatorAffinityBoost"] > 0.1 || bd["profileVisitBonus"] > 0 {
+			buckets[slotFavCreator] = append(buckets[slotFavCreator], item)
+		}
+
+		// Fresh blood: brand-new content the user has never seen — unseen AND
+		// either recent or globally cold. Powers the fresh_blood discovery
+		// strategy (used by the bored/at-risk recovery patterns).
+		if bd["unseenBonus"] > 0 && (bd["freshness"] > 0.5 || bd["coldContentBonus"] > 0.2) {
+			buckets[slotFreshBlood] = append(buckets[slotFreshBlood], item)
 		}
 	}
 
@@ -3637,15 +3666,23 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 	// (wider window + lower minViews/minLikes), so re-running with a wider
 	// tier returns a superset ordered by the same (views + likes*3) DESC
 	// scoring. We always keep the strongest results.
+	// Over-fetch by one item per kind so hasMore can be true. Without this,
+	// battleLimit+shortLimit == limit exactly and every cold-start query uses
+	// LIMIT == its budget, so len(items) can never exceed limit and hasMore is
+	// structurally always false — a brand-new user (the cohort we most need to
+	// retain) could never paginate past page 1. We trim back to limit below.
+	battleFetch := battleLimit + 1
+	shortFetch := shortLimit + 1
+
 	var battleItems, shortItems []HomeFeedItem
 	for _, tier := range tiers {
-		if len(battleItems) < battleLimit {
-			battleItems = coldStartChallengesTiered("battle", battleLimit, battleOffset, tier.window, tier.minViews, tier.minLikes)
+		if len(battleItems) < battleFetch {
+			battleItems = coldStartChallengesTiered("battle", battleFetch, battleOffset, tier.window, tier.minViews, tier.minLikes)
 		}
-		if len(shortItems) < shortLimit {
-			shortItems = coldStartChallengesTiered("short", shortLimit, shortOffset, tier.window, tier.minViews, tier.minLikes)
+		if len(shortItems) < shortFetch {
+			shortItems = coldStartChallengesTiered("short", shortFetch, shortOffset, tier.window, tier.minViews, tier.minLikes)
 		}
-		if len(battleItems) >= battleLimit && len(shortItems) >= shortLimit {
+		if len(battleItems) >= battleFetch && len(shortItems) >= shortFetch {
 			break
 		}
 	}
