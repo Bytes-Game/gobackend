@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"strings"
+	"unicode"
 )
 
 // Energy-level classifier — fully algorithmic, no user input.
@@ -356,11 +357,46 @@ func creatorRecentEnergy(creatorID string) string {
 // `containsAny` already exists in candidate_sources.go with a
 // different signature (slice-haystack / string-needle). Keeping the
 // names distinct prevents future-me from grabbing the wrong one.
+//
+// Matching is word-aware rather than raw substring, so short needles
+// stop false-matching inside longer unrelated words ("ski" → "skincare",
+// "run" → "brunch", "code" → "decode", "game" → "endgame"). The rules,
+// in priority order per needle:
+//   - phrase / hyphenated needle (contains ' ' or '-'): raw substring,
+//     because the keyword lists deliberately use these for multi-word
+//     motifs ("muay thai", "drag racing", "asmr-like", "slow-motion").
+//   - short needle (<5 runes): must equal a whole word token, so "ski"
+//     matches the word "ski" but never "skincare".
+//   - stem needle (>=5 runes): matches a token by prefix, preserving the
+//     intended inflection stems ("meditat"→"meditation", "breakdanc"→
+//     "breakdancing", "speedrun"→"speedrunning").
 func containsAnyKeyword(haystack string, needles []string) bool {
+	var toks []string // tokenized lazily — only when a word-needle needs it
 	for _, n := range needles {
-		if strings.Contains(haystack, n) {
-			return true
+		if strings.ContainsAny(n, " -") {
+			if strings.Contains(haystack, n) {
+				return true
+			}
+			continue
+		}
+		if toks == nil {
+			toks = tokenizeWords(haystack)
+		}
+		stem := len(n) >= 5
+		for _, t := range toks {
+			if t == n || (stem && strings.HasPrefix(t, n)) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// tokenizeWords splits text into lowercase-able word tokens on any
+// non-letter/non-digit rune. Local to the energy classifier so its
+// matching semantics can't drift if the shared tokenizer changes.
+func tokenizeWords(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
 }

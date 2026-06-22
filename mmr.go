@@ -196,8 +196,14 @@ func defaultCreatorOf(si ScoredItem) string {
 // applyMMRDefault uses the Redis-cached content embedding for each item.
 // This is the production call site — getOrBuildContentEmbedding hits Redis
 // for already-warm items so the per-rerank cost stays bounded at scale.
+//
+// We pass λ=0 so applyMMRWithCreator engages the position-varying ramp
+// (mmrLambdaHead 0.55 at the fragile head → mmrLambdaTail 0.85 at the
+// committed tail) instead of a flat λ. Passing the legacy constant
+// mmrLambda (0.72) here would silently disable the ramp — the head needs
+// more diversity, the tail more relevance, which a constant can't deliver.
 func applyMMRDefault(items []ScoredItem) []ScoredItem {
-	return applyMMR(items, mmrLambda, mmrTopK, func(si ScoredItem) []float64 {
+	return applyMMR(items, 0, mmrTopK, func(si ScoredItem) []float64 {
 		id := getItemID(si.Item)
 		cs := getContentScore(id, si.Item.Type)
 		emotions := getContentEmotions(id, si.Item.Type)

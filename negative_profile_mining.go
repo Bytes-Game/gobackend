@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -191,17 +192,19 @@ func isMineableNegative(eventType string, completionRate float64) bool {
 
 // negativeProfileMineEpoch is bumped each time we apply a negative-feedback
 // nudge so the analytics job knows there's dirty profile state to flush.
-// Atomic int isn't strictly necessary — used only for diagnostics.
-var negativeProfileMineEpoch int64
+// Bumped from the per-event mining goroutine (many concurrent) and read by
+// the diagnostics endpoint, so it must be atomic — a plain int64++ from
+// multiple goroutines is a data race that `go test -race` flags.
+var negativeProfileMineEpoch atomic.Int64
 
 func bumpNegativeProfileMineEpoch() {
-	negativeProfileMineEpoch++
+	negativeProfileMineEpoch.Add(1)
 }
 
 // negativeProfileMineDiag returns the current epoch — useful for the
 // admin diagnostics endpoint to show that mining is happening.
 func negativeProfileMineDiag() int64 {
-	return negativeProfileMineEpoch
+	return negativeProfileMineEpoch.Load()
 }
 
 // init guard so unused vars/imports don't get flagged.
