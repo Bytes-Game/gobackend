@@ -101,21 +101,35 @@ func ltrEnsureLoaded() {
 	ltr.loaded = true
 }
 
-// ltrScoreDelta returns a bounded correction that scoreForUser adds on top.
-// Read path — hot path, must be fast.
-func ltrScoreDelta(cohort Cohort, breakdown map[string]float64) float64 {
+// ltrRawLogit returns the model's raw logit z for the breakdown and whether the
+// cohort model is warmed (>=20 updates). This is the exact quantity the model is
+// trained on (and that plattRecord + the creator-residual path calibrate
+// against), so any caller needing a calibrated probability must pass THIS to
+// plattCalibrate — never the bounded delta from ltrScoreDelta, which would be a
+// train/serve scale mismatch that pins the calibrated bonus near a constant.
+func ltrRawLogit(cohort Cohort, breakdown map[string]float64) (float64, bool) {
 	ltrEnsureLoaded()
 	ltr.mu.RLock()
 	m, ok := ltr.byCoh[cohort]
 	ltr.mu.RUnlock()
 	if !ok || m == nil || m.Updates < 20 {
-		return 0 // Not enough data yet — don't add noise
+		return 0, false // Not enough data yet — don't add noise
 	}
-	var z float64 = m.Bias
+	z := m.Bias
 	for _, k := range ltrFeatureKeys {
 		if v, ok := breakdown[k]; ok {
 			z += m.Weights[k] * v
 		}
+	}
+	return z, true
+}
+
+// ltrScoreDelta returns a bounded correction that scoreForUser adds on top.
+// Read path — hot path, must be fast.
+func ltrScoreDelta(cohort Cohort, breakdown map[string]float64) float64 {
+	z, ok := ltrRawLogit(cohort, breakdown)
+	if !ok {
+		return 0
 	}
 	// Map logit to [-ltrMaxDelta, +ltrMaxDelta] via scaled tanh.
 	return ltrMaxDelta * math.Tanh(z)

@@ -855,6 +855,19 @@ func updateSessionFromEvent(event FeedEvent) {
 			}
 		}
 		latencyMs := engagementLatencyFromEvent(event)
+		// For positive watch-completion events the WatchDurationMs field is the
+		// watch TIME, not impression-to-action latency — feeding it as latency
+		// inverts the signal (a full 15s watch, the strongest positive, would
+		// otherwise get the minimum 0.5× training weight, scaled inversely to
+		// video length). Zero it for those so they train at a neutral weight;
+		// taps (like/share/save) and skips keep their real fast-is-stronger
+		// latency.
+		if label >= 0.5 {
+			switch event.EventType {
+			case "view", "complete", "loop", "rewatch":
+				latencyMs = 0
+			}
+		}
 		go ltrObserveEventWithLatency(event.UserID, event.ContentType, event.ContentID, label, watchRatio, latencyMs)
 	}
 
@@ -1589,19 +1602,24 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	p.NoveltyTolerance = math.Min(1.0, float64(uniqueCategories)/8.0)
 
 	// === Energy Preference ===
-	// Average energy of content they completed (>70% watched)
-	// For now, we approximate: challenges = higher energy, posts = lower energy
-	var challengeViews, postViews int
+	// Average ENERGY of the content the user actually completes (>70% watched),
+	// read from each challenge's declared/inferred energy_level. The old
+	// challenge-vs-post ratio pinned this near 0.8 for everyone once the home
+	// feed went challenge-only, flattening the 0.20-weight EnergyFit term into a
+	// constant. Deriving it from real energy (same 0.25/0.55/0.85 scale the
+	// content scorer uses) restores genuine per-user variance.
+	var completedEnergyN int
+	var avgEnergy float64
 	db.QueryRow(`
-		SELECT COUNT(*) FROM feed_events
-		WHERE user_id = $1 AND content_type = 'challenge' AND completion_rate > 0.7`, userID).Scan(&challengeViews)
-	db.QueryRow(`
-		SELECT COUNT(*) FROM feed_events
-		WHERE user_id = $1 AND content_type = 'post' AND completion_rate > 0.7`, userID).Scan(&postViews)
-	total := challengeViews + postViews
-	if total > 0 {
-		// Challenges are higher energy (0.7-1.0), posts are varied (0.3-0.7)
-		p.EnergyPreference = 0.3 + 0.5*(float64(challengeViews)/float64(total))
+		SELECT COUNT(*),
+		       COALESCE(AVG(CASE COALESCE(c.energy_level,'medium')
+		            WHEN 'high' THEN 0.85 WHEN 'low' THEN 0.25 ELSE 0.55 END), 0.5)
+		FROM feed_events fe
+		JOIN challenges c ON fe.content_type = 'challenge'
+		                 AND fe.content_id = CAST(c.id AS TEXT)
+		WHERE fe.user_id = $1 AND fe.completion_rate > 0.7`, userID).Scan(&completedEnergyN, &avgEnergy)
+	if completedEnergyN > 0 {
+		p.EnergyPreference = avgEnergy
 	}
 
 	// === Ego Sensitivity ===
@@ -3026,8 +3044,11 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// that this user will positively engage. Re-scaled to ±0.15 it becomes
 	// a second, well-shaped bonus that moves the needle predictably even
 	// before LTR weights have converged.
-	if ltrDelta != 0 {
-		p := plattCalibrate(ltrDelta)
+	// Query the calibrator with the RAW logit z — the scale plattRecord trains
+	// on. Passing the bounded ltrDelta (0.25·tanh(z)) here was a train/serve
+	// mismatch that pinned calibBonus near a constant σ(B), wasting its budget.
+	if z, ok := ltrRawLogit(cohort, breakdown); ok {
+		p := plattCalibrate(z)
 		// Centre around 0.5 so p≈0.5 contributes nothing, p≈1 adds ~+0.15.
 		calibBonus := (p - 0.5) * 0.30
 		breakdown["calibBonus"] = calibBonus
