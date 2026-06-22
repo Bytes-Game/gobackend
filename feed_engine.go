@@ -1704,20 +1704,37 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	}
 
 	// === Ego Sensitivity ===
-	// Recent wins/losses and their effect on engagement
+	// Recent wins/losses from REAL per-challenge vote-share. The old logic
+	// counted any vote received as a "win" and only a zero-vote response as a
+	// "loss", so any active responder looked like they were winning — the
+	// loss-recovery ego-repair logic almost never fired for the users it targets.
+	// A win = the user's response has the most votes in its challenge (and >0);
+	// a loss = it has fewer than the top response. Ties at the top count as wins.
 	db.QueryRow(`
-		SELECT COUNT(*) FROM challenge_votes cv
-		JOIN challenge_responses cr ON cv.response_id = cr.id
-		WHERE cr.responder_id = CAST($1 AS INT)
-		AND cv.created_at > NOW() - INTERVAL '7 days'`, userID).Scan(&p.RecentWins)
-	// Approximate losses: challenges responded to but not voted for
-	db.QueryRow(`
-		SELECT COUNT(*) FROM challenge_responses cr
-		WHERE cr.responder_id = CAST($1 AS INT)
-		AND cr.created_at > NOW() - INTERVAL '7 days'
-		AND NOT EXISTS (
-			SELECT 1 FROM challenge_votes cv WHERE cv.response_id = cr.id
-		)`, userID).Scan(&p.RecentLosses)
+		WITH my AS (
+			SELECT id AS response_id, challenge_id
+			FROM challenge_responses
+			WHERE responder_id = CAST($1 AS INT)
+			  AND created_at > NOW() - INTERVAL '7 days'
+		),
+		vc AS (
+			SELECT cr.challenge_id, cr.id AS response_id, COUNT(cv.id) AS votes
+			FROM challenge_responses cr
+			LEFT JOIN challenge_votes cv ON cv.response_id = cr.id
+			WHERE cr.challenge_id IN (SELECT challenge_id FROM my)
+			GROUP BY cr.challenge_id, cr.id
+		),
+		ranked AS (
+			SELECT response_id, votes,
+			       MAX(votes) OVER (PARTITION BY challenge_id) AS top
+			FROM vc
+		)
+		SELECT
+			COUNT(*) FILTER (WHERE votes = top AND top > 0) AS wins,
+			COUNT(*) FILTER (WHERE votes < top) AS losses
+		FROM ranked
+		WHERE response_id IN (SELECT response_id FROM my)`,
+		userID).Scan(&p.RecentWins, &p.RecentLosses)
 	if p.RecentWins+p.RecentLosses > 0 {
 		// If they have many battles, they're competitive = higher ego sensitivity
 		p.EgoSensitivity = math.Min(1.0, float64(p.RecentWins+p.RecentLosses)/10.0)
@@ -4168,14 +4185,19 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Step 6.95: Surprise injection — at most 1 wildcard from a category
-	// the user has zero affinity for. Filter-bubble defense; gated by a
-	// small probability and skipped for at-risk users.
-	scored = applySurpriseInjection(scored, profile, cohort, nil)
-
 	// Step 7: Compose feed with slot pattern
 	pattern := getFeedPattern(profile, session, limit)
 	composed := composeFeed(scored, pattern, followingSet)
+
+	// Step 7.1: Surprise injection — at most 1 wildcard from a category the user
+	// has zero affinity for. Filter-bubble defense, gated by a small probability
+	// and skipped for at-risk users. Done AFTER composeFeed (on the final ordered
+	// list, like injectSuggestedAccountsCard): when it ran on the pre-composition
+	// `scored`, composeFeed re-bucketed from scratch and the wildcard — lacking a
+	// slotSurprise breakdown — fell into the hook bucket and got outscored, so the
+	// defense was a no-op on For You. Injecting here preserves its position, and
+	// it's still recorded as shown by the block below.
+	composed = applySurpriseInjection(composed, profile, cohort, nil)
 
 	// Step 7.5: Remember the tail of what we just served so the NEXT page's
 	// ranker can apply sequence-awareness penalties against it, AND stash the
