@@ -5,6 +5,8 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -241,14 +243,35 @@ func aggregateAllUserImpressions() error {
 		}
 	}
 
-	processed := 0
-	for userID := range users {
-		if err := aggregateUserImpressions(userID); err != nil {
-			log.Printf("aggregate user %s: %v", userID, err)
-			continue
-		}
-		processed++
+	// Process users concurrently with a bounded worker pool. The old serial loop
+	// did O(users) sequential loadUserProfile+saveUserProfile round-trips in one
+	// goroutine, which can't finish within the 5-min tick at scale. Each user's
+	// update is independent and serialized per-user by profileKeyLocks, so
+	// concurrency is safe; the pool is capped so we don't exhaust the DB
+	// connection pool.
+	const aggWorkers = 8
+	jobs := make(chan string, len(users))
+	var processed int64
+	var wg sync.WaitGroup
+	for w := 0; w < aggWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for userID := range jobs {
+				if err := aggregateUserImpressions(userID); err != nil {
+					log.Printf("aggregate user %s: %v", userID, err)
+					continue
+				}
+				atomic.AddInt64(&processed, 1)
+			}
+		}()
 	}
+	for userID := range users {
+		jobs <- userID
+	}
+	close(jobs)
+	wg.Wait()
+
 	if processed > 0 {
 		log.Printf("impression aggregator: processed %d users", processed)
 	}
