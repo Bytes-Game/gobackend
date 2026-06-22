@@ -7,9 +7,51 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/meilisearch/meilisearch-go"
 )
+
+// addDocumentsChunked uploads docs to a Meilisearch index in bounded chunks with
+// retry + backoff. Meilisearch's free tier rate-limits bulk uploads (HTTP 429),
+// which previously left the challenge-subjects autocomplete index unseeded on
+// boot (a single ~hundreds-of-docs AddDocuments burst). Chunking keeps each
+// request small and a short exponential backoff rides out a transient 429.
+// Idempotent (Meilisearch dedupes by primary key); a failed chunk doesn't abort
+// the rest — a partial seed beats none.
+func addDocumentsChunked(indexName string, docs []map[string]any, chunkSize int) error {
+	if meili == nil {
+		return nil
+	}
+	if chunkSize <= 0 {
+		chunkSize = 100
+	}
+	idx := meili.Index(indexName)
+	var lastErr error
+	for start := 0; start < len(docs); start += chunkSize {
+		end := start + chunkSize
+		if end > len(docs) {
+			end = len(docs)
+		}
+		chunk := docs[start:end]
+		var err error
+		for attempt := 0; attempt < 4; attempt++ {
+			if attempt > 0 {
+				// 0.25s, 1s, 2.25s — eases off Meilisearch between retries.
+				time.Sleep(time.Duration(attempt*attempt) * 250 * time.Millisecond)
+			}
+			if _, err = idx.AddDocuments(chunk, nil); err == nil {
+				break
+			}
+		}
+		if err != nil {
+			lastErr = err
+		}
+		// Brief gap between chunks so a large seed doesn't burst the rate limit.
+		time.Sleep(150 * time.Millisecond)
+	}
+	return lastErr
+}
 
 // ════════════════════════════════════════════════════════════════════
 // Challenge-creation autocomplete
@@ -152,11 +194,10 @@ func seedChallengeSubjects() {
 	}
 	subjectUsageMu.Unlock()
 
-	// Push in one batch — Meilisearch dedupes by primary key so this
-	// is naturally idempotent across reboots.
-	if _, err := meili.Index(challengeSubjectsIndexName).
-		AddDocuments(docs, nil); err != nil {
-		log.Printf("seedChallengeSubjects: AddDocuments failed: %v", err)
+	// Push in bounded chunks with retry+backoff so the free-tier rate limit
+	// (429) doesn't leave the index unseeded. Idempotent across reboots.
+	if err := addDocumentsChunked(challengeSubjectsIndexName, docs, 100); err != nil {
+		log.Printf("seedChallengeSubjects: AddDocuments partial/failed: %v", err)
 		return
 	}
 	log.Printf("seeded %d challenge subjects into Meilisearch", len(docs))
