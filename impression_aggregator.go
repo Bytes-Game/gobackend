@@ -96,6 +96,10 @@ func updateSessionFromImpression(event FeedEvent) {
 	if event.UserID == "" || event.SessionID == "" {
 		return
 	}
+	// Same session lock as updateSessionFromEvent so impression and engagement
+	// writes to the same session blob don't clobber each other.
+	unlock := sessionKeyLocks.lock(event.UserID + ":" + event.SessionID)
+	defer unlock()
 	state := getSessionState(event.UserID, event.SessionID)
 	state.ImpressionCount++
 	if event.WatchDurationMs < dwellBounceThresholdMs {
@@ -259,6 +263,11 @@ func aggregateUserImpressions(userID string) error {
 		return nil
 	}
 
+	// Serialize the profile RMW against the other profile writers (negative
+	// miner, strategy-outcome, recompute) so this aggregator's affinity/avoided
+	// changes merge instead of clobbering theirs.
+	unlock := profileKeyLocks.lock(userID)
+	defer unlock()
 	// Load current profile to adjust
 	profile, err := loadUserProfile(userID)
 	if err != nil || profile == nil {

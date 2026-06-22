@@ -591,6 +591,8 @@ func applyRefreshSignal(userID, sessionID string) {
 	if rdb != nil && userID != "" {
 		_ = rdb.Del(rctx, seenKey(userID)).Err()
 	}
+	unlock := sessionKeyLocks.lock(userID + ":" + sessionID)
+	defer unlock()
 	state := getSessionState(userID, sessionID)
 	if state == nil {
 		return
@@ -804,6 +806,11 @@ func sessionWasPositive(s *SessionState) bool {
 }
 
 func updateSessionFromEvent(event FeedEvent) {
+	// Serialize the whole load→modify→save against other writers of this session
+	// (other events for the same user, the impression goroutine) so concurrent
+	// bursts don't clobber ItemsSeen / DopamineBudget / SkipStreak.
+	unlock := sessionKeyLocks.lock(event.UserID + ":" + event.SessionID)
+	defer unlock()
 	state := getSessionState(event.UserID, event.SessionID)
 
 	now := time.Now()
@@ -836,9 +843,11 @@ func updateSessionFromEvent(event FeedEvent) {
 			// frustrated sessions (loss-biased). Use a FRESH profile copy:
 			// recordStrategyOutcome mutates+saves it, so we must never hand it
 			// the shared cached profile.
+			punlock := profileKeyLocks.lock(state.UserID)
 			if p, perr := loadUserProfile(state.UserID); perr == nil && p != nil {
 				recordStrategyOutcome(state, p)
 			}
+			punlock()
 		case "app_foreground":
 			// User came back. If they were backgrounded, count it.
 			// Note: if they were away > sessionTimeout (30 min), the client rotates
@@ -906,6 +915,8 @@ func updateSessionFromEvent(event FeedEvent) {
 	// don't just penalize — they also sharpen the user's preference vector.
 	if isMineableNegative(event.EventType, event.CompletionRate) {
 		go func(e FeedEvent) {
+			unlock := profileKeyLocks.lock(e.UserID)
+			defer unlock()
 			profile, err := loadUserProfile(e.UserID)
 			if err == nil && profile != nil {
 				applyNegativeFeedbackFromEvent(profile, e)
@@ -1034,6 +1045,10 @@ func updateSessionFromEvent(event FeedEvent) {
 	// don't thrash through strategies mid-session.
 	if state.ResistanceLevel >= 2 &&
 		(state.ItemsSeen-state.StrategyStartItems) >= minItemsBetweenSwitches {
+		// profile lock (taken after the session lock — consistent ordering)
+		// spans load→recordStrategyOutcome(save) so it merges with other profile
+		// writers instead of clobbering.
+		punlock := profileKeyLocks.lock(state.UserID)
 		profile, _ := loadUserProfile(state.UserID)
 		newStrat := pickAlternateStrategy(state, profile)
 		if newStrat != "" && newStrat != state.CurrentStrategy {
@@ -1041,6 +1056,7 @@ func updateSessionFromEvent(event FeedEvent) {
 			recordStrategyOutcome(state, profile)
 			switchStrategy(state, newStrat)
 		}
+		punlock()
 	}
 
 	saveSessionState(state)
@@ -1496,6 +1512,10 @@ func loadUserProfile(userID string) (*UserProfile, error) {
 // EgoSensitivity: Measures engagement change after wins vs losses.
 //   If engagement drops sharply after a loss → high ego sensitivity.
 func computeUserProfile(userID string) (*UserProfile, error) {
+	// Serialize against the other profile writers so the rebuilt row merges with
+	// (rather than clobbers) concurrent affinity / strategy / negative updates.
+	unlock := profileKeyLocks.lock(userID)
+	defer unlock()
 	// Preserve StrategySuccessHistory across recomputes — it's updated
 	// incrementally at strategy-switch time, not derived from raw events.
 	var preservedStrategyHistory map[string]float64
