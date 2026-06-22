@@ -829,6 +829,16 @@ func updateSessionFromEvent(event FeedEvent) {
 			if state.DetectedMood != "" && len(state.LastEmotions) > 0 {
 				recordSessionMoodOutcome(state.DetectedMood, state.LastEmotions, sessionWasPositive(state))
 			}
+			// Credit the in-flight strategy's outcome at session end too —
+			// recordStrategyOutcome otherwise only runs on the rare
+			// resistance-driven mid-session switch, so the strategy-success
+			// history and the Thompson bandit it feeds learned only from
+			// frustrated sessions (loss-biased). Use a FRESH profile copy:
+			// recordStrategyOutcome mutates+saves it, so we must never hand it
+			// the shared cached profile.
+			if p, perr := loadUserProfile(state.UserID); perr == nil && p != nil {
+				recordStrategyOutcome(state, p)
+			}
 		case "app_foreground":
 			// User came back. If they were backgrounded, count it.
 			// Note: if they were away > sessionTimeout (30 min), the client rotates

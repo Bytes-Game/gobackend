@@ -5,7 +5,6 @@ import (
 	"math"
 	"math/rand"
 	"sync"
-	"time"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -150,14 +149,28 @@ func bayesianUncertaintyBonus(cohort Cohort, baseScore float64, rnd *rand.Rand) 
 	if std <= 0 {
 		return 0
 	}
-	// Draw from N(0, std). Items closer to score 0 (uncertain) get bigger
-	// effective noise relative to their score; confident high/low scores
-	// move less.
-	if rnd == nil {
-		rnd = rand.New(rand.NewSource(time.Now().UnixNano()))
+	// Standard error of the mean residual (~std/√N): the exploration noise
+	// SHRINKS as the cohort accumulates evidence — the "active learning that
+	// converges" this module documents. The previous code used the raw residual
+	// std, which never shrinks with data, so the bonus stayed a permanent ±cap
+	// coin-flip forever.
+	se := std / math.Sqrt(float64(s.N))
+	// Per-item modulation: exploration is most valuable where the ranker is
+	// least sure (mid scores) and near-useless where it's already confident
+	// (extreme scores). p = σ(baseScore); 4·p·(1-p) peaks at 1 (p=0.5) and → 0
+	// at the tails. (baseScore was previously ignored entirely.)
+	p := 1.0 / (1.0 + math.Exp(-baseScore))
+	itemUncertainty := 4.0 * p * (1.0 - p)
+	// Draw N(0,1) from the caller's RNG when provided; otherwise use the
+	// package-global (concurrency-safe, and no per-candidate reseed — the old
+	// code re-seeded from time.Now() on every single call).
+	var draw float64
+	if rnd != nil {
+		draw = rnd.NormFloat64()
+	} else {
+		draw = rand.NormFloat64()
 	}
-	noise := rnd.NormFloat64() * std * bayesianExplorationK
-	// Bound the bonus.
+	noise := draw * se * bayesianExplorationK * itemUncertainty
 	if noise > bayesianMaxBonus {
 		noise = bayesianMaxBonus
 	}
