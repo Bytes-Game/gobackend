@@ -21,11 +21,13 @@ func TestGap1_BootstrapMixDecaysToZero(t *testing.T) {
 		events int
 		want   float64
 	}{
+		// Threshold raised to 60 to smooth the cold→warm handoff (no hard cliff
+		// at coldStartThreshold=15); decay is linear from 0.50 at 0 to 0 at 60.
 		{0, 0.50},
-		{5, 0.375},
-		{10, 0.25},
-		{15, 0.125},
-		{20, 0},
+		{15, 0.375},
+		{30, 0.25},
+		{45, 0.125},
+		{60, 0},
 		{100, 0},
 		{-1, 0.50}, // negative input clamps to "fully cold"
 	}

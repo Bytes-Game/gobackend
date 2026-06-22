@@ -33,22 +33,27 @@ const (
 	bootstrapPoolSize       = 200
 	bootstrapPoolRefreshInt = 30 * time.Minute
 	bootstrapPoolTTL        = 2 * time.Hour
-	// Cold threshold: users with this many or fewer recorded events are
-	// treated as cold and receive bootstrap intermixing. Beyond this they
-	// rely on personalized signals (embeddings, LTR, bandit).
-	bootstrapColdEventThreshold = 20
+	// Cold threshold: users with this many or fewer recorded events still get
+	// bootstrap intermixing on the warm path. Set well ABOVE coldStartThreshold
+	// (15) so the handoff is smooth: a user who just graduated from the pure-
+	// popularity coldStartFeed (events >= 15) enters personalized scoring with a
+	// still-meaningful bootstrap mix (~0.38 at 15) that decays to 0 by 60 —
+	// instead of the old hard cliff (cold feed → 100% personalized at exactly 15,
+	// with the warm-path mix only active in the dead [15,20) band).
+	bootstrapColdEventThreshold = 60
 	// Maximum fraction of feed slots we'll ever fill from the bootstrap pool.
-	// At 0 events: 50% bootstrap, 50% personalized. At threshold: 0%.
+	// Decays linearly with event count toward 0 at the threshold.
 	bootstrapMaxMixFraction = 0.50
 )
 
 // userBootstrapMix returns the fraction of bootstrap items to inject based
 // on the user's total event count. Decays linearly to 0 at the threshold.
 //
-// Examples:
-//   events=0  → 0.50 (half the head is known-bangers)
-//   events=10 → 0.25
-//   events=20 → 0.00 (graduated; trust personalized signals fully)
+// Examples (threshold 60):
+//   events=0  → 0.50 (half the head is known-bangers; cold-feed path though)
+//   events=15 → 0.375 (just graduated from coldStartFeed — smooth handoff)
+//   events=30 → 0.25
+//   events=60 → 0.00 (graduated; trust personalized signals fully)
 func userBootstrapMix(eventCount int) float64 {
 	if eventCount <= 0 {
 		return bootstrapMaxMixFraction

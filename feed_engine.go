@@ -4082,7 +4082,16 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// different mixes that reflect what's worked for them. Falls back
 	// gracefully per-source on error.
 	preCohort := classifyCohort(profile)
-	candidateLimit := limit * candidateMultiplier
+	// Scale the candidate pool with the page so deep in-session pagination keeps
+	// finding fresh content. A fixed pool re-served the same top-N on every page,
+	// and the seen-filter then dropped them — leaving thin pages and re-watches
+	// mid-session even when fresh catalog existed. Capped at 3 pages' worth so a
+	// high page number can't fetch an unbounded pool (scoring is O(candidates)).
+	poolPages := page
+	if poolPages > 3 {
+		poolPages = 3
+	}
+	candidateLimit := limit * candidateMultiplier * poolPages
 	candidates, candidateSourceMap := multiSourceFetchForCohort(userID, candidateLimit, preCohort)
 	if len(candidates) == 0 {
 		// Safety net: if every source failed, use the legacy single path.
