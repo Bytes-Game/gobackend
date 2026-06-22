@@ -29,6 +29,7 @@ func TestMain(m *testing.M) {
 	// the same content IDs with different DB state), so the production
 	// content-score cache must be off for deterministic, isolated results.
 	disableContentScoreCache = true
+	disableUserProfileCache = true
 
 	var err error
 	mr, err = miniredis.Run()

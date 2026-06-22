@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -1341,18 +1342,68 @@ func pickAlternateStrategy(state *SessionState, profile *UserProfile) string {
 // The profile is recomputed when stale (>1 hour) to capture evolving tastes
 // but not so frequently that it oscillates from single interactions.
 
+// userProfileCacheTTL keeps the profile in process briefly so the feed path
+// doesn't read Postgres on every request. Profiles evolve slowly, so a short
+// TTL is safe. The returned *UserProfile is SHARED and must be treated
+// read-only (verified: scoreForUser only reads it; recordStrategyOutcome
+// mutates its own freshly-loaded copy, not this one).
+const userProfileCacheTTL = 60 * time.Second
+
+var userProfileCache = NewSignalCache[*UserProfile](userProfileCacheTTL)
+
+// disableUserProfileCache is set by tests so they see fresh per-call profiles.
+var disableUserProfileCache bool
+
+// profileRecomputing singleflights the background recompute per user so a stale
+// profile under concurrent requests is rebuilt once, not once-per-request.
+var profileRecomputing sync.Map // userID -> struct{}
+
 func getOrComputeProfile(userID string) (*UserProfile, error) {
-	// Try to load cached profile
+	if !disableUserProfileCache {
+		if cached, ok := userProfileCache.Get(userID); ok {
+			return cached, nil
+		}
+	}
 	profile, err := loadUserProfile(userID)
 	if err == nil && profile != nil {
-		// Check staleness
 		if time.Since(profile.LastComputedAt).Minutes() < profileStalenessMin {
+			// Fresh stored profile — cache and serve.
+			if !disableUserProfileCache {
+				userProfileCache.Set(userID, profile)
+			}
+			return profile, nil
+		}
+		// Stale: serve it immediately (briefly cached to absorb the burst) and
+		// recompute OFF the request path, so the feed never blocks on the
+		// ~26-query rebuild and concurrent requests don't stampede it.
+		if !disableUserProfileCache {
+			userProfileCache.Set(userID, profile)
+			triggerProfileRecompute(userID)
 			return profile, nil
 		}
 	}
 
-	// Recompute from events
-	return computeUserProfile(userID)
+	// No usable stored profile (new user / read error) — must compute inline.
+	fresh, ferr := computeUserProfile(userID)
+	if ferr == nil && fresh != nil && !disableUserProfileCache {
+		userProfileCache.Set(userID, fresh)
+	}
+	return fresh, ferr
+}
+
+// triggerProfileRecompute rebuilds a stale profile off the request path, at most
+// once at a time per user. computeUserProfile persists to Postgres; we refresh
+// the in-process cache with the rebuilt profile so the next request is current.
+func triggerProfileRecompute(userID string) {
+	if _, busy := profileRecomputing.LoadOrStore(userID, struct{}{}); busy {
+		return
+	}
+	go func() {
+		defer profileRecomputing.Delete(userID)
+		if fresh, err := computeUserProfile(userID); err == nil && fresh != nil {
+			userProfileCache.Set(userID, fresh)
+		}
+	}()
 }
 
 func loadUserProfile(userID string) (*UserProfile, error) {
