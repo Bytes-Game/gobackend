@@ -1333,7 +1333,13 @@ func pickAlternateStrategy(state *SessionState, profile *UserProfile) string {
 	if profile != nil {
 		b := loadBandit(profile.UserID)
 		rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
-		if pick := b.sampleBest(filtered, rnd); pick != "" {
+		// Sample from the per-cohort soft-mix distribution rather than the single
+		// Thompson argmax (sampleBest): this applies the per-cohort exploration
+		// FLOOR (cold/new users explore strategies more, settled cohorts exploit),
+		// which was previously dead code — only the floor-less sampleBest ran in
+		// production.
+		weights := b.softMixForCohort(filtered, classifyCohort(profile), rnd)
+		if pick := weightedPickFrom(filtered, weights, rnd); pick != "" {
 			return pick
 		}
 	}

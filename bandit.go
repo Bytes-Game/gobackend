@@ -174,6 +174,28 @@ func (b *bandit) softMixForCohort(candidates []string, c Cohort, rnd *rand.Rand)
 	return out
 }
 
+// weightedPickFrom samples one key from `order` with probability proportional to
+// its weight in `weights`. It iterates in the supplied (stable) order rather
+// than ranging the map, so a fixed rnd seed is reproducible (Go randomizes map
+// iteration order). Returns "" when the total weight is non-positive.
+func weightedPickFrom(order []string, weights map[string]float64, rnd *rand.Rand) string {
+	total := 0.0
+	for _, s := range order {
+		total += weights[s]
+	}
+	if total <= 0 {
+		return ""
+	}
+	r := rnd.Float64() * total
+	for _, s := range order {
+		r -= weights[s]
+		if r <= 0 {
+			return s
+		}
+	}
+	return order[len(order)-1]
+}
+
 // softMix returns per-strategy weights summing to 1.0, derived from Thompson
 // draws. Unlike sampleBest (which picks one winner), softMix lets the ranker
 // blend strategy-specific score bonuses proportionally — useful when two
