@@ -101,6 +101,11 @@ type SessionState struct {
 	// clumpy repeats (same category/creator 3+ in a row = feed feels monotonous).
 	LastCategories []string `json:"lastCategories"`
 	LastCreators   []string `json:"lastCreators"`
+	// TZOffsetMin is the user's UTC offset in minutes (e.g. IST = +330), set
+	// from the feed request each page. Lets hour-of-day routing bucket by the
+	// user's LOCAL hour instead of server/UTC time. 0 = unknown (behaves as UTC,
+	// matching the previous behaviour, so there's no regression when absent).
+	TZOffsetMin int `json:"tzOffsetMin,omitempty"`
 }
 
 // UserProfile is the long-term personality model. Computed from event history,
@@ -1818,8 +1823,12 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// What category does the user prefer at each hour of the day?
 	p.CategoryByHour = make(map[int]string)
 	p.EnergyByHour = make(map[int]float64)
+	// Bucket by the user's LOCAL hour (shift created_at by their stored UTC
+	// offset) so these maps line up with the local-hour lookups in
+	// categoryHourBoost/energyHourMatch. tzMin defaults to 0 (UTC) when unknown.
+	tzMin := getUserTZOffset(userID)
 	hourCatRows, err := db.Query(`
-		SELECT EXTRACT(HOUR FROM fe.created_at)::INT as h,
+		SELECT EXTRACT(HOUR FROM fe.created_at + make_interval(mins => $2))::INT as h,
 			COALESCE(c.category, p.category, '') as cat,
 			COALESCE(c.energy_level, p.energy_level, 'medium') as energy,
 			COUNT(*) as cnt
@@ -1830,7 +1839,7 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		AND fe.event_type IN ('like','comment','share','save','rewatch','view')
 		AND fe.completion_rate > 0.5
 		GROUP BY h, cat, energy
-		ORDER BY h, cnt DESC`, userID)
+		ORDER BY h, cnt DESC`, userID, tzMin)
 	if err == nil {
 		defer hourCatRows.Close()
 		hourCatBest := make(map[int]string)       // hour → best category
@@ -2867,7 +2876,13 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// and aligns content energy with the user's typical energy at this hour.
 	// Both signals are bounded so a cold profile / wrong inference can only
 	// nudge the score, never capsize it.
-	now := time.Now()
+	// Use the user's LOCAL time so hour routing matches the local-hour buckets
+	// computeUserProfile builds (both shifted by the same TZOffsetMin). 0 offset
+	// = UTC on both sides, so absent tz behaves exactly as before.
+	now := time.Now().UTC()
+	if session != nil {
+		now = now.Add(time.Duration(session.TZOffsetMin) * time.Minute)
+	}
 	hourBonus := categoryHourBoost(profile, cs.Category, now)
 	hourBonus += energyHourMatch(profile, cs.EnergyLevel, now)
 	breakdown["hourBonus"] = hourBonus
@@ -4013,6 +4028,16 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Step 2: Get session state
 	session := getSessionState(userID, sessionID)
+
+	// Capture the client's UTC offset (minutes east of UTC) so hour-of-day
+	// routing buckets by the user's LOCAL hour. Absent/invalid → 0 (UTC), which
+	// matches the previous behaviour. Stored for the profile-build side too.
+	if tz := r.URL.Query().Get("tzOffset"); tz != "" {
+		if tzMin, err := strconv.Atoi(tz); err == nil && tzMin >= -840 && tzMin <= 840 {
+			session.TZOffsetMin = tzMin
+			go storeUserTZOffset(userID, tzMin)
+		}
+	}
 
 	// Step 3: Cold start check
 	if isColdStartUser(profile) {

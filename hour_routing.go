@@ -6,6 +6,42 @@ import (
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Per-user timezone offset (minutes east of UTC, e.g. IST = +330).
+//
+// Hour-of-day routing was computed in server/UTC time, so the "morning commute /
+// late-night" buckets were wrong for every user outside the server timezone. The
+// client sends its UTC offset on each feed request; we stash it per user so both
+// the profile build (computeUserProfile) and the serve-time lookup
+// (categoryHourBoost/energyHourMatch) can bucket by the user's LOCAL hour.
+// Default 0 (UTC) preserves the previous behaviour when the client doesn't send
+// it — no regression.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// storeUserTZOffset records the user's UTC offset (minutes), clamped to a sane
+// range. Best-effort: a Redis blip just means we fall back to UTC for a request.
+func storeUserTZOffset(userID string, offsetMin int) {
+	if rdb == nil || userID == "" {
+		return
+	}
+	if offsetMin < -840 || offsetMin > 840 { // ±14h, the real-world TZ range
+		return
+	}
+	_ = rdb.Set(rctx, "tz:"+userID, offsetMin, 90*24*time.Hour).Err()
+}
+
+// getUserTZOffset returns the stored offset in minutes, or 0 (UTC) if unknown.
+func getUserTZOffset(userID string) int {
+	if rdb == nil || userID == "" {
+		return 0
+	}
+	v, err := rdb.Get(rctx, "tz:"+userID).Int()
+	if err != nil || v < -840 || v > 840 {
+		return 0
+	}
+	return v
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // HOUR-OF-DAY CATEGORY ROUTING
 //
 // User behavior changes by hour. Morning commute (7-9am) is short-form,
