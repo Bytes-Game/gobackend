@@ -73,16 +73,23 @@ func markShownBatch(userID string, items []HomeFeedItem) {
 	if len(members) == 0 {
 		return
 	}
+	// Write the seen members SYNCHRONOUSLY: pagination dedup depends entirely on
+	// this set, and the next page (often a prefetch fired immediately) reads it
+	// synchronously — if this write were deferred, page 2 could re-serve page 1.
+	// The non-correctness maintenance (window trim, size cap, TTL refresh) is
+	// pushed to a goroutine so it never adds latency to the feed response.
 	_ = rdb.ZAdd(rctx, key, members...).Err()
-	cutoff := strconv.FormatInt(now-int64(seenTTL.Seconds()), 10)
-	_ = rdb.ZRemRangeByScore(rctx, key, "0", cutoff).Err()
-	if n, err := rdb.ZCard(rctx, key).Result(); err == nil && n > seenMaxSize {
-		_ = rdb.ZRemRangeByRank(rctx, key, 0, n-seenMaxSize-1).Err()
-	}
-	_ = rdb.Expire(rctx, key, 2*seenTTL).Err()
 	if metricSeenMarks != nil {
 		metricSeenMarks.WithLabelValues("ok").Add(float64(len(members)))
 	}
+	go func() {
+		cutoff := strconv.FormatInt(now-int64(seenTTL.Seconds()), 10)
+		_ = rdb.ZRemRangeByScore(rctx, key, "0", cutoff).Err()
+		if n, err := rdb.ZCard(rctx, key).Result(); err == nil && n > seenMaxSize {
+			_ = rdb.ZRemRangeByRank(rctx, key, 0, n-seenMaxSize-1).Err()
+		}
+		_ = rdb.Expire(rctx, key, 2*seenTTL).Err()
+	}()
 }
 
 // loadSeenSet reads all members into a hash for O(1) membership checks.

@@ -790,6 +790,18 @@ func persistSessionLength(state *SessionState) {
 	}
 }
 
+// sessionWasPositive classifies a finished session as a good or bad outcome for
+// the learned mood-transition model. "Good" = the user engaged at least once,
+// wasn't skipping most of what they saw, and still had attention budget left
+// (not a frustrated bounce-quit). Sessions too short to judge count as not-good.
+func sessionWasPositive(s *SessionState) bool {
+	if s == nil || s.ItemsSeen < 3 {
+		return false
+	}
+	skipRate := float64(s.SkipCount) / float64(s.ItemsSeen)
+	return (s.LikeCount+s.ShareCount) > 0 && skipRate < 0.6 && s.DopamineBudget > 0.2
+}
+
 func updateSessionFromEvent(event FeedEvent) {
 	state := getSessionState(event.UserID, event.SessionID)
 
@@ -808,6 +820,14 @@ func updateSessionFromEvent(event FeedEvent) {
 			// Tier 1.2: stamp a last_session_end so the next session's ranker
 			// can apply the session-continuity dampener.
 			go RecordSessionEnd(state.UserID)
+			// Revive the learned mood-transition loop: credit the moods the user
+			// moved through this session, rewarded by whether it went well.
+			// Without this call recordSessionMoodOutcome had ZERO callers, so the
+			// learned graph was never written and moodTransitionBonus ran on
+			// hand-coded seed priors forever.
+			if state.DetectedMood != "" && len(state.LastEmotions) > 0 {
+				recordSessionMoodOutcome(state.DetectedMood, state.LastEmotions, sessionWasPositive(state))
+			}
 		case "app_foreground":
 			// User came back. If they were backgrounded, count it.
 			// Note: if they were away > sessionTimeout (30 min), the client rotates
@@ -4104,7 +4124,10 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		for _, it := range composed {
 			items = append(items, it.Item)
 		}
-		go markShownBatch(userID, items)
+		// Synchronous now (the ZADD is one cheap round-trip; trim/expire are
+		// deferred inside markShownBatch) so a page-2 prefetch can't race the
+		// seen-set write and re-serve page-1 content.
+		markShownBatch(userID, items)
 		// Refresh anti-repeat memory: remember the head of THIS refresh so
 		// the next refresh can demote them and surface different content
 		// at the top. Only saved on actual refresh requests.

@@ -210,7 +210,7 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 		for _, it := range composed {
 			items = append(items, it.Item)
 		}
-		go markShownBatch(userID, items)
+		markShownBatch(userID, items)
 		// Anti-repeat memory: remember the head of THIS refresh so the
 		// next refresh demotes them. Only on actual refresh requests.
 		if refresh && page == 1 {
