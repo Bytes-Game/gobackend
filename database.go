@@ -498,6 +498,63 @@ func runMigrations() {
 		log.Printf("Warning: index creation issue: %v", err)
 	}
 
+	// Denormalized challenge counters + triggers. The feed retrieval path used
+	// to LEFT JOIN (SELECT challenge_id, COUNT(*) FROM challenge_likes GROUP BY ...)
+	// and a correlated COUNT(*) on challenge_responses on EVERY request — an
+	// all-time aggregate Postgres can't push the outer LIMIT into. These columns
+	// make the count an O(1) column read; triggers keep them exact. Tolerant:
+	// log + continue if the DB role can't create triggers, so the app still boots
+	// (the columns default to 0 and the self-heal backfill corrects them later).
+	denorm := `
+	ALTER TABLE challenges ADD COLUMN IF NOT EXISTS likes_count INT NOT NULL DEFAULT 0;
+	ALTER TABLE challenges ADD COLUMN IF NOT EXISTS response_count INT NOT NULL DEFAULT 0;
+
+	-- Backfill / self-heal: only touches rows whose denormalized count drifted
+	-- from the source tables, so once converged (and with the triggers below
+	-- keeping them current) subsequent boots update nothing.
+	UPDATE challenges c SET likes_count = s.cnt
+	  FROM (SELECT challenge_id, COUNT(*) AS cnt FROM challenge_likes GROUP BY challenge_id) s
+	  WHERE s.challenge_id = c.id AND c.likes_count <> s.cnt;
+	UPDATE challenges c SET likes_count = 0
+	  WHERE c.likes_count <> 0 AND NOT EXISTS (SELECT 1 FROM challenge_likes WHERE challenge_id = c.id);
+	UPDATE challenges c SET response_count = s.cnt
+	  FROM (SELECT challenge_id, COUNT(*) AS cnt FROM challenge_responses GROUP BY challenge_id) s
+	  WHERE s.challenge_id = c.id AND c.response_count <> s.cnt;
+	UPDATE challenges c SET response_count = 0
+	  WHERE c.response_count <> 0 AND NOT EXISTS (SELECT 1 FROM challenge_responses WHERE challenge_id = c.id);
+
+	CREATE OR REPLACE FUNCTION bump_challenge_likes_count() RETURNS TRIGGER AS $$
+	BEGIN
+	  IF (TG_OP = 'INSERT') THEN
+	    UPDATE challenges SET likes_count = likes_count + 1 WHERE id = NEW.challenge_id;
+	  ELSIF (TG_OP = 'DELETE') THEN
+	    UPDATE challenges SET likes_count = GREATEST(likes_count - 1, 0) WHERE id = OLD.challenge_id;
+	  END IF;
+	  RETURN NULL;
+	END;
+	$$ LANGUAGE plpgsql;
+	DROP TRIGGER IF EXISTS trg_challenge_likes_count ON challenge_likes;
+	CREATE TRIGGER trg_challenge_likes_count AFTER INSERT OR DELETE ON challenge_likes
+	  FOR EACH ROW EXECUTE FUNCTION bump_challenge_likes_count();
+
+	CREATE OR REPLACE FUNCTION bump_challenge_response_count() RETURNS TRIGGER AS $$
+	BEGIN
+	  IF (TG_OP = 'INSERT') THEN
+	    UPDATE challenges SET response_count = response_count + 1 WHERE id = NEW.challenge_id;
+	  ELSIF (TG_OP = 'DELETE') THEN
+	    UPDATE challenges SET response_count = GREATEST(response_count - 1, 0) WHERE id = OLD.challenge_id;
+	  END IF;
+	  RETURN NULL;
+	END;
+	$$ LANGUAGE plpgsql;
+	DROP TRIGGER IF EXISTS trg_challenge_response_count ON challenge_responses;
+	CREATE TRIGGER trg_challenge_response_count AFTER INSERT OR DELETE ON challenge_responses
+	  FOR EACH ROW EXECUTE FUNCTION bump_challenge_response_count();
+	`
+	if _, err := db.Exec(denorm); err != nil {
+		log.Printf("Warning: challenge counter denormalization issue: %v", err)
+	}
+
 	log.Println("Database migrations completed")
 }
 

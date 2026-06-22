@@ -255,17 +255,15 @@ func sourceTrendingWindowed(userID string, limit int, window string) []HomeFeedI
 	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
-			c.views, COALESCE(cl.likes, 0), c.created_at,
-			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id)
+			c.views, c.likes_count, c.created_at,
+			c.response_count
 		FROM challenges c
 		JOIN users u ON c.creator_id = u.id
-		LEFT JOIN (SELECT challenge_id, COUNT(*) AS likes FROM challenge_likes GROUP BY challenge_id) cl
-			ON cl.challenge_id = c.id
 		WHERE c.visibility = 'arena'
 		  AND c.status IN ('open','active','completed')
 		  AND c.created_at > NOW() - ($3::text)::interval
 		  AND c.creator_id != CAST($1 AS INT)
-		ORDER BY (c.views + COALESCE(cl.likes,0)*5) DESC
+		ORDER BY (c.views + c.likes_count*5) DESC
 		LIMIT $2`, userID, limit, window)
 	if err != nil {
 		return nil
@@ -314,13 +312,11 @@ func sourceFollowGraphWindowed(userID string, limit int, window string) []HomeFe
 	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
-			c.views, COALESCE(cl.likes, 0), c.created_at,
-			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id)
+			c.views, c.likes_count, c.created_at,
+			c.response_count
 		FROM challenges c
 		JOIN users u ON c.creator_id = u.id
 		JOIN follows f ON f.followed_id = c.creator_id
-		LEFT JOIN (SELECT challenge_id, COUNT(*) AS likes FROM challenge_likes GROUP BY challenge_id) cl
-			ON cl.challenge_id = c.id
 		WHERE f.follower_id = CAST($1 AS INT)
 		  AND c.created_at > NOW() - ($3::text)::interval
 		  AND c.visibility IN ('arena','friends')
@@ -374,14 +370,12 @@ func sourceCollaborativeWindowed(userID string, limit int, window string) []Home
 		SELECT DISTINCT ON (c.id)
 			c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
-			c.views, COALESCE(cl.likes, 0), c.created_at,
-			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id)
+			c.views, c.likes_count, c.created_at,
+			c.response_count
 		FROM user_similarities us
 		JOIN feed_events fe ON fe.user_id = us.similar_user_id::text
 		JOIN challenges c ON c.id = fe.content_id::int AND fe.content_type = 'challenge'
 		JOIN users u ON c.creator_id = u.id
-		LEFT JOIN (SELECT challenge_id, COUNT(*) AS likes FROM challenge_likes GROUP BY challenge_id) cl
-			ON cl.challenge_id = c.id
 		WHERE us.user_id = $1
 		  AND us.similarity_score > 0.3
 		  AND fe.event_type IN ('like','complete','share','save')
