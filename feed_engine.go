@@ -2064,7 +2064,45 @@ func autoTagFromCaption(text string, existingTags []string) []string {
 // probably not great regardless of who the next viewer is. We compute these
 // aggregate metrics once and cache them, so the per-user scoring is fast.
 
+// contentScoreCacheTTL bounds how stale a cached content score may get. 60s is
+// immaterial to ranking — engagement counts and the 2h trending window move
+// slowly relative to a feed request — and it collapses the dominant feed-path
+// DB cost at scale.
+const contentScoreCacheTTL = 60 * time.Second
+
+// contentScoreCache memoizes the expensive (~3-query) per-content score. A
+// single feed request references the same ~100 content IDs 2-4× (scoring loop,
+// MMR, session-diversity, post-composition stash, tail) and many concurrent
+// users request overlapping content — without this that was ~450-750 redundant
+// Postgres round-trips per page. Scores are user-independent (keyed only by
+// type:id) so the cache is global and shared across all requests; at high QPS
+// it collapses to ~1 compute per item per TTL window.
+var contentScoreCache = NewSignalCache[*ContentScore](contentScoreCacheTTL)
+
+// disableContentScoreCache is set by tests (TestMain) so unit tests see fresh
+// per-call computation and never leak a cached score across cases.
+var disableContentScoreCache bool
+
+// getContentScore returns the per-content score, served from a short-TTL cache
+// when possible. The returned *ContentScore is SHARED and MUST be treated as
+// read-only by callers (verified: no call site mutates it). The actual DB
+// aggregation lives in computeContentScore.
 func getContentScore(contentID, contentType string) *ContentScore {
+	if disableContentScoreCache {
+		return computeContentScore(contentID, contentType)
+	}
+	key := contentType + ":" + contentID
+	if cached, ok := contentScoreCache.Get(key); ok {
+		return cached
+	}
+	cs := computeContentScore(contentID, contentType)
+	contentScoreCache.Set(key, cs)
+	return cs
+}
+
+// computeContentScore does the actual per-content DB aggregation. Prefer the
+// cached getContentScore unless a deliberately fresh read is required.
+func computeContentScore(contentID, contentType string) *ContentScore {
 	cs := &ContentScore{
 		ContentID:   contentID,
 		ContentType: contentType,

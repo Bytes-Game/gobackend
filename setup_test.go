@@ -25,6 +25,11 @@ func TestMain(m *testing.M) {
 	// handler test mints or validates a token.
 	_ = os.Setenv("JWT_SECRET", "test-jwt-secret-do-not-use-in-prod")
 
+	// Tests assert on fresh per-call content scores (and run many cases against
+	// the same content IDs with different DB state), so the production
+	// content-score cache must be off for deterministic, isolated results.
+	disableContentScoreCache = true
+
 	var err error
 	mr, err = miniredis.Run()
 	if err != nil {
