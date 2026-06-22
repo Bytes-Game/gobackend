@@ -97,6 +97,11 @@ var profileVisitCache = NewSignalCache[map[string]bool](2 * time.Minute)
 // Impression stats: per-user per-category aggregates from the aggregator.
 var impressionStatsCache = NewSignalCache[map[string]*ImpressionStats](2 * time.Minute)
 
+// Impression stats per creator — same source as impressionStatsCache, powers
+// the per-creator bounce penalty in scoring (was computed but only ever read by
+// the admin diagnostics endpoint).
+var impressionCreatorStatsCache = NewSignalCache[map[string]*ImpressionStats](2 * time.Minute)
+
 // warmUserSignalCaches populates all caches for a user before scoring begins.
 // Called once at the top of SmartFeedHandler. One pass, many reads downstream.
 //
@@ -212,7 +217,8 @@ func warmUserSignalCaches(userID string) {
 	}
 	profileVisitCache.Set(userID, visits)
 
-	// Impression stats from Redis
-	byCategory, _ := getImpressionStats(userID)
+	// Impression stats from Redis — per-category AND per-creator.
+	byCategory, byCreator := getImpressionStats(userID)
 	impressionStatsCache.Set(userID, byCategory)
+	impressionCreatorStatsCache.Set(userID, byCreator)
 }

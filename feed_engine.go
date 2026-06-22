@@ -3101,6 +3101,22 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	}
 	breakdown["impressionBouncePenalty"] = impressionPenalty
 
+	// ── PER-CREATOR BOUNCE PENALTY ──
+	// Same signal as the category penalty, but for THIS creator — "I keep
+	// scrolling straight past this creator". The aggregator already computes
+	// byCreator stats; previously only the admin diagnostics endpoint read them.
+	creatorBouncePenalty := 0.0
+	if cs.CreatorID != "" {
+		if byCr, ok := impressionCreatorStatsCache.Get(profile.UserID); ok {
+			if stats, exists := byCr[cs.CreatorID]; exists && stats.Count >= minCategoryImpressions {
+				if br := stats.BounceRate(); br > bounceRateNegativeThreshold {
+					creatorBouncePenalty = -0.20 * ((br - bounceRateNegativeThreshold) / (1.0 - bounceRateNegativeThreshold))
+				}
+			}
+		}
+	}
+	breakdown["creatorBouncePenalty"] = creatorBouncePenalty
+
 	// ── SCROLL-BACK BONUS ──
 	// Content from creators the user has scrolled back to recently = strong interest.
 	// Cached per user to avoid hitting DB per-item.
@@ -3161,12 +3177,29 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	}
 	breakdown["profileVisitBonus"] = profileVisitBonus
 
+	// ── TAME THE JACKPOT BONUSES ──
+	// The session-dynamics "jackpot" bonuses (variable reward, re-entry,
+	// momentum, streak) can pile up and collectively dwarf the cohort-weighted
+	// mood/energy/social base — turning the principled core into a minority of
+	// the score. Group-cap their COMBINED contribution rather than re-tuning each
+	// weight (which needs live A/B): the relative shape is preserved, only the
+	// pathological total is clipped. Generous cap so normal scoring is untouched.
+	const maxJackpotBonus = 0.60
+	if jackpot := variableReward + reentryBonus + momentumBonus + streakBonus; jackpot > maxJackpotBonus {
+		scale := maxJackpotBonus / jackpot
+		variableReward *= scale
+		reentryBonus *= scale
+		momentumBonus *= scale
+		streakBonus *= scale
+		breakdown["jackpotCapScale"] = scale
+	}
+
 	// ── FINAL SCORE ──
 	finalScore := baseScore + egoBonus + fatiguePenalty + creatorFatigue + sequencePenalty + dopaminePenalty +
 		unseenBonus + coldContentBonus + trendingBonus +
 		hourBonus + emotionBonus + egoContextBonus + wellbeingBonus +
 		collabBonus + momentumBonus + variableReward + reentryBonus + streakBonus +
-		impressionPenalty + scrollBackBonus + completeBonus + loopBonus +
+		impressionPenalty + creatorBouncePenalty + scrollBackBonus + completeBonus + loopBonus +
 		unmuteBonus + profileVisitBonus + battleBoost
 
 	// ── LEARNING-TO-RANK DELTA (Tier 3.11) ──
