@@ -4070,6 +4070,25 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	userVec := getUserEmbedding(userID)
 	userCold := userEmbeddingIsCold(userVec)
 
+	// Step 5.9: Anti-loop diagnosis — runs BEFORE scoring so a loop detected at
+	// resistance 0-1 (category monoculture, creator flood, dopamine collapse,
+	// skip streak) breaks on THIS page. It sets the loop-breaking strategy AND
+	// escalates ResistanceLevel to >=2 so getFeedPattern actually honors the
+	// override (its strategy switch is gated on RL>=2) and so any resistance-
+	// sensitive scoring sees it too. Previously this ran after scoring+MMR and
+	// the override was ignored until resistance climbed on its own — so the loop
+	// only got fixed on the NEXT page, defeating the 30-sec retention goal.
+	if diag := detectLoop(session); diag.Stuck && diag.SuggestedStrat != "" {
+		session.CurrentStrategy = diag.SuggestedStrat
+		session.TriedStrategies = append(session.TriedStrategies, diag.SuggestedStrat)
+		if session.ResistanceLevel < 2 {
+			session.ResistanceLevel = 2
+		}
+		if metricSignalCapture != nil {
+			metricSignalCapture.WithLabelValues("loop_" + diag.Reason).Inc()
+		}
+	}
+
 	// Step 6: Score each candidate
 	scored := make([]ScoredItem, 0, len(candidates))
 	for _, item := range candidates {
@@ -4161,16 +4180,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// don't stack next to each other in the feed.
 	scored = applyMMRDefault(scored)
 
-	// Step 6.7: Anti-loop diagnosis — if the session shows stuck patterns
-	// (skip streaks, category monoculture, creator flood, dopamine
-	// collapse), override the strategy for this page.
-	if diag := detectLoop(session); diag.Stuck && diag.SuggestedStrat != "" {
-		session.CurrentStrategy = diag.SuggestedStrat
-		session.TriedStrategies = append(session.TriedStrategies, diag.SuggestedStrat)
-		if metricSignalCapture != nil {
-			metricSignalCapture.WithLabelValues("loop_" + diag.Reason).Inc()
-		}
-	}
+	// (Anti-loop diagnosis moved to Step 5.9, before scoring — see above.)
 
 	// Cohort already computed above (preCohort) for the per-cohort source
 	// blending step. Reuse to avoid recomputing.
