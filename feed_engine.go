@@ -2227,7 +2227,8 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			COALESCE(AVG(completion_rate) FILTER (WHERE event_type = 'view'), 0),
 			COALESCE(AVG(watch_duration_ms) FILTER (WHERE event_type = 'view'), 0)
 		FROM feed_events
-		WHERE content_id = $1 AND content_type = $2`,
+		WHERE content_id = $1 AND content_type = $2
+		  AND created_at > NOW() - INTERVAL '90 days'`,
 		contentID, contentType).Scan(
 		&viewCount, &likeCount, &commentCount,
 		&skipCount, &rewatchCount, &shareCount, &notIntCount,
