@@ -386,6 +386,10 @@ func main() {
 	api.HandleFunc("/admin/golden_hour", adminOnly(AdminGoldenHourHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/online", adminOnly(AdminOnlineUsersHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/diagnostics", adminOnly(AdminDiagnosticsHandler)).Methods("GET", "OPTIONS")
+	// Global "is the ranking working?" KPI snapshot (completion/skip/engagement/
+	// session length, new-content discovery, catalog coverage) with good/watch/bad
+	// verdicts. See admin_feed_health.go.
+	api.HandleFunc("/admin/feed-health", adminOnly(AdminFeedHealthHandler)).Methods("GET", "OPTIONS")
 
 	// Push notifications: token registration, prefs, click tracking.
 	// /unregister and /clicked are intentionally unauthenticated: the push token
