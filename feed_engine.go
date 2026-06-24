@@ -245,7 +245,8 @@ const (
 	                                // Challenges take longer to discover and respond to.
 
 	// === Session dynamics ===
-	dopamineDepletionRate  = 0.03  // Budget drops 3% per item viewed
+	dopamineDepletionRate  = 0.03  // Budget drops 3% per partial/low-completion view (neutral consumption)
+	dopamineSkipDrain      = 0.05  // A skip/not_interested drains more — the feed missed
 	                                // WHY: At 30 items, budget = 0.1 (fatigued). Average TikTok
 	                                // session is 10-15 minutes ≈ 30-50 items. We want to detect
 	                                // fatigue around the same threshold.
@@ -883,8 +884,13 @@ func updateSessionFromEvent(event FeedEvent) {
 	state.ItemsSeen++
 	state.TotalWatchMs += event.WatchDurationMs
 
-	// Deplete dopamine budget — each item costs attention energy
-	state.DopamineBudget = math.Max(0, state.DopamineBudget-dopamineDepletionRate)
+	// Dopamine budget is adjusted per IMPRESSION in the view/skip cases below —
+	// NOT here on every event. Depleting on every event made a single engaged
+	// item (view + like + complete) drain multiple times, and a like's refill
+	// (0.02) was smaller than the per-event drain (0.03), so positive engagement
+	// net-DRAINED the budget — backwards. Now dopamine tracks satisfaction: a
+	// full watch refills, a partial view costs a little, a skip costs more, and
+	// taps (like/share) are pure refills on top.
 
 	// Tier 3.11: feed terminal outcome events into the online LTR model so it
 	// learns which breakdown features correlate with completions for this
@@ -958,6 +964,8 @@ func updateSessionFromEvent(event FeedEvent) {
 	case "skip", "not_interested":
 		state.SkipCount++
 		state.SkipStreak++
+		// A rejection drains more than a neutral view — the feed missed.
+		state.DopamineBudget = math.Max(0, state.DopamineBudget-dopamineSkipDrain)
 	case "like", "share", "save", "comment":
 		state.SkipStreak = 0 // Positive engagement resets skip streak
 		if event.EventType == "like" {
@@ -994,9 +1002,16 @@ func updateSessionFromEvent(event FeedEvent) {
 		// Strong negative — treat as multiple skips
 		state.SkipCount += 3
 		state.SkipStreak += 2
+		state.DopamineBudget = math.Max(0, state.DopamineBudget-3*dopamineSkipDrain)
 	case "view":
-		if event.CompletionRate > 0.8 {
+		if event.CompletionRate >= 0.8 {
 			state.SkipStreak = 0 // Watching most of content = not skipping
+			// A near-full watch is satisfying — net refill (the strongest
+			// signal a recommender has is watch-completion).
+			state.DopamineBudget = math.Min(1.0, state.DopamineBudget+0.02)
+		} else {
+			// Partial / low-completion view: a small attention cost.
+			state.DopamineBudget = math.Max(0, state.DopamineBudget-dopamineDepletionRate)
 		}
 	}
 
@@ -2655,8 +2670,13 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// Perfect match = 1.0, complete mismatch = 0.0
 	currentEnergy := profile.EnergyPreference
 	if session.DopamineBudget < 0.3 {
-		// Fatigued user → lower their effective energy preference
+		// Fatigued → lower their effective energy preference (want calmer content).
 		currentEnergy *= session.DopamineBudget / 0.3
+	} else if session.DopamineBudget > 0.7 {
+		// Highly stimulated → nudge the target energy UP: they can handle (and
+		// want) more intense content, so energy matching tracks current arousal,
+		// not just long-term taste. Bounded so it only ever nudges.
+		currentEnergy += (1.0 - currentEnergy) * 0.3 * (session.DopamineBudget - 0.7) / 0.3
 	}
 	currentEnergy = math.Max(0, math.Min(1.0, currentEnergy))
 	energyFit := 1.0 - math.Abs(currentEnergy-cs.EnergyLevel)
