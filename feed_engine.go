@@ -253,6 +253,7 @@ const (
 	maxItemsPerCreator     = 3     // Diversity: max 3 items from same creator in one feed page
 	coldStartThreshold     = 15    // Users with <15 events are "cold start"
 	contentColdThreshold   = 5     // Content with <5 views is "cold start"
+	auditionViewTarget     = 300   // Until a video has this many views it is "under audition": it gets exploration impressions so its true performance can be measured before merit-ranking judges it. 5 views can't measure quality; ~hundreds can.
 	profileStalenessMin    = 5     // Recompute profile if older than 5 minutes — fast cohort transitions during onboarding (TikTok-style)
 	sessionTTLMin          = 30    // Redis session expires after 30 min inactivity
 
@@ -2864,11 +2865,18 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	}
 	breakdown["unseenBonus"] = unseenBonus
 
-	// ── COLD CONTENT BONUS ──
-	// New content with few views gets a visibility boost to gather engagement data
+	// ── COLD CONTENT / AUDITION BONUS ──
+	// New content needs enough impressions before its engagement is a reliable
+	// signal. Give it a modest, decaying boost across the whole audition window
+	// (not just <5 views — a 5-view sample can't measure quality) so it climbs
+	// above already-proven content while it gathers data, tapering to 0 once it
+	// has enough views to be judged on merit. auditionEligible marks it for the
+	// guaranteed exploration slot (injectAuditionContent) so it gets seen even if
+	// merit-ranking would still bury it.
 	coldContentBonus := 0.0
-	if cs.ViewCount < contentColdThreshold {
-		coldContentBonus = 0.2 * (1.0 - float64(cs.ViewCount)/float64(contentColdThreshold))
+	if cs.ViewCount < auditionViewTarget {
+		coldContentBonus = 0.25 * (1.0 - float64(cs.ViewCount)/float64(auditionViewTarget))
+		breakdown["auditionEligible"] = 1
 	}
 	breakdown["coldContentBonus"] = coldContentBonus
 
@@ -4302,6 +4310,12 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// it's still recorded as shown by the block below.
 	composed = applySurpriseInjection(composed, profile, cohort, nil)
 
+	// Step 7.2: Audition — guarantee a fresh under-audition upload one impression
+	// per page even if merit-ranking buried it, so new content reliably gathers
+	// the views it needs to prove itself (item-level exploration). Bounded to one
+	// per page; items graduate out automatically once they pass auditionViewTarget.
+	composed = injectAuditionContent(scored, composed)
+
 	// Step 7.5: Remember the tail of what we just served so the NEXT page's
 	// ranker can apply sequence-awareness penalties against it, AND stash the
 	// score breakdown of each served item so LTR can learn from the outcome.
@@ -4730,6 +4744,58 @@ func populateTopResponses(items []HomeFeedItem) {
 			}
 		}
 	}
+}
+
+// injectAuditionContent guarantees one under-audition item (recent, below the
+// audition view target) an impression per page when merit-ranking didn't already
+// surface it. This is item-level exploration: a new upload's engagement isn't a
+// measurable signal until it has had enough impressions, so the ranker can't
+// fairly judge it before then — without a guaranteed slot a fresh 0-view video
+// can be buried under proven content forever and never get its audition. Picks
+// the FRESHEST eligible item from the scored pool that isn't already on this
+// page; no-op when every eligible item already made the page on merit (or none
+// exist). Bounded to one injection per page (an ~8% exploration budget); items
+// graduate automatically once their view count passes auditionViewTarget.
+func injectAuditionContent(scored []ScoredItem, composed []ScoredItem) []ScoredItem {
+	if len(composed) == 0 {
+		return composed
+	}
+	inFeed := make(map[string]bool, len(composed))
+	for _, it := range composed {
+		inFeed[it.Item.Type+":"+getItemID(it.Item)] = true
+	}
+	best := -1
+	bestFresh := -1.0
+	for i := range scored {
+		bd := scored[i].ScoreBreakdown
+		if bd == nil || bd["auditionEligible"] <= 0 {
+			continue
+		}
+		key := scored[i].Item.Type + ":" + getItemID(scored[i].Item)
+		if inFeed[key] {
+			continue // already surfaced on merit — no need to force it
+		}
+		if f := bd["freshness"]; f > bestFresh {
+			bestFresh = f
+			best = i
+		}
+	}
+	if best < 0 {
+		return composed
+	}
+	aud := scored[best]
+	aud.SlotType = "audition"
+	// Insert just after the head so it's actually seen, not at position 0 (which
+	// would feel jarring and displace the strongest hook).
+	pos := 3
+	if pos > len(composed) {
+		pos = len(composed)
+	}
+	out := make([]ScoredItem, 0, len(composed)+1)
+	out = append(out, composed[:pos]...)
+	out = append(out, aud)
+	out = append(out, composed[pos:]...)
+	return out
 }
 
 // injectSuggestedAccountsCard builds an "Accounts you might like" card for
