@@ -2434,27 +2434,23 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			cs.LikeCount = chLikes
 		}
 
-		// If quality is still 0 but the challenge has real engagement, derive
-		// a small bootstrap quality from the like/view ratio. Capped at 0.4
-		// so a challenge with full feed_events analytics (which can hit ~0.7
-		// when shares + completions are high) still wins over the bootstrap.
-		// Min of 50 views to avoid spurious quality on never-seen content.
-		if cs.QualityScore == 0 && cs.ViewCount >= 50 {
-			likeRate := float64(cs.LikeCount) / float64(cs.ViewCount)
-			// Real apps see ~1-5% like rate; scale x20 so 5% maps to ~1.0
-			// then clamp at 0.4. Keeps the signal directional without
-			// overshadowing genuine analytics data.
-			bootstrap := math.Min(0.4, likeRate*20.0)
-			if bootstrap > 0 {
-				cs.QualityScore = bootstrap
+		// Supplement quality from the challenge row's own like/view counts when
+		// feed_events analytics is sparse (seeded content, or before the pipeline
+		// caught up). Smoothed the SAME way as the main path so small samples
+		// aren't over-trusted, capped at 0.5, and MAX'd in — so it only ever lifts
+		// a low score, never lowers a real analytics-driven one. (Replaces the old
+		// `QualityScore == 0` gate, which is now dead since smoothing makes quality
+		// always > 0, and the absolute 50-view floor that buried sparse content.)
+		if cs.ViewCount > 0 {
+			rowQ := math.Min(0.5, smoothedRate(float64(cs.LikeCount), float64(cs.ViewCount), priorLikeRate, ratePriorStrength)/(priorLikeRate*3)*0.5)
+			if rowQ > cs.QualityScore {
+				cs.QualityScore = rowQ
 			}
 		}
 
 		// Synthetic trending fallback: when there's no recent feed_events
-		// engagement, use raw recent view velocity as a proxy. Items created
-		// in the last 48h with >100 views get a small trending lift; the cap
-		// keeps real feed_events-driven trending dominant once available.
-		if cs.TrendingScore == 0 && cs.ViewCount >= 100 {
+		// engagement, use raw recent view velocity as a proxy for fresh content.
+		if cs.TrendingScore == 0 && cs.ViewCount >= 20 {
 			ageHours := time.Since(createdAt).Hours()
 			if ageHours <= 48 && ageHours > 0 {
 				viewsPerHour := float64(cs.ViewCount) / ageHours
