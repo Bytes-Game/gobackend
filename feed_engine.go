@@ -2252,6 +2252,30 @@ func getContentScore(contentID, contentType string) *ContentScore {
 	return cs
 }
 
+// Bayesian priors for engagement rates. A new item's rate is shrunk toward
+// these platform averages until it has enough impressions to speak for itself,
+// so a 1-like-from-1-view item isn't mistaken for a guaranteed hit, nor a
+// 0-like-from-3-views item for a dud. This is how TikTok/IG/YT judge content —
+// by RATE with confidence — instead of absolute counts that bury low-volume
+// content. ratePriorStrength is measured in pseudo-impressions.
+const (
+	priorLikeRate     = 0.05
+	priorShareRate    = 0.01
+	priorCommentRate  = 0.02
+	priorRewatchRate  = 0.05
+	ratePriorStrength = 20.0
+)
+
+// smoothedRate is the posterior mean of a positive-rate under a Beta prior
+// (add-(α,β) smoothing): (positives + priorRate·strength) / (trials + strength).
+// Small samples sit near the prior; large samples converge to the true rate.
+func smoothedRate(positives, trials, priorRate, priorStrength float64) float64 {
+	if trials < 0 {
+		trials = 0
+	}
+	return (positives + priorRate*priorStrength) / (trials + priorStrength)
+}
+
 // computeContentScore does the actual per-content DB aggregation. Prefer the
 // cached getContentScore unless a deliberately fresh read is required.
 func computeContentScore(contentID, contentType string) *ContentScore {
@@ -2304,14 +2328,22 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		cs.RewatchRate = float64(rewatchCount) / float64(viewCount)
 	}
 
-	// Quality score: combination of engagement signals with granular completion tiers
-	if totalInteractions > 0 {
-		likeRate := math.Min(1.0, float64(likeCount)/float64(totalInteractions+1))
-		shareRate := math.Min(1.0, float64(shareCount)/float64(totalInteractions+1))
-		commentRate := math.Min(1.0, float64(commentCount)/float64(totalInteractions+1))
+	// Quality score: engagement RATES (per view) with Bayesian shrinkage toward
+	// platform priors, so small samples are neither over- nor under-trusted — the
+	// fix for "low-view content gets buried / a 1-view fluke looks viral". Computed
+	// for ALL content (even 0 views → a fair prior-based baseline, never 0), so a
+	// brand-new upload starts on a level field and the audition + breakout boost
+	// carry it from there.
+	trials := float64(viewCount)
+	likeRate := smoothedRate(float64(likeCount), trials, priorLikeRate, ratePriorStrength)
+	shareRate := smoothedRate(float64(shareCount), trials, priorShareRate, ratePriorStrength)
+	commentRate := smoothedRate(float64(commentCount), trials, priorCommentRate, ratePriorStrength)
+	rewatchRate := smoothedRate(float64(rewatchCount), trials, priorRewatchRate, ratePriorStrength)
 
-		// Granular completion scoring (replaces flat avgCompletion)
-		completionScore := 0.0
+	// Completion is neutral until we actually have watch data — don't punish a
+	// video for having no views yet.
+	completionScore := 0.4
+	if viewCount > 0 {
 		if avgCompletion >= 0.9 {
 			completionScore = 1.0 // Strong: almost everyone finishes
 		} else if avgCompletion >= 0.7 {
@@ -2321,20 +2353,37 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		} else {
 			completionScore = 0.1 // Weak: people leave early
 		}
-
-		cs.QualityScore = (completionScore*0.25 + likeRate*0.15 + shareRate*0.25 +
-			cs.RewatchRate*0.20 + commentRate*0.15) * (1.0 - cs.SkipRate*0.5)
 	}
 
-	// Trending score: engagement velocity in last 2 hours
-	var recentEngagement int
+	// Normalize the rate terms by their priors so a merely-average item lands
+	// near the middle (a raw 5% like-rate shouldn't read as "0.05 quality").
+	likeQ := math.Min(1.0, likeRate/(priorLikeRate*3))
+	shareQ := math.Min(1.0, shareRate/(priorShareRate*3))
+	commentQ := math.Min(1.0, commentRate/(priorCommentRate*3))
+	rewatchQ := math.Min(1.0, rewatchRate/(priorRewatchRate*3))
+	cs.QualityScore = (completionScore*0.25 + likeQ*0.15 + shareQ*0.25 +
+		rewatchQ*0.20 + commentQ*0.15) * (1.0 - cs.SkipRate*0.5)
+
+	// Trending: blends absolute VELOCITY (engagement in the last 2h — catches
+	// established viral) with engagement RATE (Wilson lower bound of
+	// engagement-per-view — lets a NEW video with a strong rate break out from a
+	// small audience, the way TikTok escalates a high-performing test). Either
+	// path can trend an item, so capable content isn't gated behind raw volume.
+	var recentEng, recentViews int
 	db.QueryRow(`
-		SELECT COUNT(*) FROM feed_events
+		SELECT
+			COUNT(*) FILTER (WHERE event_type IN ('like','comment','share','save')),
+			COUNT(*) FILTER (WHERE event_type = 'view')
+		FROM feed_events
 		WHERE content_id = $1 AND content_type = $2
-		AND event_type IN ('like','comment','share','save')
-		AND created_at > NOW() - INTERVAL '2 hours'`,
-		contentID, contentType).Scan(&recentEngagement)
-	cs.TrendingScore = math.Min(1.0, float64(recentEngagement)/20.0) // 20 engagements in 2h = max trending
+		  AND created_at > NOW() - INTERVAL '2 hours'`,
+		contentID, contentType).Scan(&recentEng, &recentViews)
+	velocity := math.Min(1.0, float64(recentEng)/15.0)
+	rate := 0.0
+	if recentViews >= 3 {
+		rate = wilsonLowerBound(float64(recentEng), float64(recentViews))
+	}
+	cs.TrendingScore = math.Max(velocity, rate)
 
 	// Energy level inference
 	cs.EnergyLevel = inferContentEnergy(contentType, cs)
@@ -3202,9 +3251,22 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		breakdown["jackpotCapScale"] = scale
 	}
 
+	// ── BREAKOUT (virality ladder) ──
+	// Reward content performing well by RATE — high engagement-per-view, Wilson
+	// lower-bounded so a tiny lucky sample doesn't qualify — by pushing it to a
+	// wider audience regardless of absolute view count. This is how capable
+	// content goes viral from a small start instead of being gated behind volume;
+	// it pairs with the audition (which earns it the impressions to prove the rate).
+	breakoutBonus := 0.0
+	if cs.ViewCount >= 5 {
+		posEng := float64(cs.LikeCount + cs.ShareCount + cs.CommentCount)
+		breakoutBonus = math.Min(0.25, wilsonLowerBound(posEng, float64(cs.ViewCount))*0.6)
+	}
+	breakdown["breakoutBonus"] = breakoutBonus
+
 	// ── FINAL SCORE ──
 	finalScore := baseScore + egoBonus + fatiguePenalty + creatorFatigue + sequencePenalty + dopaminePenalty +
-		unseenBonus + coldContentBonus + trendingBonus +
+		unseenBonus + coldContentBonus + trendingBonus + breakoutBonus +
 		hourBonus + emotionBonus + egoContextBonus + wellbeingBonus +
 		collabBonus + momentumBonus + variableReward + reentryBonus + streakBonus +
 		impressionPenalty + creatorBouncePenalty + scrollBackBonus + completeBonus + loopBonus +
