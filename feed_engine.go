@@ -2661,7 +2661,9 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 
 	// ── FRESHNESS ──
 	// Exponential decay with configurable half-life
-	hoursSince := time.Since(cs.CreatedAt).Hours()
+	// Clamp age at 0 so a future-dated row (clock skew) can't make the exponent
+	// positive and push freshness > 1 — the one unbounded base factor otherwise.
+	hoursSince := math.Max(0, time.Since(cs.CreatedAt).Hours())
 	freshness := math.Exp(-0.693 * hoursSince / freshnessHalfLifeHours) // ln(2) ≈ 0.693
 	breakdown["freshness"] = freshness
 
@@ -3114,9 +3116,17 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// The unpredictability is what hooks — if every 7th item was boosted, it'd be predictable.
 	variableReward := 0.0
 	if session.ItemsSeen > 0 && cs.QualityScore > 0.6 {
-		// Use a hash of session + items seen to create pseudo-random trigger points
-		// This makes it deterministic per session but feels random to the user
-		rewardSeed := (session.ItemsSeen * 7 + len(cs.ContentID)) % 11
+		// Pseudo-random trigger that actually VARIES per candidate. The old seed
+		// used len(cs.ContentID) — the DIGIT COUNT of a SERIAL id — which is the
+		// same for nearly every item on a page, and ItemsSeen is frozen during a
+		// scoring pass, so a whole page got the jackpot or none did (no variable
+		// ratio at all). Hash the content id so each item gets an independent draw.
+		var h uint32 = 2166136261
+		for i := 0; i < len(cs.ContentID); i++ {
+			h ^= uint32(cs.ContentID[i])
+			h *= 16777619
+		}
+		rewardSeed := (session.ItemsSeen*7 + int(h)) % 11
 		if rewardSeed == 0 || rewardSeed == 4 || rewardSeed == 9 {
 			// ~27% of items that pass quality threshold get a jackpot boost
 			variableReward = 0.20
@@ -3384,6 +3394,15 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// a just-bounced item.
 	negMult := negativeCreatorPenalty(ns, cs.CreatorID) * bouncePenalty(ns, cs.ContentType, cs.ContentID)
 	breakdown["negativeMult"] = negMult
+	// Clamp to non-negative BEFORE the multiplicative attenuator. The additive
+	// sum above can go negative (stacked fatigue/sequence/bounce penalties), and
+	// multiplying a NEGATIVE score by negMult<1 makes it LESS negative — i.e. the
+	// negative signal would BOOST a blocked/unfollowed creator's bad item above an
+	// identically-bad non-penalized one. A penalty multiplier must only ever
+	// attenuate a magnitude toward 0.
+	if finalScore < 0 {
+		finalScore = 0
+	}
 	finalScore *= negMult
 
 	// ── SESSION CONTINUITY FACTOR (Tier 1.5) ──

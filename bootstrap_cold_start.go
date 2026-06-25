@@ -77,6 +77,17 @@ func wilsonLowerBound(positives, trials float64) float64 {
 	}
 	const z = 1.96 // 95% confidence
 	phat := positives / trials
+	// Clamp the rate to [0,1]. Callers pass independent COUNT aggregates for
+	// positives (likes+shares+comments) and trials (views), and one viewer can
+	// like+comment+share a single view, so positives routinely EXCEEDS trials →
+	// phat>1 → phat*(1-phat)<0 → sqrt of a negative → NaN. That NaN then poisons
+	// finalScore and the sort comparator, corrupting the WHOLE feed ordering.
+	// "More engagement than impressions" should saturate at rate 1.0, not NaN.
+	if phat > 1 {
+		phat = 1
+	} else if phat < 0 {
+		phat = 0
+	}
 	denom := 1 + z*z/trials
 	center := phat + z*z/(2*trials)
 	margin := z * math.Sqrt((phat*(1-phat)+z*z/(4*trials))/trials)
