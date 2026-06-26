@@ -53,10 +53,12 @@ var ltrFeatureKeys = []string{
 	"streakBonus", "impressionBouncePenalty", "scrollBackBonus",
 	"completeBonus", "loopBonus", "unmuteBonus", "profileVisitBonus",
 	"egoBoost",
-	// Two-tower & calibration signals — the ranker now writes these too,
-	// so giving LTR access lets the model learn how much they contribute
-	// to engagement on top of their already-baked influence on score.
-	"embedSim", "embedBonus",
+	// NB: embedSim / embedBonus are deliberately NOT in this list. They are
+	// written to the breakdown AFTER scoreForUser returns (in the post-scoring
+	// loop), so at SERVE time the LTR / Platt / watch-ratio heads never see them
+	// (absent → contribute 0), while at TRAIN time they were stashed present.
+	// That train/serve feature-presence mismatch biased every calibrated
+	// probability. Train and serve must iterate the same key set.
 }
 
 type ltrModel struct {

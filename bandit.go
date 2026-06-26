@@ -95,6 +95,17 @@ func loadBandit(userID string) *bandit {
 			arm.beta = val
 		}
 	}
+	// Decay each arm toward the (1,1) prior on READ, using its persisted
+	// timestamp. Previously decay ran only inside updateArm (the rare write
+	// path), so serve-time samples (sampleBest/softMix) drew from a NEVER-decayed
+	// posterior — re-creating the early-winner lock-in the 2-week half-life
+	// exists to prevent. Stamping lastUpdate=now means a later updateArm on this
+	// same loaded bandit won't decay the identical elapsed window twice.
+	now := time.Now()
+	for _, arm := range b.arms {
+		applyTimeDecay(arm, arm.lastUpdate)
+		arm.lastUpdate = now
+	}
 	return b
 }
 
