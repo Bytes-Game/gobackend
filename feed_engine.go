@@ -1676,9 +1676,14 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 			}
 		}
 
-		// Build avoided categories (negative scores)
+		// Build avoided categories — require CORROBORATED dislike. A single
+		// "not_interested" tap scores -2.0, so the old -1.0 cutoff let ONE tap
+		// (or one mis-categorized item via the ~70% inferCategory heuristic)
+		// blacklist a whole category and force relevance to -0.3 for all of its
+		// content. -2.5 needs corroboration (a not_interested PLUS a skip, or
+		// several skips) before avoiding.
 		for k, v := range categoryScores {
-			if v < -1.0 {
+			if v < -2.5 {
 				p.AvoidedCategories = append(p.AvoidedCategories, k)
 			}
 		}
@@ -1688,13 +1693,14 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 			p.AvgCompletionRate = totalCompletion / float64(completionCount)
 		}
 
-		// Skip rate
-		totalEvents := 0
-		for _, c := range eventTypes {
-			totalEvents += c
-		}
-		if totalEvents > 0 {
-			p.AvgSkipRate = float64(eventTypes["skip"]+eventTypes["not_interested"]) / float64(totalEvents)
+		// Skip rate = skips per IMPRESSION (skip + view), NOT per total event of
+		// every type. The old denominator summed likes, comments, impressions,
+		// pauses, scrolls, ... which made the rate structurally tiny — the
+		// at-risk cohort gate (AvgSkipRate > 0.5) could essentially never fire.
+		skips := eventTypes["skip"] + eventTypes["not_interested"]
+		impressions := skips + eventTypes["view"]
+		if impressions > 0 {
+			p.AvgSkipRate = float64(skips) / float64(impressions)
 		}
 	}
 
@@ -2035,7 +2041,10 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		SELECT COUNT(*) FROM feed_events
 		WHERE user_id = $1 AND event_type = 'view'`, userID).Scan(&totalViews)
 	if totalViews > 0 {
-		p.AttentionSpan = math.Min(1.0, float64(deepViews)/float64(totalViews))
+		// Bayesian shrinkage toward the 0.5 prior so a 1-of-1 deep view doesn't
+		// read as a proven deep watcher (1.0); converges to the true rate as
+		// views accumulate.
+		p.AttentionSpan = smoothedRate(float64(deepViews), float64(totalViews), 0.5, 8)
 	}
 
 	// --- BingeIntensity ---
@@ -2080,7 +2089,9 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 				LIMIT 3
 			)
 			SELECT COALESCE(SUM(cnt), 0) FROM creator_engagement`, userID).Scan(&topCreatorEngagement)
-		p.CreatorLoyalty = math.Min(1.0, float64(topCreatorEngagement)/float64(totalPositiveEngagement))
+		// Shrink toward 0.5 so a user with 2 positive events both on one creator
+		// isn't scored a maxed-out loyalist (1.0) on no real evidence.
+		p.CreatorLoyalty = smoothedRate(float64(topCreatorEngagement), float64(totalPositiveEngagement), 0.5, 5)
 	}
 
 	// --- CompetitivenessIndex ---
