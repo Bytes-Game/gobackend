@@ -881,8 +881,13 @@ func updateSessionFromEvent(event FeedEvent) {
 		return
 	}
 
-	state.ItemsSeen++
 	state.TotalWatchMs += event.WatchDurationMs
+
+	// ItemsSeen is incremented per IMPRESSION (view/skip/not_interested) in the
+	// switch below — NOT here on every event. Counting it per event made one
+	// engaged item (view+like+complete) bump it 2-3×, deflating the per-item
+	// skipRate / engagementPerItem rates so "engaged" mood was nearly unreachable
+	// and users skewed "bored". Engagement taps now bump their own counters only.
 
 	// Dopamine budget is adjusted per IMPRESSION in the view/skip cases below —
 	// NOT here on every event. Depleting on every event made a single engaged
@@ -962,6 +967,7 @@ func updateSessionFromEvent(event FeedEvent) {
 
 	switch event.EventType {
 	case "skip", "not_interested":
+		state.ItemsSeen++ // an impression the user rejected
 		state.SkipCount++
 		state.SkipStreak++
 		// A rejection drains more than a neutral view — the feed missed.
@@ -1004,6 +1010,7 @@ func updateSessionFromEvent(event FeedEvent) {
 		state.SkipStreak += 2
 		state.DopamineBudget = math.Max(0, state.DopamineBudget-3*dopamineSkipDrain)
 	case "view":
+		state.ItemsSeen++ // the impression itself; engagement taps below don't re-count it
 		if event.CompletionRate >= 0.8 {
 			state.SkipStreak = 0 // Watching most of content = not skipping
 			// A near-full watch is satisfying — net refill (the strongest
@@ -1169,47 +1176,42 @@ func detectResistance(state *SessionState) int {
 
 	// ─── Impression-based (EARLY) resistance ─────────────────────────
 	// Bounces fire before the user commits to a "skip" event — this catches
-	// disengagement ~10s faster than the skip-only path.
+	// disengagement ~10s faster than the skip path. It may only ESCALATE the
+	// level: previously it early-RETURNED, so a moderate bounce rate (→ level 1)
+	// short-circuited and HID a severe skip-based level (→ 2/3) for exactly the
+	// most disengaged users, who then never got the strategy switch / emergency.
+	// We now take max(bouncePath, skipPath).
+	bounceLvl := 0
 	if state.ImpressionCount >= resistBounceMinSample {
 		bounceRate := float64(state.BounceCount) / float64(state.ImpressionCount)
-		if state.BounceStreak >= 10 {
-			return 3
-		}
-		if bounceRate >= resistBounceRateL3 {
-			return 3
-		}
-		if state.BounceStreak >= resistBounceStreakL2 || bounceRate >= resistBounceRateL2 {
-			return 2
-		}
-		if bounceRate >= resistBounceRateL1 {
-			return 1
+		switch {
+		case state.BounceStreak >= 10 || bounceRate >= resistBounceRateL3:
+			bounceLvl = 3
+		case state.BounceStreak >= resistBounceStreakL2 || bounceRate >= resistBounceRateL2:
+			bounceLvl = 2
+		case bounceRate >= resistBounceRateL1:
+			bounceLvl = 1
 		}
 	}
 
 	// ─── Skip-based (LATE) resistance ────────────────────────────────
-	if state.ItemsSeen < 3 {
-		return 0
+	skipLvl := 0
+	if state.ItemsSeen >= 3 {
+		skipRate := float64(state.SkipCount) / float64(state.ItemsSeen)
+		switch {
+		case state.SkipStreak >= 8 || skipRate >= resistL3SkipRate:
+			skipLvl = 3
+		case state.SkipStreak >= resistL2SkipStreak || skipRate >= resistL2SkipRate:
+			skipLvl = 2
+		case skipRate >= resistL1SkipRate:
+			skipLvl = 1
+		}
 	}
-	skipRate := float64(state.SkipCount) / float64(state.ItemsSeen)
 
-	// Skip streak is a stronger signal than overall skip rate
-	if state.SkipStreak >= 8 {
-		return 3
+	if bounceLvl > skipLvl {
+		return bounceLvl
 	}
-	if state.SkipStreak >= resistL2SkipStreak {
-		return 2
-	}
-
-	if skipRate >= resistL3SkipRate {
-		return 3
-	}
-	if skipRate >= resistL2SkipRate {
-		return 2
-	}
-	if skipRate >= resistL1SkipRate {
-		return 1
-	}
-	return 0
+	return skipLvl
 }
 
 // detectMood infers the user's current emotional state from recent engagement
