@@ -1652,7 +1652,10 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 				categoryScores[category] -= 2.0
 			}
 
-			if completion > 0 {
+			// Count each item's completion ONCE, from its view event. 'complete'
+			// and 'rewatch' rows also carry a completion_rate (=1.0) and would
+			// double-count, biasing AvgCompletionRate upward (it drives cohort gates).
+			if evType == "view" && completion > 0 {
 				totalCompletion += completion
 				completionCount++
 			}
@@ -1790,13 +1793,29 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// === Session stats ===
 	var sessionCount int
 	var totalWatchMs int64
+	// TotalWatchTimeMs = VIEW-only watch time. Summing watch_duration_ms across
+	// ALL event types double-counted the same seconds (view + complete +
+	// impression + pause each carry overlapping durations for one item).
 	db.QueryRow(`
-		SELECT COUNT(DISTINCT session_id), COALESCE(SUM(watch_duration_ms), 0)
+		SELECT
+			COUNT(DISTINCT session_id) FILTER (WHERE session_id <> ''),
+			COALESCE(SUM(watch_duration_ms) FILTER (WHERE event_type = 'view'), 0)
 		FROM feed_events WHERE user_id = $1`, userID).Scan(&sessionCount, &totalWatchMs)
 	p.TotalSessions = sessionCount
 	p.TotalWatchTimeMs = totalWatchMs
-	if sessionCount > 0 {
-		p.AvgSessionSec = int(totalWatchMs / int64(sessionCount) / 1000)
+	// Session length = average wall-clock span (first→last event) per session.
+	// The old totalWatchMs/sessionCount inflated this ~2-3x via the double-count
+	// above and mis-drove the cohort gates (at-risk < 90s, power > 240s).
+	var avgSpanSec float64
+	db.QueryRow(`
+		SELECT COALESCE(AVG(span), 0) FROM (
+			SELECT EXTRACT(EPOCH FROM (MAX(created_at) - MIN(created_at))) AS span
+			FROM feed_events
+			WHERE user_id = $1 AND session_id <> ''
+			GROUP BY session_id
+		) s`, userID).Scan(&avgSpanSec)
+	if avgSpanSec > 0 {
+		p.AvgSessionSec = int(avgSpanSec)
 	}
 
 	// === Active hours ===
@@ -2021,10 +2040,15 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// Tail of session length distribution. If a user has at least one very long
 	// session (>15min) they're a binger. Otherwise scale by avg session length.
 	var maxSessionMs int64
+	// Longest session by wall-clock span (first→last event), NOT a SUM of
+	// overlapping per-event durations, and excluding the empty pseudo-session
+	// that catches all session-less events (server-recorded / legacy rows) —
+	// that bucket's SUM was huge and falsely flagged users as bingers.
 	db.QueryRow(`
-		SELECT COALESCE(MAX(total_ms), 0) FROM (
-			SELECT session_id, SUM(watch_duration_ms) AS total_ms
-			FROM feed_events WHERE user_id = $1 GROUP BY session_id
+		SELECT COALESCE(MAX(span_ms), 0) FROM (
+			SELECT EXTRACT(EPOCH FROM (MAX(created_at) - MIN(created_at))) * 1000 AS span_ms
+			FROM feed_events WHERE user_id = $1 AND session_id <> ''
+			GROUP BY session_id
 		) s`, userID).Scan(&maxSessionMs)
 	// 15min = 900,000ms = full binge. 5min = 300,000ms = casual. Below = dipper.
 	if maxSessionMs > 0 {
