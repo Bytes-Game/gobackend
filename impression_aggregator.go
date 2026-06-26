@@ -203,6 +203,8 @@ func getImpressionStats(userID string) (byCategory map[string]*ImpressionStats, 
 			cs.TotalDwellMs += dwellMs
 			if dwellMs < dwellBounceThresholdMs {
 				cs.BounceCount++
+			} else if dwellMs < dwellCuriosityMs {
+				cs.CuriosityCount++ // mirror the category classification; was silently always 0
 			} else if dwellMs > dwellInterestMs {
 				cs.InterestCount++
 			}

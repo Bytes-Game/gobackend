@@ -1787,7 +1787,13 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		FROM feed_events fe
 		LEFT JOIN challenges c ON fe.content_type = 'challenge' AND fe.content_id = CAST(c.id AS TEXT)
 		LEFT JOIN posts p ON fe.content_type = 'post' AND fe.content_id = CAST(p.id AS TEXT)
-		WHERE fe.user_id = $1 AND fe.event_type IN ('like','comment','share','save','view')`, userID).Scan(&uniqueCategories, &totalNoveltyItems)
+		WHERE fe.user_id = $1
+		  AND (fe.event_type IN ('like','comment','share','save')
+		       OR (fe.event_type = 'view' AND fe.completion_rate > 0.5))`, userID).Scan(&uniqueCategories, &totalNoveltyItems)
+	// Count a 'view' only when actually watched (>50%), not on mere exposure:
+	// NoveltyTolerance is meant to capture tolerance FOR novelty, but the feed
+	// controls breadth of exposure, so counting passive views measured the feed's
+	// diversity and fed back to show even more (novelty *= NoveltyTolerance).
 	// Normalize: 1-3 categories = low novelty, 8+ = high. Then shrink toward the
 	// 0.5 neutral prior by the number of engaged items — a user with only a
 	// couple of events can't have sampled many categories, so the raw ratio must
@@ -2135,9 +2141,18 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// How concentrated are their positive events on their top 3 creators?
 	// (share of positive engagement on top-3 creators / total positive engagement)
 	var topCreatorEngagement, totalPositiveEngagement int
+	// Denominator must cover the SAME population as the numerator below (events
+	// that still resolve to a live creator/author). Counting deleted-content
+	// engagements here but not in the numerator biased CreatorLoyalty downward
+	// and made 1.0 unreachable once any engaged content was removed.
 	db.QueryRow(`
-		SELECT COUNT(*) FROM feed_events fe
-		WHERE fe.user_id = $1 AND fe.event_type IN ('like','share','save','rewatch','complete','loop','unmute','profile_visit')`,
+		SELECT COUNT(*)
+		FROM feed_events fe
+		LEFT JOIN challenges c ON fe.content_type = 'challenge' AND fe.content_id = CAST(c.id AS TEXT)
+		LEFT JOIN posts p ON fe.content_type = 'post' AND fe.content_id = CAST(p.id AS TEXT)
+		WHERE fe.user_id = $1
+		AND fe.event_type IN ('like','share','save','rewatch','complete','loop','unmute','profile_visit')
+		AND COALESCE(c.creator_id::TEXT, p.author_id::TEXT) IS NOT NULL`,
 		userID).Scan(&totalPositiveEngagement)
 	if totalPositiveEngagement > 0 {
 		db.QueryRow(`
@@ -2847,11 +2862,16 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 
 	// ── NOVELTY ──
 	// Is this a new category or creator for the user?
+	// Long-term engagement strength with this creator (loops/completions/likes),
+	// read here so the "new creator" test reflects GENUINE unfamiliarity — a
+	// creator the user has watched many times but not followed must not still
+	// count as maximally novel.
+	creatorAff := getCreatorAffinity(profile.UserID, cs.CreatorID)
 	novelty := 0.0
 	if _, seen := profile.CategoryAffinity[cs.Category]; !seen {
 		novelty = 0.6 // New category = exploration opportunity
 	}
-	isNewCreator := true
+	isNewCreator := creatorAff == 0 // no prior engagement with this creator
 	for _, pc := range profile.PreferredCreators {
 		if pc == cs.CreatorID {
 			isNewCreator = false
@@ -2859,7 +2879,7 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		}
 	}
 	if isNewCreator && !followingSet[cs.CreatorID] {
-		novelty = math.Min(1.0, novelty+0.4) // New creator
+		novelty = math.Min(1.0, novelty+0.4) // New creator the user has never engaged
 	}
 	// Scale by user's novelty tolerance
 	novelty *= profile.NoveltyTolerance
@@ -2874,8 +2894,8 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 
 	// ── CREATOR AFFINITY (precomputed nightly) ──
 	// Long-term engagement strength with this creator — loops, completions, likes.
-	// Reads Redis KEY creator_affinity:{user} written by computeCreatorAffinity().
-	creatorAff := getCreatorAffinity(profile.UserID, cs.CreatorID)
+	// creatorAff is read in the NOVELTY block above (so the new-creator test can
+	// use it) and reused here.
 	creatorAffinityBoost := creatorAff * 0.20
 	breakdown["creatorAffinityBoost"] = creatorAffinityBoost
 
@@ -2979,9 +2999,15 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		relevance*wsel("wRelevance", wRelevance)*cw.Relevance +
 		quality*wsel("wQuality", wQuality)*cw.Quality +
 		novelty*wsel("wNovelty", wNovelty)*cw.Novelty +
-		tieBoost*cw.Tie +
+		// tie-strength is a social-graph signal, so SocialDrive scales it too (the
+		// socialWeightMult comment promises BOTH social and tie-strength; it was
+		// previously applied to social only).
+		tieBoost*cw.Tie*socialWeightMult +
 		creatorAffinityBoost*cw.Affinity +
-		dwellBoost +
+		// dwellBoost is a precomputed-intent signal like tie/affinity, so it's
+		// cohort-weighted (reusing cw.Affinity) instead of leaking in un-gated —
+		// e.g. cold_start, where cw.Affinity=0, no longer gets the full boost.
+		dwellBoost*cw.Affinity +
 		searchTerm
 
 	// ── EGO BOOST (conditional) ──
