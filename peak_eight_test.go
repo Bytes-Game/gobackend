@@ -224,8 +224,10 @@ func TestPeak6_TrajectoryLearnsTransitions(t *testing.T) {
 
 func TestPeak7_MoodSeedPriorBoostsHealthyNext(t *testing.T) {
 	resetMoodTransitions()
-	// "frustrated" → "peaceful" is in the seed prior.
-	bonus := moodTransitionBonus("frustrated", []string{"peaceful"})
+	// "frustrated" → "chill" is in the seed prior. (Must be a real EmotionLabel:
+	// the old test used "peaceful", which is not a content tag and so could never
+	// match at serve time — exactly the dead-seed bug #28 fixed.)
+	bonus := moodTransitionBonus("frustrated", []string{"chill"})
 	if !(bonus > 0) {
 		t.Errorf("seed prior should boost healthy-next mood, got %v", bonus)
 	}

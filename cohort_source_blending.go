@@ -146,16 +146,67 @@ func effectiveSourceWeights(cohort Cohort) map[string]float64 {
 			mul = expSafe(r) // expSafe lives in bandit.go
 		}
 		raw := defWeight * mul
-		if raw < cohortBlendMinWeight {
-			raw = cohortBlendMinWeight
-		}
+		// NO floor here — the floor must hold on the FINAL (post-normalization)
+		// weight. Enforcing it pre-normalization let the renormalize below shrink
+		// a floored source back UNDER the floor, breaking the documented
+		// "each source >= cohortBlendMinWeight" safety invariant.
 		out[src] = raw
 		totalRaw += raw
 	}
-	// Renormalize so the cohort's source weights sum to 1.
-	if totalRaw > 0 {
+	if totalRaw <= 0 {
+		return out
+	}
+	// Normalize so the weights sum to 1.
+	for src := range out {
+		out[src] /= totalRaw
+	}
+
+	// Enforce the min-weight floor on the NORMALIZED weights via water-filling:
+	// pin any source below the floor up to it, then redistribute the remaining
+	// mass over the un-pinned sources proportionally; repeat until stable. The
+	// result both sums to 1 and guarantees every source >= cohortBlendMinWeight.
+	base := make(map[string]float64, len(out))
+	for src, w := range out {
+		base[src] = w
+	}
+	pinned := make(map[string]bool, len(out))
+	for {
+		avail := 1.0 - float64(len(pinned))*cohortBlendMinWeight
+		unpinnedBaseSum := 0.0
 		for src := range out {
-			out[src] /= totalRaw
+			if !pinned[src] {
+				unpinnedBaseSum += base[src]
+			}
+		}
+		if avail <= 0 || unpinnedBaseSum <= 0 {
+			break
+		}
+		newlyPinned := false
+		for src := range out {
+			if pinned[src] {
+				continue
+			}
+			if base[src]/unpinnedBaseSum*avail < cohortBlendMinWeight {
+				pinned[src] = true
+				newlyPinned = true
+			}
+		}
+		if !newlyPinned {
+			break
+		}
+	}
+	avail := 1.0 - float64(len(pinned))*cohortBlendMinWeight
+	unpinnedBaseSum := 0.0
+	for src := range out {
+		if !pinned[src] {
+			unpinnedBaseSum += base[src]
+		}
+	}
+	for src := range out {
+		if pinned[src] {
+			out[src] = cohortBlendMinWeight
+		} else if unpinnedBaseSum > 0 {
+			out[src] = base[src] / unpinnedBaseSum * avail
 		}
 	}
 	return out

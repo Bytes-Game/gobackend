@@ -44,20 +44,29 @@ const (
 // a list of content-moods that empirically tend to leave the user better
 // off. NOT a hard rule — these are starting weights for the learned model.
 //
+// IMPORTANT: the from-mood KEYS are detectMood() labels, but the to-mood VALUES
+// must be members of EmotionLabels (models.go) — they are matched at runtime
+// against content emotion tags. The original seed used aspirational mood words
+// (energetic, motivated, peaceful, curious, calming) that are NOT content tags,
+// so roughly half the seed transitions could never fire and the cold-start
+// regulation signal was silently inert. Values below are mapped to real tags:
+//   energetic→intense, motivated→empowering, peaceful/calming→chill,
+//   curious→suspenseful. A unit test asserts every value is a valid EmotionLabel.
+//
 // Reasoning per row:
-//   energetic → energetic/happy/motivated: ride the wave
-//   chill → peaceful/happy/curious: don't shock them
-//   frustrated → calming/peaceful/nostalgic: gentle recovery
-//   bored → curious/intense/happy: re-stimulate
-//   engaged → motivated/curious/intense: keep momentum
-//   curious → curious/intense/happy: feed the appetite
+//   energetic → ride the wave (intense/happy/empowering/funny)
+//   chill → don't shock them (chill/happy/nostalgic/satisfying)
+//   frustrated → gentle recovery (chill/satisfying/nostalgic/happy)
+//   bored → re-stimulate (suspenseful/intense/happy/funny)
+//   engaged → keep momentum (empowering/intense/happy/inspiring)
+//   curious → feed the appetite (suspenseful/intense/happy/inspiring)
 var moodHealthyNext = map[string][]string{
-	"energetic":  {"energetic", "happy", "motivated", "intense"},
-	"chill":      {"peaceful", "happy", "curious", "nostalgic"},
-	"frustrated": {"peaceful", "calming", "nostalgic", "happy"},
-	"bored":      {"curious", "intense", "happy", "motivated"},
-	"engaged":    {"motivated", "curious", "intense", "happy"},
-	"curious":    {"curious", "intense", "happy", "motivated"},
+	"energetic":  {"intense", "happy", "empowering", "funny"},
+	"chill":      {"chill", "happy", "nostalgic", "satisfying"},
+	"frustrated": {"chill", "satisfying", "nostalgic", "happy"},
+	"bored":      {"suspenseful", "intense", "happy", "funny"},
+	"engaged":    {"empowering", "intense", "happy", "inspiring"},
+	"curious":    {"suspenseful", "intense", "happy", "inspiring"},
 }
 
 // learnedMoodTransitions stores the OBSERVED reward per (fromMood, toMood)

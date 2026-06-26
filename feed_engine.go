@@ -812,6 +812,30 @@ func sessionWasPositive(s *SessionState) bool {
 	return (s.LikeCount+s.ShareCount) > 0 && skipRate < 0.6 && s.DopamineBudget > 0.2
 }
 
+// wellbeingNegativeEmotions are the emotion tags that count toward a "negative
+// spiral" for the wellbeing counterweight. Package-scoped so the per-item
+// representative-emotion picker and the spiral detector share one definition.
+var wellbeingNegativeEmotions = map[string]bool{
+	"sad": true, "scary": true, "aggressive": true, "serious": true,
+}
+
+// representativeEmotion collapses an item's emotion tags to a SINGLE label for
+// per-item streak tracking: a negative tag takes priority (so one dark item
+// counts as exactly one negative item), otherwise the first tag. Without this,
+// flattening all of an item's tags into the history let a single video tagged
+// e.g. ['sad','scary','serious'] satisfy negativeStreak>=3 on its own.
+func representativeEmotion(emotions []string) string {
+	if len(emotions) == 0 {
+		return ""
+	}
+	for _, e := range emotions {
+		if wellbeingNegativeEmotions[e] {
+			return e
+		}
+	}
+	return emotions[0]
+}
+
 func updateSessionFromEvent(event FeedEvent) {
 	// Serialize the whole load→modify→save against other writers of this session
 	// (other events for the same user, the impression goroutine) so concurrent
@@ -1040,12 +1064,17 @@ func updateSessionFromEvent(event FeedEvent) {
 
 	// Track content emotions for wellbeing spiral detection
 	if event.EventType == "view" && event.CompletionRate > 0.5 {
-		// Only track emotions for content they actually watched
+		// Only track emotions for content they actually watched. Store ONE
+		// representative emotion per item (negative-priority) so the spiral
+		// detector counts negative ITEMS, not tags — a single multi-tagged dark
+		// video must not look like a 3-item negative streak.
 		emotions := getContentEmotions(event.ContentID, event.ContentType)
-		state.LastEmotions = append(state.LastEmotions, emotions...)
-		// Keep only last 10 emotions
-		if len(state.LastEmotions) > 10 {
-			state.LastEmotions = state.LastEmotions[len(state.LastEmotions)-10:]
+		if rep := representativeEmotion(emotions); rep != "" {
+			state.LastEmotions = append(state.LastEmotions, rep)
+			// Keep only last 10 items
+			if len(state.LastEmotions) > 10 {
+				state.LastEmotions = state.LastEmotions[len(state.LastEmotions)-10:]
+			}
 		}
 	}
 
@@ -3116,7 +3145,7 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// Detect if user is spiraling into negative emotions and inject counterweight.
 	// If they've consumed 3+ "sad"/"scary"/"aggressive" in a row, boost positive content.
 	wellbeingBonus := 0.0
-	negativeEmotions := map[string]bool{"sad": true, "scary": true, "aggressive": true, "serious": true}
+	negativeEmotions := wellbeingNegativeEmotions
 	positiveEmotions := map[string]bool{"happy": true, "inspiring": true, "funny": true, "chill": true}
 	if len(session.LastEmotions) >= 3 {
 		negativeStreak := 0
