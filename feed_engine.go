@@ -965,6 +965,11 @@ func updateSessionFromEvent(event FeedEvent) {
 		}(event)
 	}
 
+	// Snapshot the budget BEFORE the per-event refills so the "second wind"
+	// mechanic can fire when the user engaged WHILE critically low — the refills
+	// below would otherwise lift the budget out of the <0.15 zone first.
+	preBudget := state.DopamineBudget
+
 	switch event.EventType {
 	case "skip", "not_interested":
 		state.ItemsSeen++ // an impression the user rejected
@@ -992,7 +997,9 @@ func updateSessionFromEvent(event FeedEvent) {
 		state.DopamineBudget = math.Min(1.0, state.DopamineBudget+0.08)
 	case "complete":
 		state.SkipStreak = 0
-		state.DopamineBudget = math.Min(1.0, state.DopamineBudget+0.04)
+		// No dopamine refill here — the paired `view` event (proportional to
+		// completion, below) is the canonical watch-satisfaction signal.
+		// Refilling here too double-counted the same watch (view+complete = +0.06).
 	case "unmute":
 		state.SkipStreak = 0
 		state.DopamineBudget = math.Min(1.0, state.DopamineBudget+0.03)
@@ -1013,12 +1020,21 @@ func updateSessionFromEvent(event FeedEvent) {
 		state.ItemsSeen++ // the impression itself; engagement taps below don't re-count it
 		if event.CompletionRate >= 0.8 {
 			state.SkipStreak = 0 // Watching most of content = not skipping
-			// A near-full watch is satisfying — net refill (the strongest
-			// signal a recommender has is watch-completion).
-			state.DopamineBudget = math.Min(1.0, state.DopamineBudget+0.02)
-		} else {
-			// Partial / low-completion view: a small attention cost.
-			state.DopamineBudget = math.Max(0, state.DopamineBudget-dopamineDepletionRate)
+		}
+		// Dopamine tracks watch satisfaction PROPORTIONAL to completion, and only
+		// when completion is known (>0): a near-full watch refills (~+0.02 at
+		// 100%), a partial one costs a little (~-0.03 at 0%), 0.6 is neutral. A
+		// zero/unknown-completion view is left neutral so a measurement gap — or a
+		// true bounce, which fires its own skip event — isn't double-penalized.
+		// No sharp 0.8 cliff. This is the SOLE watch-satisfaction refill now (the
+		// `complete` event no longer also refills).
+		if event.CompletionRate > 0 {
+			delta := (event.CompletionRate - 0.6) * 0.05
+			if delta >= 0 {
+				state.DopamineBudget = math.Min(1.0, state.DopamineBudget+delta)
+			} else {
+				state.DopamineBudget = math.Max(0, state.DopamineBudget+delta)
+			}
 		}
 	}
 
@@ -1056,7 +1072,11 @@ func updateSessionFromEvent(event FeedEvent) {
 	// positively (like/share/rewatch), give a bigger refill to extend the session.
 	// This mimics the "one more episode" effect — just when you're about to quit,
 	// something great pulls you back.
-	if state.DopamineBudget < 0.15 && state.DopamineBudget > 0 {
+	//
+	// Gate on the PRE-event budget: the per-event refill above had usually already
+	// lifted the budget out of <0.15, so gating on the post-refill value meant this
+	// almost never fired — the mechanic was effectively dead.
+	if preBudget < 0.15 && preBudget > 0 {
 		switch event.EventType {
 		case "like", "share", "rewatch":
 			state.DopamineBudget = math.Min(1.0, state.DopamineBudget+0.12) // Big refill
