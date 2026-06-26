@@ -118,12 +118,24 @@ func multiSourceFetchForCohort(userID string, totalLimit int, cohort Cohort) ([]
 
 	go func() { wg.Wait(); close(resCh) }()
 
-	// Dedup by member key.
+	// Collect every source's items first so attribution doesn't depend on
+	// goroutine completion order.
+	resultsByName := make(map[string][]HomeFeedItem, len(sources))
+	for r := range resCh {
+		resultsByName[r.name] = r.items
+	}
+
+	// Dedup + attribute by walking `sources` in fixed PRIORITY order, so a
+	// candidate produced by several sources is credited to the highest-priority
+	// one deterministically. Previously the first goroutine to FINISH claimed a
+	// shared key (typically the cheapest/fastest query), attributing the learned-
+	// blend reward signal nondeterministically and starving slower sources of
+	// credit they earned.
 	seen := make(map[string]bool, totalLimit)
 	bySource := make(map[string][]HomeFeedItem, len(sources))
 	itemSource := make(map[string]string, totalLimit)
-	for r := range resCh {
-		for _, it := range r.items {
+	for _, src := range sources {
+		for _, it := range resultsByName[src.name] {
 			id := getItemID(it)
 			if id == "" {
 				continue
@@ -133,8 +145,8 @@ func multiSourceFetchForCohort(userID string, totalLimit int, cohort Cohort) ([]
 				continue
 			}
 			seen[key] = true
-			bySource[r.name] = append(bySource[r.name], it)
-			itemSource[key] = r.name
+			bySource[src.name] = append(bySource[src.name], it)
+			itemSource[key] = src.name
 		}
 	}
 

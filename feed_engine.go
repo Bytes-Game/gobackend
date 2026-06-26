@@ -1596,9 +1596,23 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	defer unlock()
 	// Preserve StrategySuccessHistory across recomputes — it's updated
 	// incrementally at strategy-switch time, not derived from raw events.
+	// Likewise preserve incrementally-MINED negative signal (negative category
+	// affinities and the avoided-categories list) that realtime negative-profile
+	// mining / the impression aggregator push down between full recomputes — the
+	// rebuild below clamps CategoryAffinity to >=0 from a 500-event window and
+	// would otherwise silently discard committed dislike signal.
 	var preservedStrategyHistory map[string]float64
+	var preservedNegAffinity map[string]float64
+	var preservedAvoided []string
 	if existing, err := loadUserProfile(userID); err == nil && existing != nil {
 		preservedStrategyHistory = existing.StrategySuccessHistory
+		preservedNegAffinity = make(map[string]float64)
+		for k, v := range existing.CategoryAffinity {
+			if v < 0 {
+				preservedNegAffinity[k] = v
+			}
+		}
+		preservedAvoided = existing.AvoidedCategories
 	}
 
 	p := &UserProfile{
@@ -1724,6 +1738,14 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 				p.CategoryAffinity[k] = math.Max(0, v/maxCat)
 			}
 		}
+		// Re-apply mined negative affinities the clamp above discarded: if this
+		// window produced no POSITIVE evidence for a category the user previously
+		// disliked, keep the negative affinity instead of resetting it to neutral.
+		for k, negv := range preservedNegAffinity {
+			if cur, ok := p.CategoryAffinity[k]; !ok || cur <= 0 {
+				p.CategoryAffinity[k] = negv
+			}
+		}
 
 		// Build avoided categories — require CORROBORATED dislike. A single
 		// "not_interested" tap scores -2.0, so the old -1.0 cutoff let ONE tap
@@ -1734,6 +1756,21 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		for k, v := range categoryScores {
 			if v < -2.5 {
 				p.AvoidedCategories = append(p.AvoidedCategories, k)
+			}
+		}
+		// Union with previously-mined avoided categories (dedup) so a recompute
+		// doesn't drop dislikes the current window didn't reproduce. The realtime
+		// miner can still remove an entry (it won't be in preservedAvoided then).
+		{
+			seen := make(map[string]bool, len(p.AvoidedCategories))
+			for _, c := range p.AvoidedCategories {
+				seen[c] = true
+			}
+			for _, c := range preservedAvoided {
+				if !seen[c] {
+					p.AvoidedCategories = append(p.AvoidedCategories, c)
+					seen[c] = true
+				}
 			}
 		}
 
@@ -3934,8 +3971,12 @@ func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]
 			buckets[slotTrending] = append(buckets[slotTrending], item)
 		}
 
-		// Challenge: challenge content type
-		if item.Item.Type == "challenge" {
+		// Challenge: genuinely COMPETITIVE content (an active battle with
+		// responses), signalled by battleBoost>0 — not merely Type=="challenge",
+		// which in a challenge-only corpus matched 100% of items and made this
+		// slot identical to the hook bucket, so the competitive-personality /
+		// win-streak / energetic-mood patterns got no real differentiation.
+		if bd["battleBoost"] > 0 {
 			buckets[slotChallenge] = append(buckets[slotChallenge], item)
 		}
 
