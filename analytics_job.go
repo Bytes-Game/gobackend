@@ -400,14 +400,14 @@ func computeSocialDrive() (int, error) {
 			pipeSize = 0
 		}
 
-		// Persist to user_profiles so UserProfile.SocialDrive reads it directly.
-		if _, err := db.Exec(`
-			INSERT INTO user_profiles (user_id, social_drive, last_computed_at)
-			VALUES ($1, $2, NOW())
-			ON CONFLICT (user_id) DO UPDATE SET social_drive = EXCLUDED.social_drive
-		`, u, norm); err != nil {
-			log.Printf("[analytics] social_drive upsert for %s: %v", u, err)
-		}
+		// NOTE: deliberately NOT upserting user_profiles.social_drive here.
+		// computeUserProfile owns that column with a different, serve-correct
+		// definition (share of engagement on followed creators, which is what
+		// socialWeightMult and the gates actually want). This z-score of social
+		// ACTIVITY is on an incompatible scale; writing it here clobbered the
+		// fraction non-deterministically depending on which job ran last. It
+		// stays available via the social_drive:<user> Redis key above for any
+		// activity-based consumer, without fighting the profile column.
 	}
 	if pipeSize > 0 {
 		if _, err := pipe.Exec(ctx); err != nil {

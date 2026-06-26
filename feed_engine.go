@@ -2847,33 +2847,45 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// per-dimension multipliers (defaults to 1.0). This lets us ship ranker
 	// changes behind a variant without redeploying.
 	expCfg := getExperimentConfig(profile.UserID)
-	xw := func(name string) float64 {
-		if expCfg == nil {
-			return 1.0
+	// Experiment weights are full OVERRIDES of the weight constants, keyed
+	// "wSocial"/"wFreshness"/... to match experiments.go. The old xw() looked up
+	// bare "social" (never present in the config → always returned 1.0) AND
+	// multiplied it onto the constant, so the A/B test had ZERO effect on the
+	// score and would have reported a false null result. wsel returns the
+	// variant's weight when present, else the default constant — so "control"
+	// (wSocial=0.25) reproduces the default exactly.
+	wsel := func(key string, def float64) float64 {
+		if expCfg != nil {
+			if v, ok := expCfg[key]; ok {
+				return v
+			}
 		}
-		if m, ok := expCfg[name]; ok {
-			return m
-		}
-		return 1.0
+		return def
 	}
 
 	// ── BASE SCORE (cohort-weighted, experiment-scaled) ──
-	baseScore := social*wSocial*socialWeightMult*cw.Social*xw("social") +
-		freshness*wFreshness*cw.Freshness*xw("freshness") +
-		energyFit*wEnergyFit*cw.EnergyFit*xw("energyFit") +
-		relevance*wRelevance*cw.Relevance*xw("relevance") +
-		quality*wQuality*cw.Quality*xw("quality") +
-		novelty*wNovelty*cw.Novelty*xw("novelty") +
+	baseScore := social*wsel("wSocial", wSocial)*socialWeightMult*cw.Social +
+		freshness*wsel("wFreshness", wFreshness)*cw.Freshness +
+		energyFit*wsel("wEnergyFit", wEnergyFit)*cw.EnergyFit +
+		relevance*wsel("wRelevance", wRelevance)*cw.Relevance +
+		quality*wsel("wQuality", wQuality)*cw.Quality +
+		novelty*wsel("wNovelty", wNovelty)*cw.Novelty +
 		tieBoost*cw.Tie +
 		creatorAffinityBoost*cw.Affinity +
 		dwellBoost +
 		searchTerm
 
 	// ── EGO BOOST (conditional) ──
-	// After a loss, boost content that validates the user
+	// Validating content for ego-sensitive users. Gated ONLY on EgoSensitivity,
+	// not on a loss streak: the slotEgoBoost patterns are emitted for winners and
+	// the default population too, but egoBonus used to be non-zero ONLY for
+	// ego-sensitive LOSERS — so the ego_boost bucket was empty for everyone who
+	// actually requested the slot, silently falling back to hook content. The
+	// sub-signals below (high-affinity "I'm good at this" + lower-league creator
+	// "I'm better than this") apply to winners as much as losers; the feed
+	// PATTERN, not this gate, decides when to lean on ego content (e.g. post-loss).
 	egoBonus := 0.0
-	if profile.RecentLosses > profile.RecentWins && profile.EgoSensitivity > 0.5 {
-		// User is in a loss streak and ego-sensitive
+	if profile.EgoSensitivity > 0.5 {
 		// Boost: content from lower-league creators (easy comparison),
 		// content in categories they're good at
 		if affinity, ok := profile.CategoryAffinity[cs.Category]; ok && affinity > 0.7 {
