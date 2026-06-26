@@ -168,16 +168,22 @@ func energyHourMatch(profile *UserProfile, contentEnergy float64, now time.Time)
 	if diff < 0 {
 		diff = -diff
 	}
-	// Linear taper: 0 diff → +full, 0.5 diff → 0, 1.0 diff → -full*0.5
+	// Continuous, graded taper matching the documented intent:
+	//   0 diff → +full, 0.5 diff → 0, 1.0 diff → -full*0.5.
+	// (The old code had a cliff at 0.5 — value jumped from ~0 to -0.04 — and then
+	// a FLAT -0.04 across the whole upper half, so a mild mismatch and a total
+	// opposite were penalized identically.)
 	if diff <= 0.15 {
 		return hourEnergyMaxBoost
 	}
-	if diff >= 0.5 {
-		return -hourEnergyMaxBoost * 0.5
+	if diff <= 0.5 {
+		// +full → 0 across [0.15, 0.5]
+		t := (diff - 0.15) / (0.5 - 0.15)
+		return hourEnergyMaxBoost * (1.0 - t)
 	}
-	// Interpolate between 0.15 and 0.5 → +boost to 0
-	t := (diff - 0.15) / (0.5 - 0.15)
-	return hourEnergyMaxBoost * (1.0 - t)
+	// 0 → -full*0.5 across [0.5, 1.0], no cliff
+	t := (diff - 0.5) / (1.0 - 0.5)
+	return -hourEnergyMaxBoost * 0.5 * t
 }
 
 // timeContextStrategyHints returns a list of strategies that historically

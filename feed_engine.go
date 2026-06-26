@@ -1958,13 +1958,9 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 				hourCatBest[h] = cat
 				hourCatMax[h] = cnt
 			}
-			energyVal := 0.5
-			switch energy {
-			case "low":
-				energyVal = 0.2
-			case "high":
-				energyVal = 0.8
-			}
+			// Same 0.25/0.55/0.85 scale the content scorer uses (energyHourMatch
+			// compares the two), via the shared mapping.
+			energyVal := energyStringToFloat(energy)
 			hourEnergySum[h] += energyVal * float64(cnt)
 			hourEnergyCount[h] += cnt
 		}
@@ -2672,6 +2668,22 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 	return cs
 }
 
+// energyStringToFloat is the ONE canonical mapping from an energy_level label to
+// a 0..1 number. Both the per-hour energy preference (EnergyByHour) and the
+// content scorer's cs.EnergyLevel must use it so the train-time and serve-time
+// scales are identical — they previously diverged (0.2/0.5/0.8 vs 0.25/0.55/0.85
+// for the same labels), putting a permanent ~0.05 offset into energyHourMatch.
+func energyStringToFloat(energy string) float64 {
+	switch energy {
+	case "low":
+		return 0.25
+	case "high":
+		return 0.85
+	default: // "medium"/unset
+		return 0.55
+	}
+}
+
 // inferContentEnergy determines how "intense" a piece of content is.
 //
 // WHY: Matching content energy to user energy state is how Netflix decides
@@ -2900,8 +2912,11 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 			// Base battle bonus is large enough to lift a battle one or two
 			// rank steps over a comparable short. Logarithmic scaling on
 			// response count: a battle with 1 response gets +0.30; one with
-			// 5 responses gets ~+0.40; with 20+ ~+0.50 cap.
-			battleBoost = 0.30 + 0.10*math.Log1p(float64(cs.ResponseCount-1))/math.Log1p(20)
+			// 5 responses gets ~+0.41; with 20+ ~+0.50 cap. Coefficient 0.20 (not
+			// 0.10) so the log term spans the full 0.30→0.50 range over the ~21-
+			// response window; at 0.10 the boost topped out near 0.40 and the 0.50
+			// clamp was effectively dead (only reached at ~442 responses).
+			battleBoost = 0.30 + 0.20*math.Log1p(float64(cs.ResponseCount-1))/math.Log1p(20)
 			if battleBoost > 0.50 {
 				battleBoost = 0.50
 			}

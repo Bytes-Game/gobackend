@@ -136,14 +136,13 @@ func effectiveSourceWeights(cohort Cohort) map[string]float64 {
 	for src, defWeight := range defaultSourceWeights {
 		mul := 1.0
 		if rewards != nil {
-			r := rewards[src]
-			if r > 1.5 {
-				r = 1.5
-			}
-			if r < -1.5 {
-				r = -1.5
-			}
-			mul = expSafe(r) // expSafe lives in bandit.go
+			// The reward EMA averages values in {+1.0, -0.4}, so it always lives
+			// in [-0.4, 1.0]; the old ±1.5 clamp here was dead code that could
+			// never fire. exp() of that range is ~[0.67, 2.72] — a sane budget
+			// multiplier — and expSafe (bandit.go) is overflow-guarded regardless,
+			// so no clamp is needed. Documented so the floor math below can be
+			// reasoned about against the true realized range.
+			mul = expSafe(rewards[src])
 		}
 		raw := defWeight * mul
 		// NO floor here — the floor must hold on the FINAL (post-normalization)

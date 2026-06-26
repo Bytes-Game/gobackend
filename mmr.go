@@ -138,12 +138,20 @@ func applyMMRWithCreator(items []ScoredItem, lambda float64, topK int, embedOf f
 			if taken[i] {
 				continue
 			}
-			// Max similarity to anything already chosen.
-			var maxSim float64
-			for _, j := range chosen {
-				s := cosineSim(vecs[i], vecs[j])
-				if s > maxSim {
-					maxSim = s
+			// Max similarity to anything already chosen. Seed the running max at
+			// a sentinel BELOW the valid cosine range so a genuinely negative
+			// (anti-correlated → most-diverse) max is preserved instead of being
+			// clamped up to 0 — otherwise "maximally contrasting" and merely
+			// "unrelated" both score 0 and MMR under-diversifies. When nothing is
+			// chosen yet there is no similarity penalty (maxSim stays 0).
+			maxSim := 0.0
+			if len(chosen) > 0 {
+				maxSim = -1.0
+				for _, j := range chosen {
+					s := cosineSim(vecs[i], vecs[j])
+					if s > maxSim {
+						maxSim = s
+					}
 				}
 			}
 			// Per-creator soft penalty: each prior pick from this creator
