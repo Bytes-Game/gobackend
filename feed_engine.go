@@ -3248,7 +3248,7 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	impressionPenalty := 0.0
 	if byCat, ok := impressionStatsCache.Get(profile.UserID); ok {
 		if stats, exists := byCat[cs.Category]; exists && stats.Count >= minCategoryImpressions {
-			br := stats.BounceRate()
+			br := stats.ShrunkBounceRate() // small-sample shrinkage: n=5 can't "prove" a dislike
 			if br > bounceRateNegativeThreshold {
 				// Stronger penalty for higher bounce rates, capped at -0.25
 				impressionPenalty = -0.25 * ((br - bounceRateNegativeThreshold) / (1.0 - bounceRateNegativeThreshold))
@@ -3268,7 +3268,7 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	if cs.CreatorID != "" {
 		if byCr, ok := impressionCreatorStatsCache.Get(profile.UserID); ok {
 			if stats, exists := byCr[cs.CreatorID]; exists && stats.Count >= minCategoryImpressions {
-				if br := stats.BounceRate(); br > bounceRateNegativeThreshold {
+				if br := stats.ShrunkBounceRate(); br > bounceRateNegativeThreshold {
 					creatorBouncePenalty = -0.20 * ((br - bounceRateNegativeThreshold) / (1.0 - bounceRateNegativeThreshold))
 				}
 			}

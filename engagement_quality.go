@@ -37,6 +37,10 @@ const (
 	engQualityTTL      = 10 * time.Minute
 	engQualityMin      = 0.20
 	engQualityMax      = 2.00
+	// Score of a median/established profile that should map to the neutral 1.0
+	// multiplier (matching the cold/DB-error fallback). The score→multiplier map
+	// is anchored here so a typical user isn't systematically deflated below 1.0.
+	engQualityBaseline = 0.45
 )
 
 // userEngagementQuality returns a multiplier in [engQualityMin, engQualityMax]
@@ -95,13 +99,16 @@ func computeEngagementQuality(userID string) float64 {
 		ageTrust = 1
 	}
 
-	// Component 2: completion-vs-skip ratio. Cap totalEvents to 1 to avoid
-	// divide-by-zero; default neutral when there's no signal.
+	// Component 2: completion-vs-skip ratio, SHRUNK toward the 0.5 prior with
+	// pseudo-counts. The old hard `>5` cutover jumped straight from neutral 0.5
+	// to a fully-trusted raw ratio (6 completes / 0 skips → 1.0) — the classic
+	// small-sample hole a spam farm exploits to inflate a fresh account's weight
+	// toward the 2.0 cap. With a Beta(0.5·K, 0.5·K) prior the estimate only
+	// approaches its raw value as real evidence accumulates; no cliff.
 	signalEvents := completes + skips
-	completionRatio := 0.5 // neutral when no signal
-	if signalEvents > 5 {
-		completionRatio = float64(completes) / float64(signalEvents)
-	}
+	const completionPriorK = 10.0 // pseudo-observations anchored at the 0.5 prior
+	completionRatio := (float64(completes) + 0.5*completionPriorK) /
+		(float64(signalEvents) + completionPriorK)
 
 	// Component 3: session richness. log-curve, saturates at 30 sessions.
 	sessionRichness := math.Log1p(float64(sessions)) / math.Log1p(30)
@@ -122,8 +129,19 @@ func computeEngagementQuality(userID string) float64 {
 	//   flagPenalty subtracted at the end so a flagged-but-active user can
 	//   still score above the floor
 	score := 0.25*ageTrust + 0.45*completionRatio + 0.30*sessionRichness
-	// Map score (~0..1) to multiplier (engQualityMin..engQualityMax).
-	multiplier := engQualityMin + (engQualityMax-engQualityMin)*score
+	// Map score → multiplier with the neutral 1.0 ANCHORED at a median profile
+	// (score == engQualityBaseline), so "centered on 1.0" actually holds and
+	// matches the cold/DB-error fallback. The old linear map (0.2 + 1.8·score)
+	// put a typical user well below 1.0 (~0.6), systematically deflating every
+	// trending weight — which were calibrated assuming a ~1.0 average multiplier.
+	var multiplier float64
+	if score < engQualityBaseline {
+		// below median → [engQualityMin, 1.0]
+		multiplier = engQualityMin + (1.0-engQualityMin)*(score/engQualityBaseline)
+	} else {
+		// at/above median → [1.0, engQualityMax]
+		multiplier = 1.0 + (engQualityMax-1.0)*((score-engQualityBaseline)/(1.0-engQualityBaseline))
+	}
 	multiplier -= flagPenalty
 	return clampEngQuality(multiplier)
 }

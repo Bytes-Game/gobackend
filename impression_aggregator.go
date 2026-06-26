@@ -50,6 +50,9 @@ const (
 	affinityDecayPerCycle    = 0.02 // Slow drift down for ignored categories
 	affinityBoostPerCycle    = 0.03 // Boost for categories user pauses on
 	minCategoryImpressions   = 5    // Need at least 5 impressions to draw conclusions
+	// Pseudo-observations for the Beta(K/2,K/2) prior used by ShrunkBounceRate.
+	// Keeps a rate from 5 raw impressions from reading as a confident dislike.
+	bounceShrinkPriorK = 10.0
 )
 
 // recordImpression stores a single impression in Redis.
@@ -136,6 +139,15 @@ func (s ImpressionStats) BounceRate() float64 {
 		return 0
 	}
 	return float64(s.BounceCount) / float64(s.Count)
+}
+
+// ShrunkBounceRate returns the bounce fraction shrunk toward a neutral 0.5
+// prior with bounceShrinkPriorK pseudo-observations, so a rate computed from
+// only a handful of impressions (e.g. 4 fast scrolls out of 5 in one
+// distracted session) doesn't read as a proven category/creator dislike. The
+// estimate only approaches the raw BounceRate() as real evidence accumulates.
+func (s ImpressionStats) ShrunkBounceRate() float64 {
+	return (float64(s.BounceCount) + 0.5*bounceShrinkPriorK) / (float64(s.Count) + bounceShrinkPriorK)
 }
 
 // AvgDwellMs returns mean dwell time.
