@@ -3807,6 +3807,26 @@ func getFeedPattern(profile *UserProfile, session *SessionState, pageSize int) [
 		case strategyMoodMatch:
 			// Pattern driven entirely by detected mood.
 			basePattern = moodDrivenPattern(session.DetectedMood)
+		default:
+			// Strategy didn't resolve to a resisting rhythm (strategyStandard/
+			// Emergency/""). Because this outer RL>=2 case already matched, the
+			// fatigue branches below won't be reached — so honor dopamine state
+			// here, or a fatigued+resisting user gets the default HIGH-energy
+			// pattern, the opposite of what their state calls for.
+			if session.DopamineBudget < 0.2 {
+				basePattern = []string{
+					slotHook, slotCooldown, slotSocial, slotCooldown,
+					slotCliffhang, slotCooldown, slotHook, slotCooldown,
+					slotSurprise, slotCooldown, slotEgoBoost, slotCooldown,
+				}
+			} else if session.DopamineBudget < 0.5 {
+				basePattern = []string{
+					slotHook, slotSocial, slotCooldown, slotCliffhang,
+					slotHook, slotDiscovery, slotCooldown, slotSurprise,
+					slotEgoBoost, slotSocial, slotCooldown, slotHook,
+				}
+			}
+			// else: keep the default energetic pattern set before the switch.
 		}
 
 	case session.DopamineBudget < 0.2:

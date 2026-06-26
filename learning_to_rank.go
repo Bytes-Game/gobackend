@@ -326,17 +326,13 @@ func ltrObserveEventWithLatency(userID, contentType, contentID string, label, wa
 			weight *= skipLatencyWeight(latencyMs)
 		}
 	}
-	ltrObserveWeighted(Cohort(payload.C), payload.B, label, weight)
-	// Train the watch-ratio head on the same breakdown when we have a ratio.
-	if watchRatio >= 0 {
-		wrObserve(Cohort(payload.C), payload.B, watchRatio)
-	}
-	// Per-creator residual calibration: compare the predicted Platt-
-	// calibrated probability against the actual binary outcome and EMA
-	// the running residual per creator. Self-correcting reach bias.
+	// Capture the predicted probability from the PRE-update weights for the
+	// per-creator residual calibration below. Computing it AFTER ltrObserveWeighted
+	// (as the old code did) reads weights already nudged toward THIS sample's
+	// label, biasing predicted toward actual and systematically shrinking the
+	// measured residual — label leakage that weakened the self-correction.
+	var predictedPre float64
 	if payload.CR != "" {
-		// Recompute predicted from the breakdown — same logit pipeline as
-		// ltrScoreDelta but we want the probability, not the bounded delta.
 		var z float64
 		ltr.mu.RLock()
 		if m, ok := ltr.byCoh[Cohort(payload.C)]; ok && m != nil {
@@ -348,8 +344,18 @@ func ltrObserveEventWithLatency(userID, contentType, contentID string, label, wa
 			}
 		}
 		ltr.mu.RUnlock()
-		predicted := plattCalibrate(z)
-		observeCreatorResidual(payload.CR, predicted, label)
+		predictedPre = plattCalibrate(z)
+	}
+	ltrObserveWeighted(Cohort(payload.C), payload.B, label, weight)
+	// Train the watch-ratio head on the same breakdown when we have a ratio.
+	if watchRatio >= 0 {
+		wrObserve(Cohort(payload.C), payload.B, watchRatio)
+	}
+	// Per-creator residual calibration: compare the PRE-update predicted Platt-
+	// calibrated probability against the actual binary outcome and EMA the
+	// running residual per creator. Self-correcting reach bias.
+	if payload.CR != "" {
+		observeCreatorResidual(payload.CR, predictedPre, label)
 	}
 	// Per-cohort source-blending reward: credit (or debit) the source that
 	// produced this item based on the binary outcome.

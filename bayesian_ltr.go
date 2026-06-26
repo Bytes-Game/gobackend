@@ -173,7 +173,13 @@ func bayesianUncertaintyBonus(cohort Cohort, centeredScore float64, rnd *rand.Ra
 	} else {
 		draw = rand.NormFloat64()
 	}
-	noise := draw * se * bayesianExplorationK * itemUncertainty
+	// Consume the tracked residual Mean (E[predicted-actual]) as a bias
+	// correction: if this cohort's predictions run systematically high (Mean>0),
+	// nudge the draw's center DOWN by -Mean (scaled to the bonus range) so the
+	// module uses the full (mean, variance) posterior it maintains, not just the
+	// variance. Was tracked via Welford and persisted but never read.
+	center := -s.Mean * bayesianMaxBonus
+	noise := center + draw*se*bayesianExplorationK*itemUncertainty
 	if noise > bayesianMaxBonus {
 		noise = bayesianMaxBonus
 	}

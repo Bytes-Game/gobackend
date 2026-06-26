@@ -52,6 +52,10 @@ type wrModel struct {
 	Weights map[string]float64 `json:"weights"`
 	Bias    float64            `json:"bias"`
 	Samples int                `json:"samples"`
+	// EMA of observed watch ratio — the actual per-cohort population mean. Used
+	// as the bonus center so a typical item nets ~0 instead of a persistent
+	// negative bonus (short-form watch ratios sit well below 0.5).
+	MeanRatio float64 `json:"meanRatio"`
 }
 
 type wrStore struct {
@@ -94,9 +98,11 @@ func wrEnsureLoaded() {
 // ratio for this candidate. Read-path; must be fast.
 //
 // Mapping: predicted_ratio ∈ [0, 1] → bonus ∈ [-wrMaxBonus, +wrMaxBonus].
-// We center on 0.5 (the population mean of "kinda watched") so a prediction
-// of 0.5 contributes zero — only items expected to do meaningfully better
-// or worse than average move the score.
+// We center on the cohort's ACTUAL mean watch ratio (MeanRatio) so an average
+// item contributes ~0 and only items expected to do meaningfully better or worse
+// than this cohort's norm move the score. Centering on a hard 0.5 (the old code)
+// gave every typical short-form item a persistent NEGATIVE bonus, because the
+// model's mean output equals the true population mean, which is well below 0.5.
 func wrPredictBonus(cohort Cohort, breakdown map[string]float64) float64 {
 	wrEnsureLoaded()
 	watchRatio.mu.RLock()
@@ -111,9 +117,17 @@ func wrPredictBonus(cohort Cohort, breakdown map[string]float64) float64 {
 			z += m.Weights[k] * v
 		}
 	}
-	// Clamp predicted ratio to [0, 1] via sigmoid then center.
 	pred := 1.0 / (1.0 + math.Exp(-z))
-	delta := (pred - 0.5) * 2.0 // ∈ [-1, 1]
+	center := m.MeanRatio
+	if center < 0.05 || center > 0.95 {
+		center = 0.5 // not yet populated (e.g. a pre-migration model) → neutral
+	}
+	delta := (pred - center) * 2.0
+	if delta > 1 {
+		delta = 1
+	} else if delta < -1 {
+		delta = -1
+	}
 	return wrMaxBonus * delta
 }
 
@@ -157,6 +171,15 @@ func wrObserve(cohort Cohort, breakdown map[string]float64, watchRatio01 float64
 		}
 	}
 	m.Bias -= lr * err
+	// EMA the observed watch ratio so wrPredictBonus can center on the cohort's
+	// real mean. Seed from the first sample so it converges fast and never sits
+	// at the misleading 0 zero-value.
+	if m.Samples == 0 {
+		m.MeanRatio = watchRatio01
+	} else {
+		const wrMeanRatioEMA = 0.02
+		m.MeanRatio = m.MeanRatio*(1-wrMeanRatioEMA) + watchRatio01*wrMeanRatioEMA
+	}
 	m.Samples++
 	watchRatio.dirty[cohort] = true
 
@@ -212,9 +235,10 @@ func wrFlush() {
 	for c := range watchRatio.dirty {
 		if m, ok := watchRatio.byCoh[c]; ok && m != nil {
 			cp := wrModel{
-				Weights: make(map[string]float64, len(m.Weights)),
-				Bias:    m.Bias,
-				Samples: m.Samples,
+				Weights:   make(map[string]float64, len(m.Weights)),
+				Bias:      m.Bias,
+				Samples:   m.Samples,
+				MeanRatio: m.MeanRatio,
 			}
 			for k, v := range m.Weights {
 				cp.Weights[k] = v
