@@ -2993,6 +2993,12 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// profile.SocialDrive is already the fresh value; if the analytics job
 	// hasn't produced one yet, fall back to the precomputed cache (seeded
 	// from realtime events) before defaulting to the neutral midpoint.
+	//
+	// `sd == 0` is now a RELIABLE "unset" sentinel: computeUserProfile builds
+	// SocialDrive via smoothedRate toward a 0.5 prior, which always returns a
+	// value strictly > 0 (≥ ~0.04 even for a genuine zero-follow user). So a real
+	// low-drive user is no longer rewritten to the fallback — only a truly
+	// uncomputed field (zero value) is, which is exactly the intended behavior.
 	sd := profile.SocialDrive
 	if sd == 0 {
 		sd = getSocialDriveFallback(profile.UserID)
