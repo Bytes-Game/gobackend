@@ -65,7 +65,11 @@ func detectLoop(session *SessionState) LoopDiagnosis {
 	}
 
 	// Signal 4: Dopamine collapse — user is fatigued, feed is failing them.
-	if session.DopamineBudget > 0 && session.DopamineBudget < 0.15 {
+	// No `> 0` lower guard: the budget is clamped to a floor of 0 at every drain
+	// site and initialized to 1.0, so 0.0 means MAXIMALLY fatigued, not
+	// "uninitialized" — excluding it denied the remedy to exactly the users (rock
+	// bottom) it exists for.
+	if session.DopamineBudget < 0.15 {
 		return LoopDiagnosis{
 			Stuck:          true,
 			Reason:         "dopamine_collapse",

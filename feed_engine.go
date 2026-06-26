@@ -3464,35 +3464,41 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		}
 	}
 
+	// ── SESSION CONTINUITY FACTOR (Tier 1.5) ──
+	// Short gap since last session → dampen the "fresh-start" boosts (unseen,
+	// cold content, novelty) so we don't shake up a still-warm feed.
+	//
+	// Applied BEFORE the negative-signal multiplier below: this subtraction must
+	// not run AFTER a hard block forces the score to 0, or it would drive a
+	// blocked item negative and break the "blocked = exactly 0" flat-floor
+	// invariant (making blocked items rank by their explore terms — meaningless
+	// ordering that can interleave with legitimately low-scored visible content).
+	if ns != nil {
+		contFactor := sessionContinuityFactor(ns) // 0.2 .. 1.0
+		// Keep at least 20% of the exploration bonuses so curiosity isn't killed.
+		damp := 0.4 + 0.6*contFactor // 0.52 .. 1.0
+		exploreTerms := unseenBonus + coldContentBonus + novelty*wNovelty*cw.Novelty
+		finalScore -= (1.0 - damp) * exploreTerms
+		breakdown["continuityFactor"] = contFactor
+	}
+
 	// ── NEGATIVE-SIGNAL MULTIPLIERS (Tier 1.2) ──
 	// Creator block/unfollow penalty multiplies the whole score (blocked = 0).
 	// Recent-bounce on this exact content zeros it out so we never re-serve
 	// a just-bounced item.
 	negMult := negativeCreatorPenalty(ns, cs.CreatorID) * bouncePenalty(ns, cs.ContentType, cs.ContentID)
 	breakdown["negativeMult"] = negMult
-	// Clamp to non-negative BEFORE the multiplicative attenuator. The additive
-	// sum above can go negative (stacked fatigue/sequence/bounce penalties), and
-	// multiplying a NEGATIVE score by negMult<1 makes it LESS negative — i.e. the
-	// negative signal would BOOST a blocked/unfollowed creator's bad item above an
-	// identically-bad non-penalized one. A penalty multiplier must only ever
-	// attenuate a magnitude toward 0.
+	// Clamp to non-negative BEFORE the multiplicative attenuator — and this is the
+	// LAST flooring op, so it also absorbs a continuity subtraction that dipped
+	// below 0. The additive sum can go negative (stacked fatigue/sequence/bounce
+	// penalties); multiplying a NEGATIVE score by negMult<1 makes it LESS negative
+	// — the negative signal would BOOST a blocked/unfollowed creator's bad item
+	// above an identically-bad non-penalized one. A penalty multiplier must only
+	// ever attenuate a magnitude toward 0.
 	if finalScore < 0 {
 		finalScore = 0
 	}
 	finalScore *= negMult
-
-	// ── SESSION CONTINUITY FACTOR (Tier 1.5) ──
-	// Short gap since last session → dampen the "fresh-start" boosts (unseen,
-	// cold content, novelty) so we don't shake up a still-warm feed.
-	if ns != nil {
-		contFactor := sessionContinuityFactor(ns) // 0.2 .. 1.0
-		// Re-apply a gentle dampener to exploration-y bonuses; keep at least
-		// 20% of their effect so curiosity isn't killed entirely.
-		damp := 0.4 + 0.6*contFactor // 0.52 .. 1.0
-		exploreTerms := unseenBonus + coldContentBonus + novelty*wNovelty*cw.Novelty
-		finalScore -= (1.0 - damp) * exploreTerms
-		breakdown["continuityFactor"] = contFactor
-	}
 
 	breakdown["baseScore"] = baseScore
 	breakdown["finalScore"] = finalScore
