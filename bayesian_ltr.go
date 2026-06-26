@@ -137,7 +137,10 @@ func bayesianRecord(cohort Cohort, predicted, actual float64) {
 // exploitation where it's confident.
 //
 // rnd allows tests to seed determinism. Returns 0 until warmup.
-func bayesianUncertaintyBonus(cohort Cohort, baseScore float64, rnd *rand.Rand) float64 {
+//
+// centeredScore must be a LOGIT-centered quantity (e.g. the LTR raw logit), NOT
+// the strictly-positive finalScore — the per-item modulation below peaks at 0.
+func bayesianUncertaintyBonus(cohort Cohort, centeredScore float64, rnd *rand.Rand) float64 {
 	bayesianEnsureLoaded()
 	bayesianLTR.mu.RLock()
 	s, ok := bayesianLTR.byCoh[cohort]
@@ -157,9 +160,9 @@ func bayesianUncertaintyBonus(cohort Cohort, baseScore float64, rnd *rand.Rand) 
 	se := std / math.Sqrt(float64(s.N))
 	// Per-item modulation: exploration is most valuable where the ranker is
 	// least sure (mid scores) and near-useless where it's already confident
-	// (extreme scores). p = σ(baseScore); 4·p·(1-p) peaks at 1 (p=0.5) and → 0
-	// at the tails. (baseScore was previously ignored entirely.)
-	p := 1.0 / (1.0 + math.Exp(-baseScore))
+	// (extreme scores). p = σ(centeredScore); 4·p·(1-p) peaks at 1 (p=0.5) and
+	// → 0 at the tails.
+	p := 1.0 / (1.0 + math.Exp(-centeredScore))
 	itemUncertainty := 4.0 * p * (1.0 - p)
 	// Draw N(0,1) from the caller's RNG when provided; otherwise use the
 	// package-global (concurrency-safe, and no per-candidate reseed — the old

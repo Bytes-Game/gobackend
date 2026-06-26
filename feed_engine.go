@@ -2471,8 +2471,14 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 	}
 	cs.TrendingScore = math.Max(velocity, rate)
 
-	// Energy level inference
+	// Energy level inference (rewatch/share/completion-modulated; the engagement
+	// stats it reads are already populated above). Captured here so it can serve
+	// as the fallback when a creator hasn't declared an energy_level
+	// ('medium'/unset) — otherwise this computed signal was always discarded by
+	// the flat 0.55 default in the branches below, leaving energyFit nearly
+	// constant. An explicit 'low'/'high' declaration is still trusted as-is.
 	cs.EnergyLevel = inferContentEnergy(contentType, cs)
+	inferredEnergy := cs.EnergyLevel
 
 	// Category, creator info, and created_at — single query per content type
 	if contentType == "challenge" {
@@ -2556,7 +2562,9 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		case "high":
 			cs.EnergyLevel = 0.85
 		default:
-			cs.EnergyLevel = 0.55
+			// 'medium'/unset = creator didn't really declare → use the inferred
+			// (engagement-modulated) energy instead of a flat constant.
+			cs.EnergyLevel = inferredEnergy
 		}
 		var emotions []string
 		json.Unmarshal(emotionJSON, &emotions)
@@ -2604,7 +2612,9 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		case "high":
 			cs.EnergyLevel = 0.85
 		default:
-			cs.EnergyLevel = 0.55
+			// 'medium'/unset = creator didn't really declare → use the inferred
+			// (engagement-modulated) energy instead of a flat constant.
+			cs.EnergyLevel = inferredEnergy
 		}
 		var emotions []string
 		json.Unmarshal(emotionJSON, &emotions)
@@ -2754,6 +2764,10 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	currentEnergy = math.Max(0, math.Min(1.0, currentEnergy))
 	energyFit := 1.0 - math.Abs(currentEnergy-cs.EnergyLevel)
 	breakdown["energyFit"] = energyFit
+	// Surface the absolute content energy (0=chill .. 1=intense) so slot buckets
+	// can select on actual calmness. energyFit is a MATCH metric and is high for
+	// a perfect match at ANY energy, so it can't stand in for "low energy".
+	breakdown["energyLevel"] = cs.EnergyLevel
 
 	// ── RELEVANCE ──
 	// Category match from user profile affinity
@@ -3415,7 +3429,19 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// Thompson-sample noise scaled by the current cohort's predictive
 	// stddev. Uncertain items get a noisy boost (we want to learn);
 	// confident items move less. Native exploration without bandit overhead.
-	uncBonus := bayesianUncertaintyBonus(cohort, finalScore, nil)
+	//
+	// The per-item modulation 4·σ(x)·(1-σ(x)) peaks at x=0, so x must be a
+	// LOGIT-centered quantity. Pass the LTR raw logit z (centered), NOT finalScore
+	// — finalScore is a strictly-positive additive sum sitting on the sigmoid's
+	// right shoulder, which made the exploration bell peak at the LOWEST-scoring
+	// items instead of the genuinely mid-confidence ones. Fallback when the LTR
+	// head isn't warm: center finalScore by its rough median so the bell at least
+	// sits in the populated score region rather than at 0.
+	uncArg, okLogit := ltrRawLogit(cohort, breakdown)
+	if !okLogit {
+		uncArg = finalScore - 1.2 // rough median of the ~[0,3] finalScore range
+	}
+	uncBonus := bayesianUncertaintyBonus(cohort, uncArg, nil)
 	if uncBonus != 0 {
 		breakdown["uncertaintyBonus"] = uncBonus
 		finalScore += uncBonus
@@ -3808,9 +3834,13 @@ func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]
 
 		// Cooldown: gentle, relaxing items. The feed is challenge-only now, so
 		// the old `Type == "post"` gate left this bucket permanently empty (and
-		// with it the calming mood patterns). Select on a strong energy-fit OR
-		// an explicitly calming emotion tag so challenges can fill it.
-		if bd["energyFit"] > 0.7 || hasEmotionTag(item, "chill") ||
+		// with it the calming mood patterns). Select on ABSOLUTE low content
+		// energy OR an explicitly calming emotion tag so challenges can fill it.
+		// (Was bd["energyFit"] > 0.7 — but energyFit is a match-to-user metric
+		// that's high for a perfect match at ANY energy, so it would flood the
+		// "palette cleanser" slot with the most intense content for a high-energy
+		// user — the exact opposite of the slot's purpose.)
+		if bd["energyLevel"] < 0.4 || hasEmotionTag(item, "chill") ||
 			hasEmotionTag(item, "satisfying") || hasEmotionTag(item, "wholesome") {
 			buckets[slotCooldown] = append(buckets[slotCooldown], item)
 		}
