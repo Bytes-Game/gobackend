@@ -1995,55 +1995,69 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	p.CategoryByEgo["winning"] = make(map[string]float64)
 	p.CategoryByEgo["losing"] = make(map[string]float64)
 
-	// Find events within 1 hour after wins
-	winCatRows, err := db.Query(`
-		SELECT COALESCE(c2.category, p2.category, '') as cat, COUNT(*) as cnt
-		FROM challenge_votes cv
-		JOIN challenge_responses cr ON cv.response_id = cr.id
-		JOIN feed_events fe ON fe.user_id = $1
-			AND fe.created_at BETWEEN cv.created_at AND cv.created_at + INTERVAL '1 hour'
-			AND fe.event_type IN ('like','share','save','rewatch')
-		LEFT JOIN challenges c2 ON fe.content_type = 'challenge' AND fe.content_id = CAST(c2.id AS TEXT)
-		LEFT JOIN posts p2 ON fe.content_type = 'post' AND fe.content_id = CAST(p2.id AS TEXT)
-		WHERE cr.responder_id = CAST($1 AS INT)
-		AND cv.created_at > NOW() - INTERVAL '30 days'
-		GROUP BY cat
-		ORDER BY cnt DESC LIMIT 5`, userID)
+	// Ego-state category preferences: which categories the user engages with in
+	// the hour after WINNING vs LOSING a battle. Both buckets come from ONE
+	// symmetric query so they share a scale and a single definition of win/loss:
+	//   win  = the user's response tied/led on votes in its challenge (top, >0)
+	//   loss = the user's response had fewer votes than the challenge's top
+	// — the SAME vote-share definition as RecentWins/RecentLosses above. The old
+	// 'losing' query used an abandoned "loss = zero votes" definition, so its
+	// bucket was populated for a different (much narrower) population than the
+	// RecentLosses signal that actually gates whether this map is consulted.
+	// feed_events are de-duplicated (DISTINCT fe.id): the old 'winning' query
+	// JOINed challenge_votes and so counted each post-win engagement ONCE PER
+	// VOTE the response received, inflating high-vote-win categories ~Nx.
+	egoCatRows, err := db.Query(`
+		WITH my AS (
+			SELECT cr.id AS response_id, cr.challenge_id, cr.created_at
+			FROM challenge_responses cr
+			WHERE cr.responder_id = CAST($1 AS INT)
+			  AND cr.created_at > NOW() - INTERVAL '30 days'
+		),
+		vc AS (
+			SELECT cr.challenge_id, cr.id AS response_id, COUNT(cv.id) AS votes
+			FROM challenge_responses cr
+			LEFT JOIN challenge_votes cv ON cv.response_id = cr.id
+			WHERE cr.challenge_id IN (SELECT challenge_id FROM my)
+			GROUP BY cr.challenge_id, cr.id
+		),
+		ranked AS (
+			SELECT response_id, votes,
+			       MAX(votes) OVER (PARTITION BY challenge_id) AS top
+			FROM vc
+		),
+		outcomes AS (
+			SELECT my.response_id, my.created_at,
+			       CASE WHEN r.votes = r.top AND r.top > 0 THEN 'winning'
+			            WHEN r.votes < r.top THEN 'losing'
+			            ELSE NULL END AS ego_state
+			FROM my JOIN ranked r ON r.response_id = my.response_id
+		),
+		engaged AS (
+			SELECT DISTINCT o.ego_state, fe.id AS event_id,
+			       COALESCE(c2.category, p2.category, '') AS cat
+			FROM outcomes o
+			JOIN feed_events fe ON fe.user_id = $1
+				AND fe.created_at BETWEEN o.created_at AND o.created_at + INTERVAL '1 hour'
+				AND fe.event_type IN ('like','share','save','rewatch')
+			LEFT JOIN challenges c2 ON fe.content_type = 'challenge' AND fe.content_id = CAST(c2.id AS TEXT)
+			LEFT JOIN posts p2 ON fe.content_type = 'post' AND fe.content_id = CAST(p2.id AS TEXT)
+			WHERE o.ego_state IS NOT NULL
+		)
+		SELECT ego_state, cat, COUNT(*) AS cnt
+		FROM engaged
+		WHERE cat <> ''
+		GROUP BY ego_state, cat
+		ORDER BY cnt DESC`, userID)
 	if err == nil {
-		defer winCatRows.Close()
-		for winCatRows.Next() {
-			var cat string
+		defer egoCatRows.Close()
+		for egoCatRows.Next() {
+			var egoState, cat string
 			var cnt int
-			winCatRows.Scan(&cat, &cnt)
-			if cat != "" {
-				p.CategoryByEgo["winning"][cat] = float64(cnt)
-			}
-		}
-	}
-
-	// Find events within 1 hour after losses (responded but no votes)
-	lossCatRows, err := db.Query(`
-		SELECT COALESCE(c2.category, p2.category, '') as cat, COUNT(*) as cnt
-		FROM challenge_responses cr
-		LEFT JOIN challenge_votes cv ON cv.response_id = cr.id
-		JOIN feed_events fe ON fe.user_id = $1
-			AND fe.created_at BETWEEN cr.created_at AND cr.created_at + INTERVAL '1 hour'
-			AND fe.event_type IN ('like','share','save','rewatch')
-		LEFT JOIN challenges c2 ON fe.content_type = 'challenge' AND fe.content_id = CAST(c2.id AS TEXT)
-		LEFT JOIN posts p2 ON fe.content_type = 'post' AND fe.content_id = CAST(p2.id AS TEXT)
-		WHERE cr.responder_id = CAST($1 AS INT)
-		AND cv.id IS NULL
-		AND cr.created_at > NOW() - INTERVAL '30 days'
-		GROUP BY cat
-		ORDER BY cnt DESC LIMIT 5`, userID)
-	if err == nil {
-		defer lossCatRows.Close()
-		for lossCatRows.Next() {
-			var cat string
-			var cnt int
-			lossCatRows.Scan(&cat, &cnt)
-			if cat != "" {
-				p.CategoryByEgo["losing"][cat] = float64(cnt)
+			if egoCatRows.Scan(&egoState, &cat, &cnt) == nil && cat != "" {
+				if _, ok := p.CategoryByEgo[egoState]; ok {
+					p.CategoryByEgo[egoState][cat] = float64(cnt)
+				}
 			}
 		}
 	}
@@ -3052,36 +3066,29 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	breakdown["emotionBonus"] = emotionBonus
 
 	// ── CONTEXT-AWARE: EGO STATE CATEGORY PREFERENCE ──
-	// After wins/losses, boost categories the user gravitates toward in that state
+	// After wins/losses, boost categories the user gravitates toward in that state.
+	// Bonus = (category share) × (confidence) × 0.08, where confidence shrinks the
+	// boost toward 0 when the ego bucket has few total observations: a single
+	// post-win engagement (1-of-1 → share 1.0) must NOT read as a confident
+	// preference and earn the full boost off one event.
 	egoContextBonus := 0.0
+	var egoCats map[string]float64
 	if profile.RecentWins > profile.RecentLosses {
-		if winCats, ok := profile.CategoryByEgo["winning"]; ok {
-			if score, ok := winCats[cs.Category]; ok {
-				// Normalize: divide by max to get 0-1
-				maxScore := 0.0
-				for _, s := range winCats {
-					if s > maxScore {
-						maxScore = s
-					}
-				}
-				if maxScore > 0 {
-					egoContextBonus = (score / maxScore) * 0.08
-				}
+		egoCats = profile.CategoryByEgo["winning"]
+	} else if profile.RecentLosses > profile.RecentWins {
+		egoCats = profile.CategoryByEgo["losing"]
+	}
+	if score, ok := egoCats[cs.Category]; ok {
+		maxScore, totalObs := 0.0, 0.0
+		for _, s := range egoCats {
+			totalObs += s
+			if s > maxScore {
+				maxScore = s
 			}
 		}
-	} else if profile.RecentLosses > profile.RecentWins {
-		if lossCats, ok := profile.CategoryByEgo["losing"]; ok {
-			if score, ok := lossCats[cs.Category]; ok {
-				maxScore := 0.0
-				for _, s := range lossCats {
-					if s > maxScore {
-						maxScore = s
-					}
-				}
-				if maxScore > 0 {
-					egoContextBonus = (score / maxScore) * 0.08
-				}
-			}
+		if maxScore > 0 {
+			confidence := totalObs / (totalObs + 5.0) // shrink small samples toward 0
+			egoContextBonus = (score / maxScore) * confidence * 0.08
 		}
 	}
 	breakdown["egoContextBonus"] = egoContextBonus
