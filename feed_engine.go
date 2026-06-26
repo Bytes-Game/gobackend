@@ -1773,21 +1773,27 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 				SELECT 1 FROM challenges c WHERE CAST(c.id AS TEXT) = fe.content_id AND c.creator_id = f.following_id
 			))
 		)`, userID).Scan(&followedEngagement)
-	if totalEngagement > 0 {
-		p.SocialDrive = math.Min(1.0, float64(followedEngagement)/float64(totalEngagement))
-	}
+	// Shrink toward the 0.5 neutral prior so a single engagement on a followed
+	// creator (1-of-1) doesn't read as SocialDrive=1.0 and trip the >0.6 serve
+	// gate on no evidence. smoothedRate handles totalEngagement==0 → 0.5.
+	p.SocialDrive = smoothedRate(float64(followedEngagement), float64(totalEngagement), 0.5, 8)
 
 	// === Novelty Tolerance ===
-	// How many unique categories does the user engage with?
-	var uniqueCategories int
+	// How many unique categories does the user engage with, relative to how many
+	// items they've engaged with at all?
+	var uniqueCategories, totalNoveltyItems int
 	db.QueryRow(`
-		SELECT COUNT(DISTINCT COALESCE(c.category, p.category, 'other'))
+		SELECT COUNT(DISTINCT COALESCE(c.category, p.category, 'other')), COUNT(*)
 		FROM feed_events fe
 		LEFT JOIN challenges c ON fe.content_type = 'challenge' AND fe.content_id = CAST(c.id AS TEXT)
 		LEFT JOIN posts p ON fe.content_type = 'post' AND fe.content_id = CAST(p.id AS TEXT)
-		WHERE fe.user_id = $1 AND fe.event_type IN ('like','comment','share','save','view')`, userID).Scan(&uniqueCategories)
-	// Normalize: 1-3 categories = low novelty, 8+ = high
-	p.NoveltyTolerance = math.Min(1.0, float64(uniqueCategories)/8.0)
+		WHERE fe.user_id = $1 AND fe.event_type IN ('like','comment','share','save','view')`, userID).Scan(&uniqueCategories, &totalNoveltyItems)
+	// Normalize: 1-3 categories = low novelty, 8+ = high. Then shrink toward the
+	// 0.5 neutral prior by the number of engaged items — a user with only a
+	// couple of events can't have sampled many categories, so the raw ratio must
+	// not brand them low- (or high-) novelty until evidence accumulates.
+	rawNovelty := math.Min(1.0, float64(uniqueCategories)/8.0)
+	p.NoveltyTolerance = (rawNovelty*float64(totalNoveltyItems) + 0.5*8.0) / (float64(totalNoveltyItems) + 8.0)
 
 	// === Energy Preference ===
 	// Average ENERGY of the content the user actually completes (>70% watched),
@@ -3408,6 +3414,37 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		breakoutBonus = math.Min(0.25, wilsonLowerBound(posEng, float64(cs.ViewCount))*0.6)
 	}
 	breakdown["breakoutBonus"] = breakoutBonus
+
+	// ── BEHAVIORAL-BONUS GROUP CAP ──
+	// The per-cohort weighting (weightsFor / cohortWeightTable) governs the six
+	// baseScore terms, but the additive in-session REACTION bonuses below are
+	// un-cohort-weighted; when several fire at once their sum can dwarf the
+	// weighted base, leaving cohort personalization in charge of only a minority
+	// of the score. Group-cap their COMBINED contribution (same philosophy as the
+	// jackpot cap above), preserving relative shape rather than re-tuning each.
+	// DISCOVERY bonuses (unseen/cold/trending/breakout) are deliberately EXCLUDED
+	// so genuinely new content keeps its full push. Generous cap: most of these
+	// are 0 on a normal item, so only pathological stacks are clipped.
+	const maxBehavioralBonus = 0.70
+	behavioral := egoBonus + hourBonus + emotionBonus + egoContextBonus + wellbeingBonus +
+		collabBonus + scrollBackBonus + completeBonus + loopBonus + unmuteBonus +
+		profileVisitBonus + battleBoost
+	if behavioral > maxBehavioralBonus {
+		scale := maxBehavioralBonus / behavioral
+		egoBonus *= scale
+		hourBonus *= scale
+		emotionBonus *= scale
+		egoContextBonus *= scale
+		wellbeingBonus *= scale
+		collabBonus *= scale
+		scrollBackBonus *= scale
+		completeBonus *= scale
+		loopBonus *= scale
+		unmuteBonus *= scale
+		profileVisitBonus *= scale
+		battleBoost *= scale
+		breakdown["behavioralCapScale"] = scale
+	}
 
 	// ── FINAL SCORE ──
 	finalScore := baseScore + egoBonus + fatiguePenalty + creatorFatigue + sequencePenalty + dopaminePenalty +
