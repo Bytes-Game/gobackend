@@ -1049,7 +1049,10 @@ func updateSessionFromEvent(event FeedEvent) {
 		// Rewinding to rewatch a moment = strong interest
 		state.DopamineBudget = math.Min(1.0, state.DopamineBudget+0.03)
 	case "report", "block":
-		// Strong negative — treat as multiple skips
+		// Strong negative — treat as multiple skips. Bump ItemsSeen by the same
+		// amount so skipRate (SkipCount/ItemsSeen) can't exceed 1.0 and falsely
+		// force L3 resistance / a 'frustrated' mood off a single report.
+		state.ItemsSeen += 3
 		state.SkipCount += 3
 		state.SkipStreak += 2
 		state.DopamineBudget = math.Max(0, state.DopamineBudget-3*dopamineSkipDrain)
@@ -1311,12 +1314,15 @@ func detectMood(state *SessionState) string {
 		return "" // Too early
 	}
 
+	// Min-sample guards consistent with detectResistance: a bounce/skip RATE from
+	// 1-2 impressions is noise and must not prematurely declare 'frustrated' and
+	// trigger a strategy switch. Below the sample floor the rate stays 0.
 	bounceRate := 0.0
-	if state.ImpressionCount > 0 {
+	if state.ImpressionCount >= resistBounceMinSample {
 		bounceRate = float64(state.BounceCount) / float64(state.ImpressionCount)
 	}
 	skipRate := 0.0
-	if state.ItemsSeen > 0 {
+	if state.ItemsSeen >= 3 {
 		skipRate = float64(state.SkipCount) / float64(state.ItemsSeen)
 	}
 	engagementPerItem := 0.0
@@ -1934,10 +1940,12 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		FROM ranked
 		WHERE response_id IN (SELECT response_id FROM my)`,
 		userID).Scan(&p.RecentWins, &p.RecentLosses)
-	if p.RecentWins+p.RecentLosses > 0 {
-		// If they have many battles, they're competitive = higher ego sensitivity
-		p.EgoSensitivity = math.Min(1.0, float64(p.RecentWins+p.RecentLosses)/10.0)
-	}
+	// Ego sensitivity scales with battle ACTIVITY (a competitiveness proxy):
+	// more battles → more ego-invested. Always assign — including 0 battles → 0 —
+	// so a non-battler isn't left at the 0.5 default and thereby read as MORE
+	// ego-sensitive than a 1-battle user (0.1). The ego-repair/boost patterns this
+	// gates (>0.5/>0.7) are for demonstrably competitive users, not the unproven.
+	p.EgoSensitivity = math.Min(1.0, float64(p.RecentWins+p.RecentLosses)/10.0)
 
 	// === Session stats ===
 	var sessionCount int
@@ -2026,29 +2034,47 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		LEFT JOIN challenges c ON fe.content_type = 'challenge' AND fe.content_id = CAST(c.id AS TEXT)
 		LEFT JOIN posts p ON fe.content_type = 'post' AND fe.content_id = CAST(p.id AS TEXT)
 		WHERE fe.user_id = $1
-		AND fe.event_type IN ('like','comment','share','save','rewatch','view')
-		AND fe.completion_rate > 0.5
+		AND (fe.event_type IN ('like','comment','share','save','rewatch')
+		     OR (fe.event_type = 'view' AND fe.completion_rate > 0.5))
 		GROUP BY h, cat, energy
 		ORDER BY h, cnt DESC`, userID, tzMin)
 	if err == nil {
 		defer hourCatRows.Close()
-		hourCatBest := make(map[int]string)       // hour → best category
-		hourCatMax := make(map[int]int)             // hour → best count
-		hourEnergySum := make(map[int]float64)      // hour → sum of energy scores
-		hourEnergyCount := make(map[int]int)        // hour → count
+		// Accumulate per-(hour,category) TOTALS across energy levels before picking
+		// the best category. The query GROUP BYs (h,cat,energy), so a single
+		// category's count is FRAGMENTED across energy buckets; picking the best by
+		// raw row count let a one-energy category outrank a higher-total category
+		// that happened to be split across energies. Sum per (h,cat) first.
+		hourCatCount := make(map[int]map[string]int) // hour → cat → total count
+		hourEnergySum := make(map[int]float64)        // hour → sum of energy scores
+		hourEnergyCount := make(map[int]int)          // hour → count
 		for hourCatRows.Next() {
 			var h, cnt int
 			var cat, energy string
 			hourCatRows.Scan(&h, &cat, &energy, &cnt)
-			if cat != "" && cnt > hourCatMax[h] {
-				hourCatBest[h] = cat
-				hourCatMax[h] = cnt
+			if cat != "" {
+				if hourCatCount[h] == nil {
+					hourCatCount[h] = make(map[string]int)
+				}
+				hourCatCount[h][cat] += cnt
 			}
 			// Same 0.25/0.55/0.85 scale the content scorer uses (energyHourMatch
 			// compares the two), via the shared mapping.
 			energyVal := energyStringToFloat(energy)
 			hourEnergySum[h] += energyVal * float64(cnt)
 			hourEnergyCount[h] += cnt
+		}
+		hourCatBest := make(map[int]string) // hour → highest-TOTAL category
+		for h, cats := range hourCatCount {
+			best, bestN := "", 0
+			for cat, n := range cats {
+				if n > bestN {
+					best, bestN = cat, n
+				}
+			}
+			if best != "" {
+				hourCatBest[h] = best
+			}
 		}
 		p.CategoryByHour = hourCatBest
 		for h, sum := range hourEnergySum {
