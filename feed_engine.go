@@ -2978,6 +2978,13 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	if isNewCreator && !followingSet[cs.CreatorID] {
 		novelty = math.Min(1.0, novelty+0.4) // New creator the user has never engaged
 	}
+	// Preserve the RAW (pre-tolerance) novelty for slot ELIGIBILITY: discovery /
+	// surprise buckets gate on this so low-NoveltyTolerance users — who most need
+	// bubble-breaking — still get those slots filled, instead of an empty
+	// discovery slot. The SCORE-affecting term below stays tolerance-scaled, so
+	// novelty-averse users get exploration in the slot but it doesn't dominate
+	// their ranking.
+	breakdown["noveltyRaw"] = novelty
 	// Scale by user's novelty tolerance
 	novelty *= profile.NoveltyTolerance
 	breakdown["novelty"] = novelty
@@ -4078,8 +4085,10 @@ func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]
 			buckets[slotSocial] = append(buckets[slotSocial], item)
 		}
 
-		// Discovery: new category/creator for user
-		if bd["novelty"] > 0.3 {
+		// Discovery: new category/creator for user. Gate on RAW (pre-tolerance)
+		// novelty so low-NoveltyTolerance users still get a non-empty discovery
+		// slot (bubble-breaking); their ranking still reflects the scaled novelty.
+		if bd["noveltyRaw"] > 0.3 {
 			buckets[slotDiscovery] = append(buckets[slotDiscovery], item)
 		}
 
@@ -4122,20 +4131,21 @@ func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]
 		}
 
 		// Surprise: wildcard — high quality content the user wouldn't normally see
-		// Opposite of their usual preferences but objectively engaging
-		if bd["novelty"] > 0.5 && bd["quality"] > 0.5 {
+		// Opposite of their usual preferences but objectively engaging. Gate on RAW
+		// novelty (see discovery) so the slot isn't dead for low-tolerance users.
+		if bd["noveltyRaw"] > 0.5 && bd["quality"] > 0.5 {
 			buckets[slotSurprise] = append(buckets[slotSurprise], item)
 		} else if bd["collabBonus"] > 0.1 && bd["relevance"] < 0.3 {
 			// Similar users liked it but it's outside this user's normal categories
 			buckets[slotSurprise] = append(buckets[slotSurprise], item)
 		}
 
-		// Rival: content from competitors — someone they lost to or a close-league creator
-		// Drives re-engagement through competitive fire
-		if item.Item.Type == "challenge" && bd["egoContextBonus"] > 0 {
-			buckets[slotRival] = append(buckets[slotRival], item)
-		} else if bd["social"] < 0.1 && item.Item.Type == "challenge" {
-			// Non-friend challenge creators are potential rivals
+		// Rival: content from competitors — non-followed challenge creators, the
+		// genuine "potential rival" signal. The bucket is score-sorted, so a
+		// rival's active battle (higher battleBoost) naturally rises within it.
+		// (Was gated on egoContextBonus, an ego-STATE CATEGORY-preference signal
+		// that has nothing to do with rivalry/opponents.)
+		if item.Item.Type == "challenge" && bd["social"] < 0.1 {
 			buckets[slotRival] = append(buckets[slotRival], item)
 		}
 
@@ -4249,6 +4259,11 @@ func getItemCreatorID(item HomeFeedItem) string {
 
 // hasEmotionTag checks if a scored item's content has a specific emotion tag.
 func hasEmotionTag(item ScoredItem, tag string) bool {
+	// Prefer the tags already on the struct, but the For You candidate fetches
+	// (fetchChallengesWindowedByKind and the candidate_sources.go sources) do NOT
+	// SELECT emotion_tags, so these are usually empty — which left the cliffhang
+	// slot permanently empty and the cooldown emotion fallback dead. Fall back to
+	// getContentEmotions (Redis-cached) so emotion-tag slotting actually works.
 	if item.Item.Challenge != nil {
 		for _, t := range item.Item.Challenge.EmotionTags {
 			if t == tag {
@@ -4261,6 +4276,11 @@ func hasEmotionTag(item ScoredItem, tag string) bool {
 			if t == tag {
 				return true
 			}
+		}
+	}
+	for _, t := range getContentEmotions(getItemID(item.Item), item.Item.Type) {
+		if t == tag {
+			return true
 		}
 	}
 	return false

@@ -378,12 +378,18 @@ func sourceCollaborative(userID string, limit int) []HomeFeedItem {
 func sourceCollaborativeWindowed(userID string, limit int, window string) []HomeFeedItem {
 	items := make([]HomeFeedItem, 0, limit)
 	// ResponseCount via correlated subquery — same reason as the other sources.
+	// Rank by COLLABORATIVE STRENGTH — how many DISTINCT similar users engaged
+	// each challenge — tie-broken by recency. The old query used
+	// `DISTINCT ON (c.id) ... ORDER BY c.id ... LIMIT`, which returns the
+	// lowest-ID (oldest) challenges regardless of engagement, defeating the whole
+	// "users like you also liked" purpose. GROUP BY dedups the (user,event)
+	// fan-out so one similar user counts once per challenge.
 	rows, err := db.Query(`
-		SELECT DISTINCT ON (c.id)
-			c.id, c.creator_id, u.username, u.league, c.video_url,
+		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
-			c.views, c.likes_count, c.created_at,
-			c.response_count
+			c.views, c.likes_count, c.created_at, c.response_count,
+			COUNT(DISTINCT us.similar_user_id) AS engaging_similars,
+			MAX(fe.created_at) AS last_engaged
 		FROM user_similarities us
 		JOIN feed_events fe ON fe.user_id = us.similar_user_id::text
 		JOIN challenges c ON c.id = fe.content_id::int AND fe.content_type = 'challenge'
@@ -393,7 +399,10 @@ func sourceCollaborativeWindowed(userID string, limit int, window string) []Home
 		  AND fe.event_type IN ('like','complete','share','save')
 		  AND c.created_at > NOW() - ($3::text)::interval
 		  AND c.creator_id != CAST($1 AS INT)
-		ORDER BY c.id, c.created_at DESC
+		GROUP BY c.id, c.creator_id, u.username, u.league, c.video_url,
+			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
+			c.views, c.likes_count, c.created_at, c.response_count
+		ORDER BY engaging_similars DESC, last_engaged DESC
 		LIMIT $2`, userID, limit, window)
 	if err != nil {
 		return nil
@@ -401,11 +410,12 @@ func sourceCollaborativeWindowed(userID string, limit int, window string) []Home
 	defer rows.Close()
 	for rows.Next() {
 		var ch Challenge
-		var creatorID, views, likes, respCount int
-		var createdAt time.Time
+		var creatorID, views, likes, respCount, engagingSimilars int
+		var createdAt, lastEngaged time.Time
 		if err := rows.Scan(&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
 			&ch.VideoURL, &ch.ThumbnailURL, &ch.Prefix, &ch.Subject,
-			&ch.Visibility, &ch.Status, &views, &likes, &createdAt, &respCount); err != nil {
+			&ch.Visibility, &ch.Status, &views, &likes, &createdAt, &respCount,
+			&engagingSimilars, &lastEngaged); err != nil {
 			continue
 		}
 		ch.CreatorID = strconv.Itoa(creatorID)

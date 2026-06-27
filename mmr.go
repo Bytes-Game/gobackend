@@ -134,6 +134,7 @@ func applyMMRWithCreator(items []ScoredItem, lambda float64, topK int, embedOf f
 		}
 		bestI := -1
 		bestMMR := -1e18
+		bestPenalty := 0.0
 		for i := 0; i < len(head); i++ {
 			if taken[i] {
 				continue
@@ -160,14 +161,26 @@ func applyMMRWithCreator(items []ScoredItem, lambda float64, topK int, embedOf f
 			if creators[i] != "" {
 				creatorPen = mmrCreatorPenalty * float64(creatorCount[creators[i]])
 			}
-			mmr := effLambda*head[i].Score - (1-effLambda)*maxSim - creatorPen
+			penalty := (1-effLambda)*maxSim + creatorPen
+			mmr := effLambda*head[i].Score - penalty
 			if mmr > bestMMR {
 				bestMMR = mmr
 				bestI = i
+				bestPenalty = penalty
 			}
 		}
 		if bestI < 0 {
 			break
+		}
+		// BAKE the diversity penalty into the item's Score (demote near-duplicates
+		// only — penalty>0). MMR previously only REORDERED the slice, but every
+		// downstream consumer (composeFeed's per-bucket score sort, the cross-page
+		// re-sort) re-sorts by Score and silently discarded that order, so the
+		// diversification never reached the served feed. Folding it into Score
+		// makes those score-based steps preserve it. Diverse items (penalty<=0)
+		// are left unboosted.
+		if bestPenalty > 0 {
+			head[bestI].Score -= bestPenalty
 		}
 		chosen = append(chosen, bestI)
 		taken[bestI] = true

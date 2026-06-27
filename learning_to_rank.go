@@ -214,6 +214,12 @@ func startLTRFlusher() {
 		defer ticker.Stop()
 		for range ticker.C {
 			ltrFlush()
+			// Persist the Bayesian uncertainty stats on the same tick. Its doc
+			// claimed this happened "from the existing LTR flusher tick", but the
+			// call was missing, so per-cohort warmup/variance was never written to
+			// Redis and reset to empty on every restart/deploy — the uncertainty
+			// exploration bonus stayed at 0 (cold) after every deploy.
+			flushBayesianStats()
 		}
 	}()
 }
