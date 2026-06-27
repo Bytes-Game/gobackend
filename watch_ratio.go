@@ -119,8 +119,12 @@ func wrPredictBonus(cohort Cohort, breakdown map[string]float64) float64 {
 	}
 	pred := 1.0 / (1.0 + math.Exp(-z))
 	center := m.MeanRatio
-	if center < 0.05 || center > 0.95 {
-		center = 0.5 // not yet populated (e.g. a pre-migration model) → neutral
+	if center <= 0 || center >= 1 {
+		// Only the impossible/unset boundary values (e.g. a pre-migration model
+		// with MeanRatio==0) fall back to neutral. A GENUINE low-but-nonzero mean
+		// (skip-heavy cohort, ~0.05-0.15) is respected — forcing it to 0.5 would
+		// restore the persistent-negative-bonus bias the EMA centering removes.
+		center = 0.5
 	}
 	delta := (pred - center) * 2.0
 	if delta > 1 {

@@ -173,13 +173,15 @@ func bayesianUncertaintyBonus(cohort Cohort, centeredScore float64, rnd *rand.Ra
 	} else {
 		draw = rand.NormFloat64()
 	}
-	// Consume the tracked residual Mean (E[predicted-actual]) as a bias
-	// correction: if this cohort's predictions run systematically high (Mean>0),
-	// nudge the draw's center DOWN by -Mean (scaled to the bonus range) so the
-	// module uses the full (mean, variance) posterior it maintains, not just the
-	// variance. Was tracked via Welford and persisted but never read.
-	center := -s.Mean * bayesianMaxBonus
-	noise := center + draw*se*bayesianExplorationK*itemUncertainty
+	// NOTE on the residual Mean (E[predicted-actual]): it is maintained per cohort
+	// as a calibration diagnostic, but it is deliberately NOT folded into this
+	// exploration term. A per-cohort scalar is identical for every candidate in a
+	// single request (one cohort per request), so it cannot reorder the candidate
+	// set — adding it here only shifted the absolute score and could asymmetrically
+	// saturate the ±clamp for high-uncertainty items. The correct place to consume
+	// Mean is an ABSOLUTE-probability consumer (e.g. push-notification thresholds),
+	// not the rank-only feed exploration noise. So the draw stays zero-mean.
+	noise := draw * se * bayesianExplorationK * itemUncertainty
 	if noise > bayesianMaxBonus {
 		noise = bayesianMaxBonus
 	}

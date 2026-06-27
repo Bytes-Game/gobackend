@@ -1805,6 +1805,12 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 					seen[c] = true
 				}
 			}
+			// Bound the list like the realtime miner does (it trims to 20) so the
+			// union path can't grow it without limit across recomputes. Keep the
+			// most-recently-added (the window's fresh dislikes are appended last).
+			if len(p.AvoidedCategories) > 20 {
+				p.AvoidedCategories = p.AvoidedCategories[len(p.AvoidedCategories)-20:]
+			}
 		}
 
 		// Average completion rate
@@ -2241,7 +2247,10 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 			SELECT COALESCE(SUM(cnt), 0) FROM creator_engagement`, userID).Scan(&topCreatorEngagement)
 		// Shrink toward 0.5 so a user with 2 positive events both on one creator
 		// isn't scored a maxed-out loyalist (1.0) on no real evidence.
-		p.CreatorLoyalty = smoothedRate(float64(topCreatorEngagement), float64(totalPositiveEngagement), 0.5, 5)
+		// priorStrength 8 to match SocialDrive/AttentionSpan — the >0.6 serve gate
+		// sits just 0.1 above the 0.5 prior, so a weaker k=5 left small-sample
+		// users still tripping strategyCreatorFocus.
+		p.CreatorLoyalty = smoothedRate(float64(topCreatorEngagement), float64(totalPositiveEngagement), 0.5, 8)
 	}
 
 	// --- CompetitivenessIndex ---
@@ -3032,10 +3041,12 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// ── SOCIAL-DRIVE WEIGHTING ──
 	// High SocialDrive users benefit more from social signal and tie-strength;
 	// low-SocialDrive users get a flatter blend (they prefer stranger content).
-	// SocialDrive is written to user_profiles by computeSocialDrive() so
-	// profile.SocialDrive is already the fresh value; if the analytics job
-	// hasn't produced one yet, fall back to the precomputed cache (seeded
-	// from realtime events) before defaulting to the neutral midpoint.
+	// SocialDrive is owned and written to user_profiles by computeUserProfile
+	// (the analytics job deliberately does NOT upsert that column — see
+	// computeSocialDrive's comment — to avoid a double-writer). So
+	// profile.SocialDrive is already the fresh value; if the profile hasn't been
+	// computed yet, fall back to the precomputed cache (seeded from realtime
+	// events) before defaulting to the neutral midpoint.
 	//
 	// `sd == 0` is now a RELIABLE "unset" sentinel: computeUserProfile builds
 	// SocialDrive via smoothedRate toward a 0.5 prior, which always returns a
@@ -4639,7 +4650,17 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 			emotions := getContentEmotions(contentID, contentType)
 			cv := getTrainedContentEmbedding(cs, emotions)
 			sim := cosineSim(userVec, cv)
-			embedBonus := sim * 0.20
+			// Attenuate by the SAME negative multiplier scoreForUser applied to the
+			// rest of the score. Added unconditionally, this bonus would re-inflate
+			// a blocked creator's item (negMult=0 → score forced to 0) back into
+			// ranking, defeating the "blocked = 0" invariant for warm users; and an
+			// unfollowed creator (negMult=0.5) would keep full embed weight. Default
+			// 1.0 if the key is somehow absent.
+			negMult := 1.0
+			if nm, ok := breakdown["negativeMult"]; ok {
+				negMult = nm
+			}
+			embedBonus := sim * 0.20 * negMult
 			breakdown["embedSim"] = sim
 			breakdown["embedBonus"] = embedBonus
 			score += embedBonus
