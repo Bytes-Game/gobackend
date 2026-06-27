@@ -1772,10 +1772,14 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 			}
 		}
 		// Re-apply mined negative affinities the clamp above discarded: if this
-		// window produced no POSITIVE evidence for a category the user previously
-		// disliked, keep the negative affinity instead of resetting it to neutral.
+		// window produced no MEANINGFUL positive evidence for a category the user
+		// previously disliked, keep the negative affinity instead of resetting to
+		// neutral. Require cur >= 0.15 (real re-engagement) before letting fresh
+		// evidence override — a single weak positive event (cur≈0.01) must not
+		// erase a sustained mined dislike like -0.5.
+		const negAffinityOverrideThreshold = 0.15
 		for k, negv := range preservedNegAffinity {
-			if cur, ok := p.CategoryAffinity[k]; !ok || cur <= 0 {
+			if cur, ok := p.CategoryAffinity[k]; !ok || cur < negAffinityOverrideThreshold {
 				p.CategoryAffinity[k] = negv
 			}
 		}
@@ -2926,10 +2930,14 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	if affinity, ok := profile.CategoryAffinity[cs.Category]; ok {
 		relevance = affinity
 	}
-	// Negative signal: avoided category
+	// Negative signal: avoided category. Use the MORE negative of the flat
+	// avoided penalty and any already-set mined negative affinity, so the -0.3
+	// doesn't MASK a stronger mined dislike (e.g. a -0.5 negative affinity).
 	for _, avoided := range profile.AvoidedCategories {
 		if avoided == cs.Category {
-			relevance = -0.3 // Active penalty
+			if relevance > -0.3 {
+				relevance = -0.3 // Active penalty
+			}
 			break
 		}
 	}
@@ -2994,7 +3002,10 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	dwellBoost := 0.0
 	if cs.ContentType == "challenge" {
 		if avgMs := getPageDwellMs(profile.UserID, "challenge_detail_page"); avgMs > 4000 {
-			// 4s = casual glance, 10s+ = real read. Cap the boost at 0.1.
+			// 4s = casual glance, 10s+ = real read. Raw boost caps at 0.10; the
+			// final term is dwellBoost*cw.Affinity (added in baseScore), so a
+			// high-affinity-weight cohort (e.g. at_risk cw.Affinity=1.5) can reach
+			// ~0.15 — consistent with the sibling creatorAffinityBoost*cw.Affinity.
 			over := float64(avgMs-4000) / 6000.0
 			if over > 1 {
 				over = 1
@@ -3730,7 +3741,10 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		contFactor := sessionContinuityFactor(ns) // 0.2 .. 1.0
 		// Keep at least 20% of the exploration bonuses so curiosity isn't killed.
 		damp := 0.4 + 0.6*contFactor // 0.52 .. 1.0
-		exploreTerms := unseenBonus + coldContentBonus + novelty*wNovelty*cw.Novelty
+		// novelty term must use the experiment-overridable weight (wsel), matching
+		// how baseScore added it — otherwise an active wNovelty experiment damps a
+		// portion computed from the default weight, not the served one.
+		exploreTerms := unseenBonus + coldContentBonus + novelty*wsel("wNovelty", wNovelty)*cw.Novelty
 		finalScore -= (1.0 - damp) * exploreTerms
 		breakdown["continuityFactor"] = contFactor
 	}
@@ -4717,8 +4731,10 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Sort by score for initial ranking
-	sort.Slice(scored, func(i, j int) bool {
+	// Sort by score for initial ranking. SliceStable so equal-scored items
+	// (e.g. penalized tail items the clamp floors to 0) keep a deterministic
+	// candidate order instead of being shuffled arbitrarily by the sort.
+	sort.SliceStable(scored, func(i, j int) bool {
 		return scored[i].Score > scored[j].Score
 	})
 
