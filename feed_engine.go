@@ -58,7 +58,8 @@ type SessionState struct {
 	ShareCount      int                `json:"shareCount"`
 	CategoriesSeen  map[string]int     `json:"categoriesSeen"`  // category -> count (saturation tracking)
 	CreatorsSeen    map[string]int     `json:"creatorsSeen"`    // creatorId -> count (diversity)
-	LastEmotions    []string           `json:"lastEmotions"`    // Last 5 content emotions consumed
+	LastEmotions    []string           `json:"lastEmotions"`    // Last ~10 items, ONE negative-priority emotion each (wellbeing spiral detection)
+	LastMoodEmotions []string          `json:"lastMoodEmotions"` // Last ~10 items, FIRST/dominant emotion each (mood-transition learner — must match the serve-time "to" key)
 	DopamineBudget  float64            `json:"dopamineBudget"`  // 1.0=fresh, depletes to 0
 	ResistanceLevel int                `json:"resistanceLevel"` // 0-3, triggers strategy switches
 	CurrentStrategy string             `json:"currentStrategy"` // see strategy constants below
@@ -184,7 +185,8 @@ type ContentScore struct {
 	TrendingScore      float64           `json:"trendingScore"`
 	QualityScore       float64           `json:"qualityScore"`
 	// === Content understanding ===
-	EnergyLevel        float64           `json:"energyLevel"`   // 0=chill, 1=intense
+	EnergyLevel        float64           `json:"energyLevel"`   // 0=chill, 1=intense (may be inferred for medium/unset; used by energyFit)
+	EnergyLevelLabel   float64           `json:"energyLevelLabel"` // discrete label energy (energyStringToFloat); used by energyHourMatch to match EnergyByHour's train scale
 	Category           string            `json:"category"`      // Primary category
 	EmotionVector      map[string]float64 `json:"emotionVector"` // "happy":0.5, "competitive":0.3
 	// === Creator info (denormalized for speed) ===
@@ -552,6 +554,7 @@ func getSessionState(userID, sessionID string) *SessionState {
 			CategoriesSeen:  make(map[string]int),
 			CreatorsSeen:    make(map[string]int),
 			LastEmotions:    []string{},
+			LastMoodEmotions: []string{},
 			CurrentStrategy: strategyStandard,
 			TriedStrategies: []string{strategyStandard},
 		}
@@ -567,6 +570,7 @@ func getSessionState(userID, sessionID string) *SessionState {
 			CategoriesSeen: make(map[string]int),
 			CreatorsSeen:   make(map[string]int),
 			LastEmotions:   []string{},
+			LastMoodEmotions: []string{},
 			CurrentStrategy: strategyStandard,
 			TriedStrategies: []string{strategyStandard},
 		}
@@ -870,8 +874,11 @@ func updateSessionFromEvent(event FeedEvent) {
 			// Without this call recordSessionMoodOutcome had ZERO callers, so the
 			// learned graph was never written and moodTransitionBonus ran on
 			// hand-coded seed priors forever.
-			if state.DetectedMood != "" && len(state.LastEmotions) > 0 {
-				recordSessionMoodOutcome(state.DetectedMood, state.LastEmotions, sessionWasPositive(state))
+			if state.DetectedMood != "" && len(state.LastMoodEmotions) > 0 {
+				// Train on LastMoodEmotions (first/dominant emotion per item) — the
+				// SAME key moodTransitionBonus queries at serve time. (LastEmotions
+				// is negative-priority and is for wellbeing, a different consumer.)
+				recordSessionMoodOutcome(state.DetectedMood, state.LastMoodEmotions, sessionWasPositive(state))
 			}
 			// Credit the in-flight strategy's outcome at session end too —
 			// recordStrategyOutcome otherwise only runs on the rare
@@ -1082,6 +1089,19 @@ func updateSessionFromEvent(event FeedEvent) {
 			// Keep only last 10 items
 			if len(state.LastEmotions) > 10 {
 				state.LastEmotions = state.LastEmotions[len(state.LastEmotions)-10:]
+			}
+		}
+		// Separately track the FIRST/dominant emotion per item for the mood-
+		// transition learner. The serve path (moodTransitionBonus) keys its "to"
+		// lookup on the first emotion, so the learner MUST record under the same
+		// key — recording the negative-priority representative instead meant the
+		// learned EMA was stored under a key serve never queries (e.g. trained
+		// 'sad' for a ['happy','sad'] item but served 'happy'), silently disabling
+		// the learned mood graph.
+		if len(emotions) > 0 && emotions[0] != "" {
+			state.LastMoodEmotions = append(state.LastMoodEmotions, emotions[0])
+			if len(state.LastMoodEmotions) > 10 {
+				state.LastMoodEmotions = state.LastMoodEmotions[len(state.LastMoodEmotions)-10:]
 			}
 		}
 	}
@@ -2662,6 +2682,11 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			// (engagement-modulated) energy instead of a flat constant.
 			cs.EnergyLevel = inferredEnergy
 		}
+		// Discrete label energy on the SAME scale EnergyByHour is trained on, so
+		// energyHourMatch compares like-for-like. cs.EnergyLevel above may be the
+		// inferred value for medium/unset (which energyFit wants) but would skew the
+		// hour-match against the label-built EnergyByHour.
+		cs.EnergyLevelLabel = energyStringToFloat(dbEnergy)
 		var emotions []string
 		json.Unmarshal(emotionJSON, &emotions)
 		// Auto-tag from caption if no creator-declared tags
@@ -2712,6 +2737,11 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			// (engagement-modulated) energy instead of a flat constant.
 			cs.EnergyLevel = inferredEnergy
 		}
+		// Discrete label energy on the SAME scale EnergyByHour is trained on, so
+		// energyHourMatch compares like-for-like. cs.EnergyLevel above may be the
+		// inferred value for medium/unset (which energyFit wants) but would skew the
+		// hour-match against the label-built EnergyByHour.
+		cs.EnergyLevelLabel = energyStringToFloat(dbEnergy)
 		var emotions []string
 		json.Unmarshal(emotionJSON, &emotions)
 		// Auto-tag from caption if no creator-declared tags
@@ -3194,7 +3224,9 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		now = now.Add(time.Duration(session.TZOffsetMin) * time.Minute)
 	}
 	hourBonus := categoryHourBoost(profile, cs.Category, now)
-	hourBonus += energyHourMatch(profile, cs.EnergyLevel, now)
+	// Use the discrete LABEL energy (not the possibly-inferred cs.EnergyLevel) so
+	// this matches EnergyByHour, which is trained from the same label scale.
+	hourBonus += energyHourMatch(profile, cs.EnergyLevelLabel, now)
 	breakdown["hourBonus"] = hourBonus
 
 	// ── CONTEXT-AWARE: EMOTION MATCH ──
@@ -3528,23 +3560,39 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// so genuinely new content keeps its full push. Generous cap: most of these
 	// are 0 on a normal item, so only pathological stacks are clipped.
 	const maxBehavioralBonus = 0.70
-	behavioral := egoBonus + hourBonus + emotionBonus + egoContextBonus + wellbeingBonus +
-		collabBonus + scrollBackBonus + completeBonus + loopBonus + unmuteBonus +
-		profileVisitBonus + battleBoost
-	if behavioral > maxBehavioralBonus {
-		scale := maxBehavioralBonus / behavioral
-		egoBonus *= scale
-		hourBonus *= scale
-		emotionBonus *= scale
-		egoContextBonus *= scale
-		wellbeingBonus *= scale
-		collabBonus *= scale
-		scrollBackBonus *= scale
-		completeBonus *= scale
-		loopBonus *= scale
-		unmuteBonus *= scale
-		profileVisitBonus *= scale
-		battleBoost *= scale
+	// Sum only the POSITIVE contributors: several of these can be negative
+	// (wellbeingBonus spiral penalty -0.15, energy-mismatch hourBonus down to
+	// -0.04, collabBonus has no lower clamp). Scaling a negative member by
+	// scale<1 would weaken a penalty exactly when many positives stack — the
+	// opposite of the cap's intent. So we cap the positive sum and scale only
+	// positive members, leaving penalties intact.
+	posBehavioral := 0.0
+	for _, b := range []float64{egoBonus, hourBonus, emotionBonus, egoContextBonus, wellbeingBonus,
+		collabBonus, scrollBackBonus, completeBonus, loopBonus, unmuteBonus, profileVisitBonus, battleBoost} {
+		if b > 0 {
+			posBehavioral += b
+		}
+	}
+	if posBehavioral > maxBehavioralBonus {
+		scale := maxBehavioralBonus / posBehavioral
+		capPos := func(v float64) float64 {
+			if v > 0 {
+				return v * scale
+			}
+			return v
+		}
+		egoBonus = capPos(egoBonus)
+		hourBonus = capPos(hourBonus)
+		emotionBonus = capPos(emotionBonus)
+		egoContextBonus = capPos(egoContextBonus)
+		wellbeingBonus = capPos(wellbeingBonus)
+		collabBonus = capPos(collabBonus)
+		scrollBackBonus = capPos(scrollBackBonus)
+		completeBonus = capPos(completeBonus)
+		loopBonus = capPos(loopBonus)
+		unmuteBonus = capPos(unmuteBonus)
+		profileVisitBonus = capPos(profileVisitBonus)
+		battleBoost = capPos(battleBoost)
 		breakdown["behavioralCapScale"] = scale
 	}
 
