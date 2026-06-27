@@ -245,9 +245,15 @@ const (
 	                                // Challenges take longer to discover and respond to.
 
 	// === Session dynamics ===
-	dopamineDepletionRate  = 0.03  // Budget drops 3% per partial/low-completion view (neutral consumption)
+	// View dopamine is now PROPORTIONAL to completion (see updateSessionFromEvent):
+	// delta = (completion - 0.6) * dopamineViewSlope. The old flat
+	// dopamineDepletionRate (0.03 for any <0.8 view) was removed when the 0.8
+	// cliff was; the slope is tuned so a low-completion view (~0.1) still drains
+	// ~0.04 — preserving the "fatigue by ~30 items" calibration below — while a
+	// genuinely-watched 0.79 view drains far less than a 0.05 abandon.
+	dopamineViewSlope      = 0.08  // proportional view refill/drain per unit completion-from-neutral
 	dopamineSkipDrain      = 0.05  // A skip/not_interested drains more — the feed missed
-	                                // WHY: At 30 items, budget = 0.1 (fatigued). Average TikTok
+	                                // WHY: At ~30 items, budget ≈ 0.1 (fatigued). Average TikTok
 	                                // session is 10-15 minutes ≈ 30-50 items. We want to detect
 	                                // fatigue around the same threshold.
 
@@ -1046,14 +1052,16 @@ func updateSessionFromEvent(event FeedEvent) {
 			state.SkipStreak = 0 // Watching most of content = not skipping
 		}
 		// Dopamine tracks watch satisfaction PROPORTIONAL to completion, and only
-		// when completion is known (>0): a near-full watch refills (~+0.02 at
-		// 100%), a partial one costs a little (~-0.03 at 0%), 0.6 is neutral. A
-		// zero/unknown-completion view is left neutral so a measurement gap — or a
-		// true bounce, which fires its own skip event — isn't double-penalized.
-		// No sharp 0.8 cliff. This is the SOLE watch-satisfaction refill now (the
-		// `complete` event no longer also refills).
+		// when completion is known (>0): a near-full watch refills (~+0.03 at
+		// 100%), a low-completion one drains (~-0.04 at 10%, ~-0.05 at 0%), 0.6 is
+		// neutral. A zero/unknown-completion view is left neutral so a measurement
+		// gap — or a true bounce, which fires its own skip event — isn't double-
+		// penalized. No sharp 0.8 cliff: a genuinely-watched 0.79 view drains far
+		// less than a 0.05 abandon, yet low-completion views still drain near the
+		// old flat rate so fatigue detection isn't blunted. This is the SOLE
+		// watch-satisfaction refill now (the `complete` event no longer refills).
 		if event.CompletionRate > 0 {
-			delta := (event.CompletionRate - 0.6) * 0.05
+			delta := (event.CompletionRate - 0.6) * dopamineViewSlope
 			if delta >= 0 {
 				state.DopamineBudget = math.Min(1.0, state.DopamineBudget+delta)
 			} else {
@@ -1105,7 +1113,12 @@ func updateSessionFromEvent(event FeedEvent) {
 	// Gate on the PRE-event budget: the per-event refill above had usually already
 	// lifted the budget out of <0.15, so gating on the post-refill value meant this
 	// almost never fired — the mechanic was effectively dead.
-	if preBudget < 0.15 && preBudget > 0 {
+	//
+	// No `> 0` lower guard: the budget floors at exactly 0 (maximally fatigued),
+	// which is precisely the rock-bottom user the "one more episode" rescue exists
+	// for. Excluding 0 would repeat the inverted-edge bug already fixed for the
+	// sibling anti-loop dopamine_collapse signal.
+	if preBudget < 0.15 {
 		switch event.EventType {
 		case "like", "share", "rewatch":
 			state.DopamineBudget = math.Min(1.0, state.DopamineBudget+0.12) // Big refill
@@ -3381,13 +3394,18 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	impressionPenalty := 0.0
 	if byCat, ok := impressionStatsCache.Get(profile.UserID); ok {
 		if stats, exists := byCat[cs.Category]; exists && stats.Count >= minCategoryImpressions {
-			br := stats.ShrunkBounceRate() // small-sample shrinkage: n=5 can't "prove" a dislike
-			if br > bounceRateNegativeThreshold {
-				// Stronger penalty for higher bounce rates, capped at -0.25
+			if br := stats.ShrunkBounceRate(); br > bounceRateNegativeThreshold {
+				// PENALTY path uses the SHRUNK rate so n=5 can't "prove" a dislike
+				// and bury a whole category on noise. Capped at -0.25.
 				impressionPenalty = -0.25 * ((br - bounceRateNegativeThreshold) / (1.0 - bounceRateNegativeThreshold))
-			} else if br < bounceRatePositiveThreshold && stats.InterestCount > 0 {
-				// User lingers on this category → positive signal
-				impressionPenalty = 0.12 * (1.0 - br/bounceRatePositiveThreshold)
+			} else if raw := stats.BounceRate(); raw < bounceRatePositiveThreshold && stats.InterestCount > 0 {
+				// INTEREST path uses the RAW rate: shrinking a low bounce toward the
+				// 0.5 prior made the min shrunk rate 5/(n+10) ≥ 0.2 until n>15, so
+				// this +0.12 bonus was unreachable for n=5..15 while the penalty
+				// above could already fire at n=5 — an asymmetry that suppressed
+				// genuine interest. A false small boost (also gated on InterestCount>0,
+				// a real dwell signal) is far lower-risk than a false category dislike.
+				impressionPenalty = 0.12 * (1.0 - raw/bounceRatePositiveThreshold)
 			}
 		}
 	}

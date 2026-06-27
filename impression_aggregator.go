@@ -320,10 +320,15 @@ func aggregateUserImpressions(userID string) error {
 			continue // Not enough data to draw conclusion
 		}
 
-		bounceRate := stats.BounceRate()
+		// Match the serve-time scorer's asymmetry so the two paths agree on what
+		// counts as a dislike: the negative/decay/avoided decisions use the
+		// SHRUNK rate (don't decay or blacklist a category on small-sample noise),
+		// while the positive boost uses the RAW rate (gated on a real dwell signal).
+		shrunkBounce := stats.ShrunkBounceRate()
+		rawBounce := stats.BounceRate()
 		current := profile.CategoryAffinity[category]
 
-		if bounceRate > bounceRateNegativeThreshold {
+		if shrunkBounce > bounceRateNegativeThreshold {
 			// User is consistently ignoring this category → decay affinity
 			newVal := current - affinityDecayPerCycle
 			if newVal < 0 {
@@ -333,13 +338,13 @@ func aggregateUserImpressions(userID string) error {
 			changed = true
 
 			// Extreme bounce rate (>85%) in large sample → add to avoided
-			if bounceRate > 0.85 && stats.Count >= 15 {
+			if shrunkBounce > 0.85 && stats.Count >= 15 {
 				if !containsString(profile.AvoidedCategories, category) {
 					profile.AvoidedCategories = append(profile.AvoidedCategories, category)
 					changed = true
 				}
 			}
-		} else if bounceRate < bounceRatePositiveThreshold && stats.InterestCount > 0 {
+		} else if rawBounce < bounceRatePositiveThreshold && stats.InterestCount > 0 {
 			// User pauses on this category → boost affinity
 			newVal := current + affinityBoostPerCycle
 			if newVal > 1.0 {
