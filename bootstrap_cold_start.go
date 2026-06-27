@@ -110,7 +110,7 @@ func computeBootstrapPool(_ context.Context) {
 			'challenge' AS content_type,
 			GREATEST(c.views, 1) AS impressions,
 			(
-				SELECT COUNT(*) FROM feed_events
+				SELECT COUNT(DISTINCT user_id) FROM feed_events
 				WHERE content_id = c.id::text
 				  AND content_type = 'challenge'
 				  AND event_type IN ('like','share','complete','save','rewatch','follow_from_content')
@@ -120,20 +120,6 @@ func computeBootstrapPool(_ context.Context) {
 		WHERE c.created_at > NOW() - INTERVAL '14 days'
 		  AND c.visibility = 'arena'
 		  AND c.status IN ('open','active','completed')
-		UNION ALL
-		SELECT
-			p.id::text AS content_id,
-			'post' AS content_type,
-			GREATEST(p.views, 1) AS impressions,
-			(
-				SELECT COUNT(*) FROM feed_events
-				WHERE content_id = p.id::text
-				  AND content_type = 'post'
-				  AND event_type IN ('like','share','complete','save','rewatch')
-				  AND created_at > NOW() - INTERVAL '14 days'
-			) AS positives
-		FROM posts p
-		WHERE p.created_at > NOW() - INTERVAL '14 days'
 	`)
 	if err != nil {
 		return
@@ -274,15 +260,23 @@ func applyBootstrapMixIfCold(userID string, primary []ScoredItem, eventCount int
 	}
 
 	// Interleave: every Nth slot is a bootstrap item, where N ≈ 1/mix.
-	// We only inject into the first 30% of the feed so deep scrolls stay
-	// fully personalized.
+	// We inject only into the HEAD of the feed so deep scrolls stay personalized.
+	// The head is the first 30%, but for the very coldest users (large mix) we
+	// allow it to grow up to bootstrapMaxMixFraction (50%) so enough known-good
+	// content lands early — NOT the whole feed, which the old
+	// `headLen = len(bootstrap)*stride` override could reach (it ignored the cap
+	// entirely once bootstrap exceeded 30% of primary).
 	stride := int(math.Round(1.0 / mix))
 	if stride < 2 {
 		stride = 2
 	}
 	headLen := len(primary) * 3 / 10
-	if headLen < len(bootstrap) {
+	maxHead := int(float64(len(primary)) * bootstrapMaxMixFraction)
+	if headLen < len(bootstrap)*stride {
 		headLen = len(bootstrap) * stride
+	}
+	if headLen > maxHead {
+		headLen = maxHead
 	}
 	if headLen > len(primary) {
 		headLen = len(primary)
