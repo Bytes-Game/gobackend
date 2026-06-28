@@ -1684,6 +1684,7 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// would otherwise silently discard committed dislike signal.
 	var preservedStrategyHistory map[string]float64
 	var preservedNegAffinity map[string]float64
+	var preservedNegEmotion map[string]float64
 	var preservedAvoided []string
 	if existing, err := loadUserProfile(userID); err == nil && existing != nil {
 		preservedStrategyHistory = existing.StrategySuccessHistory
@@ -1691,6 +1692,15 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		for k, v := range existing.CategoryAffinity {
 			if v < 0 {
 				preservedNegAffinity[k] = v
+			}
+		}
+		// Same for mined negative EmotionPreference — the recompute below builds
+		// EmotionPreference from positive engagement and clamps to >=0, which would
+		// discard the disliked-emotion signal the miner pushed down.
+		preservedNegEmotion = make(map[string]float64)
+		for k, v := range existing.EmotionPreference {
+			if v < 0 {
+				preservedNegEmotion[k] = v
 			}
 		}
 		preservedAvoided = existing.AvoidedCategories
@@ -2171,6 +2181,14 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 			for k, v := range rawEmotions {
 				p.EmotionPreference[k] = math.Max(0, v/maxEmotionScore)
 			}
+		}
+	}
+	// Re-apply mined negative emotion preferences the >=0 clamp discarded, where
+	// the window produced no positive evidence for that emotion (mirrors the
+	// CategoryAffinity negative-merge above).
+	for k, negv := range preservedNegEmotion {
+		if cur, ok := p.EmotionPreference[k]; !ok || cur <= 0 {
+			p.EmotionPreference[k] = negv
 		}
 	}
 
@@ -3330,13 +3348,22 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// Boost content whose emotion vector matches user's emotion preference
 	emotionBonus := 0.0
 	if len(profile.EmotionPreference) > 0 && len(cs.EmotionVector) > 0 {
-		bestMatch := 0.0
+		bestMatch := 0.0  // strongest LIKED emotion present
+		worstMatch := 0.0 // strongest DISLIKED emotion present (mined negative, e.g. -0.5)
 		for tag := range cs.EmotionVector {
-			if pref, ok := profile.EmotionPreference[tag]; ok && pref > bestMatch {
-				bestMatch = pref
+			if pref, ok := profile.EmotionPreference[tag]; ok {
+				if pref > bestMatch {
+					bestMatch = pref
+				}
+				if pref < worstMatch {
+					worstMatch = pref
+				}
 			}
 		}
-		emotionBonus = bestMatch * 0.1 // Up to 0.1 bonus for perfect emotion match
+		// Reward a liked-emotion match AND penalize a disliked-emotion match. The
+		// negative branch was previously ignored entirely, so the mined negative
+		// EmotionPreference (down to -0.5) never influenced ranking. Both ±0.1.
+		emotionBonus = bestMatch*0.1 + worstMatch*0.1
 	}
 	breakdown["emotionBonus"] = emotionBonus
 
@@ -3631,6 +3658,13 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		momentumBonus *= scale
 		streakBonus *= scale
 		breakdown["jackpotCapScale"] = scale
+		// Write the CAPPED values back so the LTR/watch-ratio heads (which read the
+		// breakdown as their feature vector) learn against the SAME contribution
+		// finalScore actually uses, not the pre-cap values.
+		breakdown["variableReward"] = variableReward
+		breakdown["reentryBonus"] = reentryBonus
+		breakdown["momentumBonus"] = momentumBonus
+		breakdown["streakBonus"] = streakBonus
 	}
 
 	// ── BREAKOUT (virality ladder) ──
@@ -3691,6 +3725,20 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		profileVisitBonus = capPos(profileVisitBonus)
 		battleBoost = capPos(battleBoost)
 		breakdown["behavioralCapScale"] = scale
+		// Write CAPPED values back so the learned heads' feature vector matches the
+		// contribution finalScore uses (see jackpot cap above).
+		breakdown["egoBoost"] = egoBonus
+		breakdown["hourBonus"] = hourBonus
+		breakdown["emotionBonus"] = emotionBonus
+		breakdown["egoContextBonus"] = egoContextBonus
+		breakdown["wellbeingBonus"] = wellbeingBonus
+		breakdown["collabBonus"] = collabBonus
+		breakdown["scrollBackBonus"] = scrollBackBonus
+		breakdown["completeBonus"] = completeBonus
+		breakdown["loopBonus"] = loopBonus
+		breakdown["unmuteBonus"] = unmuteBonus
+		breakdown["profileVisitBonus"] = profileVisitBonus
+		breakdown["battleBoost"] = battleBoost
 	}
 
 	// ── FINAL SCORE ──
@@ -4639,13 +4687,18 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	session := getSessionState(userID, sessionID)
 
 	// Capture the client's UTC offset (minutes east of UTC) so hour-of-day
-	// routing buckets by the user's LOCAL hour. Absent/invalid → 0 (UTC), which
-	// matches the previous behaviour. Stored for the profile-build side too.
+	// routing buckets by the user's LOCAL hour. Stored for the profile-build side
+	// too. When the request OMITS tzOffset, fall back to the SAME stored value
+	// computeUserProfile builds CategoryByHour/EnergyByHour with (getUserTZOffset),
+	// rather than 0/UTC — otherwise serve shifts by UTC while the maps were built
+	// in the user's real tz, misaligning every hour-of-day lookup.
 	if tz := r.URL.Query().Get("tzOffset"); tz != "" {
 		if tzMin, err := strconv.Atoi(tz); err == nil && tzMin >= -840 && tzMin <= 840 {
 			session.TZOffsetMin = tzMin
 			go storeUserTZOffset(userID, tzMin)
 		}
+	} else if session.TZOffsetMin == 0 {
+		session.TZOffsetMin = getUserTZOffset(userID)
 	}
 
 	// Step 3: Cold start check
