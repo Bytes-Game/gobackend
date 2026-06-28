@@ -252,12 +252,15 @@ const (
 
 	// === Session dynamics ===
 	// View dopamine is now PROPORTIONAL to completion (see updateSessionFromEvent):
-	// delta = (completion - 0.6) * dopamineViewSlope. The old flat
-	// dopamineDepletionRate (0.03 for any <0.8 view) was removed when the 0.8
-	// cliff was; the slope is tuned so a low-completion view (~0.1) still drains
-	// ~0.04 — preserving the "fatigue by ~30 items" calibration below — while a
-	// genuinely-watched 0.79 view drains far less than a 0.05 abandon.
-	dopamineViewSlope      = 0.08  // proportional view refill/drain per unit completion-from-neutral
+	// delta = (completion - dopamineNeutralCompletion) * dopamineViewSlope.
+	// CALIBRATED to the old flat regime so fatigue timing is preserved while the
+	// 0.8 cliff is removed: neutral at 0.8 (the old refill/drain boundary), slope
+	// 0.10, so completion 0.5 drains 0.03 (== the old flat rate), 0.0 drains 0.08,
+	// and 1.0 refills 0.02 (== the old refill). The earlier 0.6-neutral/0.08-slope
+	// tuning left most views (>0.6) refilling, so a normal session never reached
+	// the fatigue gates — this restores "fatigue by ~30 partial-watch items".
+	dopamineNeutralCompletion = 0.8  // completion at which a view is dopamine-neutral
+	dopamineViewSlope      = 0.10  // proportional view refill/drain per unit completion-from-neutral
 	dopamineSkipDrain      = 0.05  // A skip/not_interested drains more — the feed missed
 	                                // WHY: At ~30 items, budget ≈ 0.1 (fatigued). Average TikTok
 	                                // session is 10-15 minutes ≈ 30-50 items. We want to detect
@@ -1107,7 +1110,7 @@ func updateSessionFromEvent(event FeedEvent) {
 		// old flat rate so fatigue detection isn't blunted. This is the SOLE
 		// watch-satisfaction refill now (the `complete` event no longer refills).
 		if event.CompletionRate > 0 {
-			delta := (event.CompletionRate - 0.6) * dopamineViewSlope
+			delta := (event.CompletionRate - dopamineNeutralCompletion) * dopamineViewSlope
 			if delta >= 0 {
 				state.DopamineBudget = math.Min(1.0, state.DopamineBudget+delta)
 			} else {
@@ -1137,8 +1140,19 @@ func updateSessionFromEvent(event FeedEvent) {
 		// learned EMA was stored under a key serve never queries (e.g. trained
 		// 'sad' for a ['happy','sad'] item but served 'happy'), silently disabling
 		// the learned mood graph.
-		if len(emotions) > 0 && emotions[0] != "" {
-			state.LastMoodEmotions = append(state.LastMoodEmotions, emotions[0])
+		// Use the first NON-EMPTY emotion — exactly the key moodTransitionBonus
+		// picks at serve — so an item whose first tag were empty still trains under
+		// the same key serve queries (latent today: EmotionLabels has no empty
+		// strings, but keeps train/serve provably aligned).
+		moodTo := ""
+		for _, e := range emotions {
+			if e != "" {
+				moodTo = e
+				break
+			}
+		}
+		if moodTo != "" {
+			state.LastMoodEmotions = append(state.LastMoodEmotions, moodTo)
 			if len(state.LastMoodEmotions) > 10 {
 				state.LastMoodEmotions = state.LastMoodEmotions[len(state.LastMoodEmotions)-10:]
 			}
@@ -1363,13 +1377,18 @@ func detectMood(state *SessionState) string {
 	}
 	engagementPerItem := 0.0
 	if state.ItemsSeen > 0 {
-		// Include completions/comments/saves, not just likes+shares, so the
-		// 'engaged' mood matches its docstring ("completions + likes"). These are
-		// now tracked on SessionState; omitting them made 'engaged' nearly
-		// unreachable for users who complete/save rather than like.
-		positive := state.LikeCount + state.ShareCount + state.CompleteCount +
-			state.CommentCount + state.SaveCount
-		engagementPerItem = float64(positive) / float64(state.ItemsSeen)
+		// Include completions/comments/saves, not just likes+shares, so 'engaged'
+		// matches its docstring ("completions + likes"). Completions are weighted
+		// 0.3 (a PASSIVE full-watch is a weaker signal than an active tap, and the
+		// paired view already counts in ItemsSeen) so a pure-completer doesn't read
+		// 'engaged' off passive watching and a liked+completed item doesn't
+		// double-count to ~2.0. Clamp to 1.0 so the rate stays bounded.
+		positive := float64(state.LikeCount+state.ShareCount+state.CommentCount+state.SaveCount) +
+			0.3*float64(state.CompleteCount)
+		engagementPerItem = positive / float64(state.ItemsSeen)
+		if engagementPerItem > 1.0 {
+			engagementPerItem = 1.0
+		}
 	}
 
 	// Frustrated takes precedence — leave fast if true
@@ -1898,7 +1917,7 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		SELECT COUNT(*) FROM feed_events fe
 		WHERE fe.user_id = $1 AND fe.event_type IN ('like','comment','share','save','rewatch')`, userID).Scan(&totalEngagement)
 	db.QueryRow(`
-		SELECT COUNT(*) FROM feed_events fe
+		SELECT COUNT(DISTINCT fe.id) FROM feed_events fe
 		JOIN follows f ON f.follower_id = CAST($1 AS INT)
 		WHERE fe.user_id = $1
 		AND fe.event_type IN ('like','comment','share','save','rewatch')
@@ -2584,6 +2603,10 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		ContentID:   contentID,
 		ContentType: contentType,
 		EnergyLevel: 0.5,
+		// Default to the 'medium' label energy so energyHourMatch gets a neutral
+		// 0.55 (not 0.0 = extreme chill) for any content type that hits neither the
+		// challenge nor post branch below; both branches overwrite this.
+		EnergyLevelLabel: 0.55,
 		Category:    "general",
 		EmotionVector: make(map[string]float64),
 	}
@@ -3159,7 +3182,11 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// uncomputed field (zero value) is, which is exactly the intended behavior.
 	sd := profile.SocialDrive
 	if sd == 0 {
-		sd = getSocialDriveFallback(profile.UserID)
+		// Uncomputed profile → neutral 0.5 on the SAME followed-engagement-fraction
+		// scale SocialDrive uses. (The old getSocialDriveFallback returned an
+		// analytics ACTIVITY z-score — a different, incompatible scale — which fed a
+		// wrong socialWeightMult / >0.6 gate for these users.)
+		sd = 0.5
 	}
 	socialWeightMult := 0.7 + 0.6*sd // range 0.7 .. 1.3
 	breakdown["socialDriveMult"] = socialWeightMult
@@ -3651,12 +3678,28 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// weight (which needs live A/B): the relative shape is preserved, only the
 	// pathological total is clipped. Generous cap so normal scoring is untouched.
 	const maxJackpotBonus = 0.60
-	if jackpot := variableReward + reentryBonus + momentumBonus + streakBonus; jackpot > maxJackpotBonus {
-		scale := maxJackpotBonus / jackpot
-		variableReward *= scale
-		reentryBonus *= scale
-		momentumBonus *= scale
-		streakBonus *= scale
+	// Cap on the POSITIVE sum only — momentumBonus can be negative (loss-streak
+	// challenge penalty, -0.12), and scaling a negative member by scale<1 would
+	// WEAKEN that penalty exactly when positive rewards stack (the same anti-
+	// pattern the behavioral cap was rewritten to avoid). Scale only positives.
+	posJackpot := 0.0
+	for _, b := range []float64{variableReward, reentryBonus, momentumBonus, streakBonus} {
+		if b > 0 {
+			posJackpot += b
+		}
+	}
+	if posJackpot > maxJackpotBonus {
+		scale := maxJackpotBonus / posJackpot
+		capPosJ := func(v float64) float64 {
+			if v > 0 {
+				return v * scale
+			}
+			return v
+		}
+		variableReward = capPosJ(variableReward)
+		reentryBonus = capPosJ(reentryBonus)
+		momentumBonus = capPosJ(momentumBonus)
+		streakBonus = capPosJ(streakBonus)
 		breakdown["jackpotCapScale"] = scale
 		// Write the CAPPED values back so the LTR/watch-ratio heads (which read the
 		// breakdown as their feature vector) learn against the SAME contribution
@@ -3849,6 +3892,14 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 			// the mood-transition signal for them and damp it for steady users.
 			// Bounded 0.85x..1.15x. (This dim was computed+persisted but unused.)
 			moodBonus *= 0.85 + 0.30*profile.MoodVolatility
+			// Re-clamp to the declared ceiling — the 1.15x amplification can push a
+			// maxed ±moodTransitionMaxBonus past the bound it was clamped to inside
+			// moodTransitionBonus.
+			if moodBonus > moodTransitionMaxBonus {
+				moodBonus = moodTransitionMaxBonus
+			} else if moodBonus < -moodTransitionMaxBonus {
+				moodBonus = -moodTransitionMaxBonus
+			}
 			if moodBonus != 0 {
 				breakdown["moodTransitionBonus"] = moodBonus
 				finalScore += moodBonus
@@ -3906,6 +3957,14 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		finalScore = 0
 	}
 	finalScore *= negMult
+
+	// Final NaN/Inf guard: a single non-finite finalScore poisons the sort
+	// comparator and corrupts the ENTIRE feed ordering (the wilsonLowerBound NaN
+	// class). The <0 clamp above does NOT catch NaN (NaN<0 is false), so guard
+	// explicitly here — any non-finite term anywhere upstream collapses to 0.
+	if math.IsNaN(finalScore) || math.IsInf(finalScore, 0) {
+		finalScore = 0
+	}
 
 	breakdown["baseScore"] = baseScore
 	breakdown["finalScore"] = finalScore

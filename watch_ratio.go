@@ -156,8 +156,18 @@ func wrObserve(cohort Cohort, breakdown map[string]float64, watchRatio01, weight
 	if watchRatio01 > 1 {
 		watchRatio01 = 1
 	}
+	// Clamp the IPW weight to [0.25, 4.0] exactly like ltrObserveWeighted. The raw
+	// 1/positionPropensity (composed with up to 2x skip-latency) can reach ~33-66
+	// for deep positions, which would spike the effective learning rate and
+	// saturate/destabilize the regression at the warmup boundary.
 	if weight <= 0 {
 		weight = 1.0
+	}
+	if weight < 0.25 {
+		weight = 0.25
+	}
+	if weight > 4.0 {
+		weight = 4.0
 	}
 	wrEnsureLoaded()
 	watchRatio.mu.Lock()
