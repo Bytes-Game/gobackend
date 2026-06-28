@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"hash/fnv"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -286,12 +287,24 @@ func updateUserEmbedding(userID string, contentVec []float64, label float64) {
 // and on hard delete. Best-effort — a Redis blip just means the cached
 // value lives until its 6h TTL expires naturally.
 func invalidateContentEmbedding(contentID string) {
-	if rdb == nil || contentID == "" {
+	if contentID == "" {
 		return
 	}
-	_ = rdb.Del(rctx, contentEmbedRedisKey+contentID).Err()
-	if metricEmbedCacheHits != nil {
-		metricEmbedCacheHits.WithLabelValues("invalidate").Inc()
+	if rdb != nil {
+		_ = rdb.Del(rctx, contentEmbedRedisKey+contentID).Err()
+		if metricEmbedCacheHits != nil {
+			metricEmbedCacheHits.WithLabelValues("invalidate").Inc()
+		}
+	}
+	// Also NULL the stored pgvector embedding so the backfill worker recomputes it
+	// — it only processes rows WHERE embedding IS NULL, so dropping just the Redis
+	// cache left the ANN serving a STALE vector after a metadata edit (the new
+	// category/emotion/energy never reached pgvector). contentID is a challenge id
+	// here; the UPDATE is a no-op for non-challenge ids.
+	if pgvectorAvailable && db != nil {
+		if _, err := strconv.Atoi(contentID); err == nil {
+			_, _ = db.Exec(`UPDATE challenges SET embedding = NULL WHERE id = $1`, contentID)
+		}
 	}
 }
 

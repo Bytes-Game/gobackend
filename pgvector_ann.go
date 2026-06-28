@@ -112,6 +112,20 @@ func sourceEmbeddingANN(userID string, limit int) []HomeFeedItem {
 	if userEmbeddingIsCold(uv) {
 		return nil
 	}
+	// The stored ANN vectors are the STABLE embedding (buildContentEmbeddingStable
+	// — dynamic recency/popularity dims excluded), but the user EMA was trained on
+	// full vectors that INCLUDE those dims (applyDynamicEmbedFeatures sets v[2]
+	// recency, v[3] popularity). Project the query into the same stable subspace
+	// (zero dims 2-3, re-normalize) so the cosine ANN compares like dimensions;
+	// otherwise the user's recency/popularity components match absent counterparts
+	// and distort similarity. Recency/popularity already enter ranking via the
+	// freshness/trending bonuses. Copy first — never mutate the cached EMA.
+	if len(uv) > 3 {
+		q := append([]float64(nil), uv...)
+		q[2] = 0
+		q[3] = 0
+		uv = l2norm(q)
+	}
 	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
