@@ -56,6 +56,10 @@ type SessionState struct {
 	SkipStreak      int                `json:"skipStreak"`      // Consecutive skips — resistance signal
 	LikeCount       int                `json:"likeCount"`
 	ShareCount      int                `json:"shareCount"`
+	CompleteCount   int                `json:"completeCount"`   // full watches — strong positive engagement
+	CommentCount    int                `json:"commentCount"`
+	SaveCount       int                `json:"saveCount"`
+	LastCreditedItems int              `json:"lastCreditedItems"` // ItemsSeen at last mood/strategy crediting — avoids re-crediting the same window on repeated app_background
 	CategoriesSeen  map[string]int     `json:"categoriesSeen"`  // category -> count (saturation tracking)
 	CreatorsSeen    map[string]int     `json:"creatorsSeen"`    // creatorId -> count (diversity)
 	LastEmotions    []string           `json:"lastEmotions"`    // Last ~10 items, ONE negative-priority emotion each (wellbeing spiral detection)
@@ -869,29 +873,34 @@ func updateSessionFromEvent(event FeedEvent) {
 			// Tier 1.2: stamp a last_session_end so the next session's ranker
 			// can apply the session-continuity dampener.
 			go RecordSessionEnd(state.UserID)
-			// Revive the learned mood-transition loop: credit the moods the user
-			// moved through this session, rewarded by whether it went well.
-			// Without this call recordSessionMoodOutcome had ZERO callers, so the
-			// learned graph was never written and moodTransitionBonus ran on
-			// hand-coded seed priors forever.
-			if state.DetectedMood != "" && len(state.LastMoodEmotions) > 0 {
-				// Train on LastMoodEmotions (first/dominant emotion per item) — the
-				// SAME key moodTransitionBonus queries at serve time. (LastEmotions
-				// is negative-priority and is for wellbeing, a different consumer.)
-				recordSessionMoodOutcome(state.DetectedMood, state.LastMoodEmotions, sessionWasPositive(state))
+			// Credit mood + strategy outcomes ONCE per batch of new activity. A
+			// user who repeatedly background/foregrounds must NOT re-credit the same
+			// overlapping window each time — that double-trained the mood graph and
+			// the strategy/Thompson bandit off one session. Only credit if new items
+			// were consumed since the last crediting.
+			if state.ItemsSeen > state.LastCreditedItems {
+				// Revive the learned mood-transition loop: credit the moods the user
+				// moved through this session, rewarded by whether it went well.
+				if state.DetectedMood != "" && len(state.LastMoodEmotions) > 0 {
+					// Train on LastMoodEmotions (first/dominant emotion per item) — the
+					// SAME key moodTransitionBonus queries at serve time. (LastEmotions
+					// is negative-priority and is for wellbeing, a different consumer.)
+					recordSessionMoodOutcome(state.DetectedMood, state.LastMoodEmotions, sessionWasPositive(state))
+				}
+				// Credit the in-flight strategy's outcome at session end too —
+				// recordStrategyOutcome otherwise only runs on the rare
+				// resistance-driven mid-session switch, so the strategy-success
+				// history and the Thompson bandit it feeds learned only from
+				// frustrated sessions (loss-biased). Use a FRESH profile copy:
+				// recordStrategyOutcome mutates+saves it, so we must never hand it
+				// the shared cached profile.
+				punlock := profileKeyLocks.lock(state.UserID)
+				if p, perr := loadUserProfile(state.UserID); perr == nil && p != nil {
+					recordStrategyOutcome(state, p)
+				}
+				punlock()
+				state.LastCreditedItems = state.ItemsSeen
 			}
-			// Credit the in-flight strategy's outcome at session end too —
-			// recordStrategyOutcome otherwise only runs on the rare
-			// resistance-driven mid-session switch, so the strategy-success
-			// history and the Thompson bandit it feeds learned only from
-			// frustrated sessions (loss-biased). Use a FRESH profile copy:
-			// recordStrategyOutcome mutates+saves it, so we must never hand it
-			// the shared cached profile.
-			punlock := profileKeyLocks.lock(state.UserID)
-			if p, perr := loadUserProfile(state.UserID); perr == nil && p != nil {
-				recordStrategyOutcome(state, p)
-			}
-			punlock()
 		case "app_foreground":
 			// User came back. If they were backgrounded, count it.
 			// Note: if they were away > sessionTimeout (30 min), the client rotates
@@ -918,7 +927,16 @@ func updateSessionFromEvent(event FeedEvent) {
 		return
 	}
 
-	state.TotalWatchMs += event.WatchDurationMs
+	// Accumulate watch time ONLY on genuine watch events. The old unconditional
+	// add double-counted: a single item fires a "view" (carrying the watch/dwell
+	// time) AND a "complete" (carrying the full duration again) AND taps, so the
+	// same watch was summed 2-3×, inflating TotalWatchMs. Count the view's watch
+	// plus genuine re-watch time; exclude "complete" (a duplicate of the view) and
+	// taps (like/share/save/comment) which carry no distinct watch.
+	switch event.EventType {
+	case "view", "rewatch", "loop", "scroll_back", "seek_back":
+		state.TotalWatchMs += event.WatchDurationMs
+	}
 
 	// ItemsSeen is incremented per IMPRESSION (view/skip/not_interested) in the
 	// switch below — NOT here on every event. Counting it per event made one
@@ -1029,11 +1047,15 @@ func updateSessionFromEvent(event FeedEvent) {
 		state.DopamineBudget = math.Max(0, state.DopamineBudget-dopamineSkipDrain)
 	case "like", "share", "save", "comment":
 		state.SkipStreak = 0 // Positive engagement resets skip streak
-		if event.EventType == "like" {
+		switch event.EventType {
+		case "like":
 			state.LikeCount++
-		}
-		if event.EventType == "share" {
+		case "share":
 			state.ShareCount++
+		case "save":
+			state.SaveCount++
+		case "comment":
+			state.CommentCount++
 		}
 		// Positive engagement gives small dopamine refill
 		state.DopamineBudget = math.Min(1.0, state.DopamineBudget+0.02)
@@ -1047,6 +1069,7 @@ func updateSessionFromEvent(event FeedEvent) {
 		state.DopamineBudget = math.Min(1.0, state.DopamineBudget+0.08)
 	case "complete":
 		state.SkipStreak = 0
+		state.CompleteCount++ // full watch — strong positive (feeds detectMood 'engaged')
 		// No dopamine refill here — the paired `view` event (proportional to
 		// completion, below) is the canonical watch-satisfaction signal.
 		// Refilling here too double-counted the same watch (view+complete = +0.06).
@@ -1340,7 +1363,13 @@ func detectMood(state *SessionState) string {
 	}
 	engagementPerItem := 0.0
 	if state.ItemsSeen > 0 {
-		engagementPerItem = float64(state.LikeCount+state.ShareCount) / float64(state.ItemsSeen)
+		// Include completions/comments/saves, not just likes+shares, so the
+		// 'engaged' mood matches its docstring ("completions + likes"). These are
+		// now tracked on SessionState; omitting them made 'engaged' nearly
+		// unreachable for users who complete/save rather than like.
+		positive := state.LikeCount + state.ShareCount + state.CompleteCount +
+			state.CommentCount + state.SaveCount
+		engagementPerItem = float64(positive) / float64(state.ItemsSeen)
 	}
 
 	// Frustrated takes precedence — leave fast if true
