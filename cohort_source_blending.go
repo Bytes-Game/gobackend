@@ -131,18 +131,29 @@ func effectiveSourceWeights(cohort Cohort) map[string]float64 {
 	rewards := cohortBlend.rewards[cohort]
 	cohortBlend.mu.RUnlock()
 
-	// Adjust each source's default by its reward EMA (clamped exponent).
+	// Center the per-source reward on the cross-source MEAN before exp(), so the
+	// neutral point (mul≈1.0, default budget) is "this cohort's AVERAGE source",
+	// not the absolute reward-zero. The rewards are asymmetric (+1.0 positive /
+	// -0.4 negative), so an EMA of 0 corresponds to only a ~29% positive rate —
+	// meaning almost every realistic source netted a positive EMA and got boosted
+	// ABOVE default, making the "neutral" reference wrong. Centering on the mean
+	// makes above-average sources gain budget and below-average ones lose it,
+	// while renormalization preserves the same relative ordering.
+	meanReward := 0.0
+	if rewards != nil {
+		for src := range defaultSourceWeights {
+			meanReward += rewards[src]
+		}
+		meanReward /= float64(len(defaultSourceWeights))
+	}
+	// Adjust each source's default by its mean-centered reward EMA.
 	totalRaw := 0.0
 	for src, defWeight := range defaultSourceWeights {
 		mul := 1.0
 		if rewards != nil {
-			// The reward EMA averages values in {+1.0, -0.4}, so it always lives
-			// in [-0.4, 1.0]; the old ±1.5 clamp here was dead code that could
-			// never fire. exp() of that range is ~[0.67, 2.72] — a sane budget
-			// multiplier — and expSafe (bandit.go) is overflow-guarded regardless,
-			// so no clamp is needed. Documented so the floor math below can be
-			// reasoned about against the true realized range.
-			mul = expSafe(rewards[src])
+			// expSafe (bandit.go) is overflow-guarded; the realized EMA range is
+			// [-0.4, 1.0] so centered values stay small and need no extra clamp.
+			mul = expSafe(rewards[src] - meanReward)
 		}
 		raw := defWeight * mul
 		// NO floor here — the floor must hold on the FINAL (post-normalization)

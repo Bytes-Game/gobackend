@@ -3844,12 +3844,29 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		emotions := getContentEmotions(cs.ContentID, cs.ContentType)
 		if len(emotions) > 0 {
 			moodBonus := moodTransitionBonus(session.DetectedMood, emotions)
+			// MoodVolatility consumption: a moody user (high engagement variance
+			// across sessions) benefits more from mood-aware sequencing, so amplify
+			// the mood-transition signal for them and damp it for steady users.
+			// Bounded 0.85x..1.15x. (This dim was computed+persisted but unused.)
+			moodBonus *= 0.85 + 0.30*profile.MoodVolatility
 			if moodBonus != 0 {
 				breakdown["moodTransitionBonus"] = moodBonus
 				finalScore += moodBonus
 			}
 		}
 	}
+
+	// === PERSONALITY-FIT: AttentionSpan + BingeIntensity (previously unused dims) ===
+	// Both key off how well content SUSTAINS a watch (its global completion rate):
+	// a deep watcher (high AttentionSpan) and a binger (high BingeIntensity) are
+	// nudged toward content that holds attention; skimmers/casual viewers toward
+	// punchier content. Bounded interaction terms (~±0.04 and ±0.0275) — a nudge,
+	// not a capsize, matching the engine's bounded-bonus philosophy. Wires these
+	// computed-but-unused dims into ranking (their designed intent).
+	sustain := cs.AvgCompletionRate - 0.5
+	personaBonus := (profile.AttentionSpan-0.5)*sustain*0.16 + (profile.BingeIntensity-0.5)*sustain*0.11
+	breakdown["personaBonus"] = personaBonus
+	finalScore += personaBonus
 
 	// ── SESSION CONTINUITY FACTOR (Tier 1.5) ──
 	// Short gap since last session → dampen the "fresh-start" boosts (unseen,
