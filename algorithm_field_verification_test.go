@@ -240,7 +240,7 @@ func TestAlgorithm_AllFields_CollectExpectedData(t *testing.T) {
 	t.Run("watchRatioTraining", func(t *testing.T) {
 		bd := map[string]float64{"quality": 0.9, "freshness": 0.5}
 		for i := 0; i < wrMinSamples+5; i++ {
-			wrObserve(CohortEngaged, bd, 0.82)
+			wrObserve(CohortEngaged, bd, 0.82, 1.0)
 		}
 		watchRatio.mu.RLock()
 		m := watchRatio.byCoh[CohortEngaged]

@@ -965,6 +965,19 @@ func updateSessionFromEvent(event FeedEvent) {
 		go ltrObserveEventWithLatency(event.UserID, event.ContentType, event.ContentID, label, watchRatio, latencyMs)
 	}
 
+	// The watch-ratio REGRESSION head wants the full [0,1] completion
+	// distribution, but ltrLabelForEvent (a BINARY classifier gate) rejects
+	// mid-band views (0.2 ≤ completion < 0.8), so the regression only ever saw
+	// 0.0/1.0 targets — censored into a classifier, defeating its purpose. Train
+	// it directly (non-destructively) on any mid-band view the binary gate
+	// rejected; the ok=true extremes already train it via the path above, so the
+	// !ok guard prevents double-training.
+	if event.EventType == "view" && event.CompletionRate > 0 {
+		if _, ok := ltrLabelForEvent(event.EventType, event.CompletionRate); !ok {
+			go wrObserveEvent(event.UserID, event.ContentType, event.ContentID, event.CompletionRate)
+		}
+	}
+
 	// Mine negative feedback into UserProfile so blocks/unfollows/skips
 	// don't just penalize — they also sharpen the user's preference vector.
 	if isMineableNegative(event.EventType, event.CompletionRate) {

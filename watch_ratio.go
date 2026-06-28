@@ -139,9 +139,14 @@ func wrPredictBonus(cohort Cohort, breakdown map[string]float64) float64 {
 // per-cohort weights. Watch ratio must be in [0, 1]; out-of-range values
 // are clamped.
 //
+// weight is the inverse-propensity (position) weight — the watch-ratio head
+// MUST apply the same IPW correction the LTR head does (1/positionPropensity),
+// or position-confounded watch ratios (head slots are watched more) bias the
+// regression. Pass 1.0 when no correction applies.
+//
 // The loss is MSE on sigmoid(z) vs target; gradient is (sigmoid(z)-target)
 // times the feature value. L2 shrink keeps weights bounded against drift.
-func wrObserve(cohort Cohort, breakdown map[string]float64, watchRatio01 float64) {
+func wrObserve(cohort Cohort, breakdown map[string]float64, watchRatio01, weight float64) {
 	if breakdown == nil {
 		return
 	}
@@ -150,6 +155,9 @@ func wrObserve(cohort Cohort, breakdown map[string]float64, watchRatio01 float64
 	}
 	if watchRatio01 > 1 {
 		watchRatio01 = 1
+	}
+	if weight <= 0 {
+		weight = 1.0
 	}
 	wrEnsureLoaded()
 	watchRatio.mu.Lock()
@@ -167,8 +175,8 @@ func wrObserve(cohort Cohort, breakdown map[string]float64, watchRatio01 float64
 	}
 	pred := 1.0 / (1.0 + math.Exp(-z))
 	err := pred - watchRatio01
-	// Decaying learning rate: 1 / sqrt(1 + samples/100)
-	lr := wrLearningRate / math.Sqrt(1.0+float64(m.Samples)/100.0)
+	// Decaying learning rate, scaled by the IPW weight (position correction).
+	lr := weight * wrLearningRate / math.Sqrt(1.0+float64(m.Samples)/100.0)
 	for _, k := range ltrFeatureKeys {
 		if v, ok := breakdown[k]; ok {
 			m.Weights[k] = m.Weights[k]*0.9995 - lr*err*v
@@ -215,7 +223,12 @@ func wrObserveEvent(userID, contentType, contentID string, watchRatio01 float64)
 	if json.Unmarshal([]byte(s), &payload) != nil {
 		return
 	}
-	wrObserve(Cohort(payload.C), payload.B, watchRatio01)
+	// Apply the same inverse-propensity (position) weight LTR uses.
+	weight := 1.0
+	if payload.P > 0 {
+		weight = 1.0 / positionPropensity(payload.P)
+	}
+	wrObserve(Cohort(payload.C), payload.B, watchRatio01, weight)
 }
 
 // startWatchRatioFlusher persists dirty cohort weights every 5 minutes.

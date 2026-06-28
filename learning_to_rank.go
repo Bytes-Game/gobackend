@@ -353,9 +353,10 @@ func ltrObserveEventWithLatency(userID, contentType, contentID string, label, wa
 		predictedPre = plattCalibrate(z)
 	}
 	ltrObserveWeighted(Cohort(payload.C), payload.B, label, weight)
-	// Train the watch-ratio head on the same breakdown when we have a ratio.
+	// Train the watch-ratio head on the same breakdown when we have a ratio,
+	// applying the SAME inverse-propensity weight so it isn't position-confounded.
 	if watchRatio >= 0 {
-		wrObserve(Cohort(payload.C), payload.B, watchRatio)
+		wrObserve(Cohort(payload.C), payload.B, watchRatio, weight)
 	}
 	// Per-creator residual calibration: compare the PRE-update predicted Platt-
 	// calibrated probability against the actual binary outcome and EMA the

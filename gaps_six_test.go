@@ -135,8 +135,8 @@ func TestGap3_WatchRatioMonotonicAfterTraining(t *testing.T) {
 	resetWR()
 	// Train with strong signal: high quality → high watch ratio, low → low.
 	for i := 0; i < 80; i++ {
-		wrObserve(CohortEngaged, map[string]float64{"quality": 1.0}, 0.95)
-		wrObserve(CohortEngaged, map[string]float64{"quality": -1.0}, 0.10)
+		wrObserve(CohortEngaged, map[string]float64{"quality": 1.0}, 0.95, 1.0)
+		wrObserve(CohortEngaged, map[string]float64{"quality": -1.0}, 0.10, 1.0)
 	}
 	highQ := wrPredictBonus(CohortEngaged, map[string]float64{"quality": 1.0})
 	lowQ := wrPredictBonus(CohortEngaged, map[string]float64{"quality": -1.0})
