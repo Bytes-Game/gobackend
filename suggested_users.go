@@ -376,6 +376,10 @@ func pullCategoryCandidates(userID string, excluded map[string]bool, limit int) 
 	}
 	weights := make([]cw, 0, len(profile.CategoryAffinity))
 	for k, v := range profile.CategoryAffinity {
+		if v <= 0 {
+			continue // skip neutral/DISLIKED categories — mined negatives (down to
+			// -0.5) must never be picked as a "preferred" category for suggestions.
+		}
 		weights = append(weights, cw{cat: k, w: v})
 	}
 	sort.Slice(weights, func(i, j int) bool { return weights[i].w > weights[j].w })

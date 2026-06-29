@@ -125,6 +125,13 @@ func sourceEmbeddingANN(userID string, limit int) []HomeFeedItem {
 		q[2] = 0
 		q[3] = 0
 		uv = l2norm(q)
+		// Re-check coldness: a user whose EMA mass was entirely in the dynamic
+		// dims (2,3) zeroes out here, and l2norm passes a zero vector through —
+		// an all-zero query makes cosine distance (<=>) undefined. Bail to the
+		// caller's fallback instead.
+		if userEmbeddingIsCold(uv) {
+			return nil
+		}
 	}
 	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,

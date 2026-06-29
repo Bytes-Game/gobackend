@@ -34,7 +34,7 @@ const (
 	negFeedbackUnfollowNudge     = 0.10
 	negFeedbackNotInterestedNudge = 0.08
 	negFeedbackSkipNudge         = 0.03  // weakest — skips are noisy
-	negFeedbackBounceNudge       = 0.04
+	// (no bounce nudge — bounce isn't a feed_event on this path; see nudgeForEvent)
 	// Cap on per-field deltas applied per call so a burst of one event type
 	// can't completely overwrite the profile in a single tick.
 	negFeedbackMaxDeltaPerTick = 0.30
@@ -142,9 +142,11 @@ func nudgeForEvent(eventType string) float64 {
 		return negFeedbackNotInterestedNudge
 	case "skip":
 		return negFeedbackSkipNudge
-	case "bounce":
-		return negFeedbackBounceNudge
 	}
+	// No "bounce" case: bounce is not a feed_event type that reaches this path
+	// (MarkBounce writes recent_bounces directly), and the bounce signal is
+	// already captured via bouncePenalty + the aggregator's CategoryAffinity
+	// decay — mining it here too would triple-count it.
 	return 0
 }
 

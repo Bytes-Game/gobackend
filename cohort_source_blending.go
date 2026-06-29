@@ -139,12 +139,21 @@ func effectiveSourceWeights(cohort Cohort) map[string]float64 {
 	// ABOVE default, making the "neutral" reference wrong. Centering on the mean
 	// makes above-average sources gain budget and below-average ones lose it,
 	// while renormalization preserves the same relative ordering.
+	// Default-weight-WEIGHTED mean (not a plain average): budget is allocated in
+	// proportion to defaultWeight*exp(reward-mean), so to make a source AT the
+	// cohort mean land on exactly its default budget the centering reference must
+	// be weighted the same way. An unweighted mean leaves a small Jensen bias
+	// (totalRaw≠1, so the average source drifts slightly off default).
 	meanReward := 0.0
 	if rewards != nil {
-		for src := range defaultSourceWeights {
-			meanReward += rewards[src]
+		totalDef := 0.0
+		for src, defWeight := range defaultSourceWeights {
+			meanReward += defWeight * rewards[src]
+			totalDef += defWeight
 		}
-		meanReward /= float64(len(defaultSourceWeights))
+		if totalDef > 0 {
+			meanReward /= totalDef
+		}
 	}
 	// Adjust each source's default by its mean-centered reward EMA.
 	totalRaw := 0.0

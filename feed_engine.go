@@ -1781,7 +1781,11 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 			var completion float64
 			rows.Scan(&evType, &completion, &cType, &cID, &cCat, &pCat, &subject, &prefix, &caption)
 
-			// Prefer stored category, fall back to inference
+			// Prefer stored category, fall back to inference. Lowercase the key so
+			// CategoryAffinity/AvoidedCategories use the SAME canonical casing the
+			// negative-profile miner writes (it lowercases) and the serve-time
+			// lookup below (now lowercased) — otherwise a mixed-case category would
+			// split into non-matching keys and mined negatives would never apply.
 			category := cCat
 			if category == "" {
 				category = pCat
@@ -1789,6 +1793,7 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 			if category == "" {
 				category = inferCategory(subject, prefix, caption)
 			}
+			category = strings.ToLower(category)
 			eventTypes[evType]++
 
 			// Weight events by effort/intent with granular watch time tiers
@@ -1866,32 +1871,37 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		// (or one mis-categorized item via the ~70% inferCategory heuristic)
 		// blacklist a whole category and force relevance to -0.3 for all of its
 		// content. -2.5 needs corroboration (a not_interested PLUS a skip, or
-		// several skips) before avoiding.
-		for k, v := range categoryScores {
-			if v < -2.5 {
-				p.AvoidedCategories = append(p.AvoidedCategories, k)
-			}
-		}
-		// Union with previously-mined avoided categories (dedup) so a recompute
-		// doesn't drop dislikes the current window didn't reproduce. The realtime
-		// miner can still remove an entry (it won't be in preservedAvoided then).
+		// several skips) before avoiding. Union with previously-mined avoided
+		// categories so a recompute doesn't drop dislikes this window didn't
+		// reproduce (the realtime miner can still remove one — it won't be in
+		// preservedAvoided then). ORDER: preserved (older) FIRST, this window's
+		// fresh dislikes LAST, then keep-last-20 — so the trim evicts STALE entries,
+		// never the freshly-corroborated ones (the previous order evicted the fresh).
 		{
-			seen := make(map[string]bool, len(p.AvoidedCategories))
-			for _, c := range p.AvoidedCategories {
-				seen[c] = true
+			windowSeen := make(map[string]bool)
+			for k, v := range categoryScores {
+				if v < -2.5 {
+					windowSeen[k] = true
+				}
 			}
+			merged := make([]string, 0, len(preservedAvoided)+len(windowSeen))
+			seen := make(map[string]bool)
 			for _, c := range preservedAvoided {
-				if !seen[c] {
-					p.AvoidedCategories = append(p.AvoidedCategories, c)
+				if !seen[c] && !windowSeen[c] { // window copy is appended last
+					merged = append(merged, c)
 					seen[c] = true
 				}
 			}
-			// Bound the list like the realtime miner does (it trims to 20) so the
-			// union path can't grow it without limit across recomputes. Keep the
-			// most-recently-added (the window's fresh dislikes are appended last).
-			if len(p.AvoidedCategories) > 20 {
-				p.AvoidedCategories = p.AvoidedCategories[len(p.AvoidedCategories)-20:]
+			for k := range windowSeen {
+				if !seen[k] {
+					merged = append(merged, k)
+					seen[k] = true
+				}
 			}
+			if len(merged) > 20 {
+				merged = merged[len(merged)-20:]
+			}
+			p.AvoidedCategories = merged
 		}
 
 		// Average completion rate
@@ -2139,7 +2149,9 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		for h, cats := range hourCatCount {
 			best, bestN := "", 0
 			for cat, n := range cats {
-				if n > bestN {
+				// Deterministic tie-break by category name (Go map iteration order is
+				// random, so ties otherwise flip the stored category between recomputes).
+				if n > bestN || (n == bestN && cat < best) {
 					best, bestN = cat, n
 				}
 			}
@@ -2203,10 +2215,11 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		}
 	}
 	// Re-apply mined negative emotion preferences the >=0 clamp discarded, where
-	// the window produced no positive evidence for that emotion (mirrors the
-	// CategoryAffinity negative-merge above).
+	// the window produced no MEANINGFUL positive evidence for that emotion. Uses
+	// the SAME cur<0.15 threshold as the CategoryAffinity negative-merge above so a
+	// single weak positive emotion event can't wipe a sustained mined dislike.
 	for k, negv := range preservedNegEmotion {
-		if cur, ok := p.EmotionPreference[k]; !ok || cur <= 0 {
+		if cur, ok := p.EmotionPreference[k]; !ok || cur < 0.15 { // same threshold as CategoryAffinity merge
 			p.EmotionPreference[k] = negv
 		}
 	}
@@ -3034,16 +3047,20 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	breakdown["energyLevel"] = cs.EnergyLevel
 
 	// ── RELEVANCE ──
-	// Category match from user profile affinity
+	// Category match from user profile affinity. Lowercase to match the canonical
+	// casing CategoryAffinity/AvoidedCategories are stored under (miner + profile
+	// build both lowercase) — a mixed-case cs.Category would otherwise never hit a
+	// mined affinity/dislike.
+	catKey := strings.ToLower(cs.Category)
 	relevance := 0.0
-	if affinity, ok := profile.CategoryAffinity[cs.Category]; ok {
+	if affinity, ok := profile.CategoryAffinity[catKey]; ok {
 		relevance = affinity
 	}
 	// Negative signal: avoided category. Use the MORE negative of the flat
 	// avoided penalty and any already-set mined negative affinity, so the -0.3
 	// doesn't MASK a stronger mined dislike (e.g. a -0.5 negative affinity).
 	for _, avoided := range profile.AvoidedCategories {
-		if avoided == cs.Category {
+		if avoided == catKey {
 			if relevance > -0.3 {
 				relevance = -0.3 // Active penalty
 			}
@@ -3734,9 +3751,9 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// so genuinely new content keeps its full push. Generous cap: most of these
 	// are 0 on a normal item, so only pathological stacks are clipped.
 	const maxBehavioralBonus = 0.70
-	// Sum only the POSITIVE contributors: several of these can be negative
+	// Sum only the POSITIVE contributors: some of these can be negative
 	// (wellbeingBonus spiral penalty -0.15, energy-mismatch hourBonus down to
-	// -0.04, collabBonus has no lower clamp). Scaling a negative member by
+	// -0.04). Scaling a negative member by
 	// scale<1 would weaken a penalty exactly when many positives stack — the
 	// opposite of the cap's intent. So we cap the positive sum and scale only
 	// positive members, leaving penalties intact.
@@ -3914,8 +3931,21 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// punchier content. Bounded interaction terms (~±0.04 and ±0.0275) — a nudge,
 	// not a capsize, matching the engine's bounded-bonus philosophy. Wires these
 	// computed-but-unused dims into ranking (their designed intent).
-	sustain := cs.AvgCompletionRate - 0.5
-	personaBonus := (profile.AttentionSpan-0.5)*sustain*0.16 + (profile.BingeIntensity-0.5)*sustain*0.11
+	// Only when completion is actually MEASURED. cs.AvgCompletionRate defaults to 0
+	// for zero-view (new) content, which would read as sustain=-0.5 and PENALIZE
+	// fresh uploads for deep-watcher cohorts — the opposite of the new-content push.
+	// Unmeasured content stays neutral (personaBonus=0). Clamp to a hard ±0.08 so a
+	// malformed/out-of-range completion can't blow the "bounded" claim.
+	personaBonus := 0.0
+	if cs.AvgCompletionRate > 0 {
+		sustain := cs.AvgCompletionRate - 0.5
+		if sustain > 0.5 {
+			sustain = 0.5
+		} else if sustain < -0.5 {
+			sustain = -0.5
+		}
+		personaBonus = (profile.AttentionSpan-0.5)*sustain*0.16 + (profile.BingeIntensity-0.5)*sustain*0.11
+	}
 	breakdown["personaBonus"] = personaBonus
 	finalScore += personaBonus
 
@@ -4970,12 +5000,6 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// blending step. Reuse to avoid recomputing.
 	cohort := preCohort
 
-	// Step 6.8: Cold-start bootstrap mix — for users with very few events,
-	// sprinkle high-Wilson-score "known bangers" into the head of the feed
-	// so first impressions land before personalized signals can warm up.
-	// No-op for non-cold users; safe to call unconditionally.
-	scored = applyBootstrapMixIfCold(userID, scored, getUserEventCount(userID))
-
 	// Step 6.9: Cross-page session diversity penalty — if this user has
 	// already seen this category multiple times this session (page 2+),
 	// downweight repeats so successive pages stay varied even when MMR
@@ -5002,6 +5026,16 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// Step 7: Compose feed with slot pattern
 	pattern := getFeedPattern(profile, session, limit)
 	composed := composeFeed(scored, pattern, followingSet)
+
+	// Step 7.0: Cold-start bootstrap mix — sprinkle high-Wilson-score "known
+	// bangers" into the head for users with very few events. Done AFTER composeFeed
+	// (like surprise injection below): when it ran pre-composition, composeFeed
+	// re-bucketed and re-sorted everything by Score, and the bootstrap items —
+	// which carry a Wilson score (~0..0.3), a different scale than finalScore
+	// (~0..3) and no breakdown — sorted to the BOTTOM and never reached the head,
+	// so the entire cold-start injection was a no-op. Injecting on the final
+	// ordered list preserves its head positions. No-op for non-cold users.
+	composed = applyBootstrapMixIfCold(userID, composed, getUserEventCount(userID))
 
 	// Step 7.1: Surprise injection — at most 1 wildcard from a category the user
 	// has zero affinity for. Filter-bubble defense, gated by a small probability

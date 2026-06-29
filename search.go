@@ -449,6 +449,9 @@ func topCategories(profile *UserProfile, n int) []string {
 	}
 	weights := make([]cw, 0, len(profile.CategoryAffinity))
 	for k, v := range profile.CategoryAffinity {
+		if v <= 0 {
+			continue // skip neutral/mined-negative categories — never a "preferred" cat
+		}
 		weights = append(weights, cw{cat: k, w: v})
 	}
 	sort.Slice(weights, func(i, j int) bool { return weights[i].w > weights[j].w })
