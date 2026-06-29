@@ -319,6 +319,10 @@ func aggregateUserImpressions(userID string) error {
 		if stats.Count < minCategoryImpressions {
 			continue // Not enough data to draw conclusion
 		}
+		// Canonical lowercase key — CategoryAffinity/AvoidedCategories must use ONE
+		// casing across all writers (miner, computeUserProfile) and serve-time
+		// readers, or a mixed-case category splits into non-matching keys.
+		category = strings.ToLower(category)
 
 		// Match the serve-time scorer's asymmetry so the two paths agree on what
 		// counts as a dislike: the negative/decay/avoided decisions use the

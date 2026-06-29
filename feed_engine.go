@@ -889,6 +889,10 @@ func updateSessionFromEvent(event FeedEvent) {
 					// SAME key moodTransitionBonus queries at serve time. (LastEmotions
 					// is negative-priority and is for wellbeing, a different consumer.)
 					recordSessionMoodOutcome(state.DetectedMood, state.LastMoodEmotions, sessionWasPositive(state))
+					// Clear after crediting so a later background/foreground cycle
+					// trains the mood graph only on NEWLY-watched items, not the same
+					// overlapping window again (delta crediting).
+					state.LastMoodEmotions = state.LastMoodEmotions[:0]
 				}
 				// Credit the in-flight strategy's outcome at session end too —
 				// recordStrategyOutcome otherwise only runs on the rare
@@ -1101,13 +1105,13 @@ func updateSessionFromEvent(event FeedEvent) {
 			state.SkipStreak = 0 // Watching most of content = not skipping
 		}
 		// Dopamine tracks watch satisfaction PROPORTIONAL to completion, and only
-		// when completion is known (>0): a near-full watch refills (~+0.03 at
-		// 100%), a low-completion one drains (~-0.04 at 10%, ~-0.05 at 0%), 0.6 is
-		// neutral. A zero/unknown-completion view is left neutral so a measurement
-		// gap — or a true bounce, which fires its own skip event — isn't double-
-		// penalized. No sharp 0.8 cliff: a genuinely-watched 0.79 view drains far
-		// less than a 0.05 abandon, yet low-completion views still drain near the
-		// old flat rate so fatigue detection isn't blunted. This is the SOLE
+		// when completion is known (>0): neutral at 0.8 (dopamineNeutralCompletion),
+		// a full watch refills ~+0.02, completion 0.5 drains ~-0.03 (== the old flat
+		// rate), 0.0 drains ~-0.08. A zero/unknown-completion view is left neutral so
+		// a measurement gap — or a true bounce, which fires its own skip event —
+		// isn't double-penalized. No sharp cliff, yet partial views still drain near
+		// the old flat rate so fatigue detection isn't blunted (see the constant
+		// block at dopamineNeutralCompletion/dopamineViewSlope). This is the SOLE
 		// watch-satisfaction refill now (the `complete` event no longer refills).
 		if event.CompletionRate > 0 {
 			delta := (event.CompletionRate - dopamineNeutralCompletion) * dopamineViewSlope
@@ -1479,9 +1483,17 @@ func pickAlternateStrategy(state *SessionState, profile *UserProfile) string {
 		strategyMoodMatch, strategyCalming, strategyFreshBlood,
 	)
 
-	// Filter to untried
+	// Filter to untried AND dedup — a strategy can be appended by several rules
+	// (e.g. strategyCalming from a frustrated mood, low EnergyPreference, and the
+	// fallback pool). Duplicates skew the bandit's soft-mix / weighted pick, giving
+	// a coincidentally-listed-twice strategy ~2x probability. Keep first occurrence.
 	filtered := make([]string, 0, len(candidates))
+	seenStrat := make(map[string]bool, len(candidates))
 	for _, c := range candidates {
+		if seenStrat[c] {
+			continue
+		}
+		seenStrat[c] = true
 		if untried(c) {
 			filtered = append(filtered, c)
 		}
@@ -1888,6 +1900,14 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 			seen := make(map[string]bool)
 			for _, c := range preservedAvoided {
 				if !seen[c] && !windowSeen[c] { // window copy is appended last
+					// Drop a stale avoided category the user has RE-ENGAGED with: if
+					// this window rebuilt a meaningfully POSITIVE affinity for it, the
+					// old dislike shouldn't keep forcing relevance to -0.3. (Without
+					// this the union re-added avoided entries unconditionally and never
+					// cleared them on recovery.)
+					if aff, ok := p.CategoryAffinity[c]; ok && aff >= 0.15 {
+						continue
+					}
 					merged = append(merged, c)
 					seen[c] = true
 				}
@@ -3091,7 +3111,7 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// count as maximally novel.
 	creatorAff := getCreatorAffinity(profile.UserID, cs.CreatorID)
 	novelty := 0.0
-	if _, seen := profile.CategoryAffinity[cs.Category]; !seen {
+	if _, seen := profile.CategoryAffinity[catKey]; !seen {
 		novelty = 0.6 // New category = exploration opportunity
 	}
 	isNewCreator := creatorAff == 0 // no prior engagement with this creator
@@ -3268,7 +3288,7 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	if profile.EgoSensitivity > 0.5 {
 		// Boost: content from lower-league creators (easy comparison),
 		// content in categories they're good at
-		if affinity, ok := profile.CategoryAffinity[cs.Category]; ok && affinity > 0.7 {
+		if affinity, ok := profile.CategoryAffinity[catKey]; ok && affinity > 0.7 {
 			egoBonus = 0.15 * profile.EgoSensitivity
 		}
 		// Content from lower leagues = "I'm better than this" feeling
@@ -3553,7 +3573,7 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 			// ~27% of items that pass quality threshold get a jackpot boost
 			variableReward = 0.20
 			// Extra boost if it matches user preference — makes the "jackpot" feel earned
-			if affinity, ok := profile.CategoryAffinity[cs.Category]; ok && affinity > 0.5 {
+			if affinity, ok := profile.CategoryAffinity[catKey]; ok && affinity > 0.5 {
 				variableReward = 0.28
 			}
 		}
@@ -4978,6 +4998,18 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// NaN/Inf sanitize BEFORE the sort. scoreForUser guards its own return, but
+	// terms added afterward — the two-tower embedBonus (sim from a corrupt/non-unit
+	// embedding) and the refresh jitter/demotion above — can still introduce a
+	// non-finite Score, and a single NaN poisons the comparator and corrupts the
+	// WHOLE ordering. Collapse any non-finite score to 0 here so the guard truly
+	// covers everything the sort sees.
+	for i := range scored {
+		if math.IsNaN(scored[i].Score) || math.IsInf(scored[i].Score, 0) {
+			scored[i].Score = 0
+		}
+	}
+
 	// Sort by score for initial ranking. SliceStable so equal-scored items
 	// (e.g. penalized tail items the clamp floors to 0) keep a deterministic
 	// candidate order instead of being shuffled arbitrarily by the sort.
@@ -5111,6 +5143,9 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		for _, it := range tail {
 			cid := getItemID(it.Item)
 			cscore := getContentScore(cid, it.Item.Type)
+			if cscore == nil {
+				continue // content vanished between scoring and here — avoid a nil deref panic
+			}
 			if cscore.Category != "" {
 				session.LastCategories = append(session.LastCategories, cscore.Category)
 			}

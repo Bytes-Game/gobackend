@@ -127,8 +127,17 @@ func observeSourceReward(cohort Cohort, source string, reward float64) {
 func effectiveSourceWeights(cohort Cohort) map[string]float64 {
 	cohortBlendEnsureLoaded()
 	out := make(map[string]float64, len(defaultSourceWeights))
+	// COPY the per-cohort reward map under the lock — the old code released the
+	// RLock and then read `rewards[src]` in the loops below, racing with
+	// observeSourceReward's concurrent writes to the same map (a data race that can
+	// panic the feed request). Snapshot only the keys we read.
+	rewards := make(map[string]float64, len(defaultSourceWeights))
 	cohortBlend.mu.RLock()
-	rewards := cohortBlend.rewards[cohort]
+	if m := cohortBlend.rewards[cohort]; m != nil {
+		for src := range defaultSourceWeights {
+			rewards[src] = m[src]
+		}
+	}
 	cohortBlend.mu.RUnlock()
 
 	// Center the per-source reward on the cross-source MEAN before exp(), so the
@@ -144,26 +153,23 @@ func effectiveSourceWeights(cohort Cohort) map[string]float64 {
 	// cohort mean land on exactly its default budget the centering reference must
 	// be weighted the same way. An unweighted mean leaves a small Jensen bias
 	// (totalRaw≠1, so the average source drifts slightly off default).
+	// rewards is the snapshot above (never nil; empty for an untrained cohort →
+	// meanReward 0, mul 1, uniform defaults).
 	meanReward := 0.0
-	if rewards != nil {
-		totalDef := 0.0
-		for src, defWeight := range defaultSourceWeights {
-			meanReward += defWeight * rewards[src]
-			totalDef += defWeight
-		}
-		if totalDef > 0 {
-			meanReward /= totalDef
-		}
+	totalDef := 0.0
+	for src, defWeight := range defaultSourceWeights {
+		meanReward += defWeight * rewards[src]
+		totalDef += defWeight
+	}
+	if totalDef > 0 {
+		meanReward /= totalDef
 	}
 	// Adjust each source's default by its mean-centered reward EMA.
 	totalRaw := 0.0
 	for src, defWeight := range defaultSourceWeights {
-		mul := 1.0
-		if rewards != nil {
-			// expSafe (bandit.go) is overflow-guarded; the realized EMA range is
-			// [-0.4, 1.0] so centered values stay small and need no extra clamp.
-			mul = expSafe(rewards[src] - meanReward)
-		}
+		// expSafe (bandit.go) is overflow-guarded; the realized EMA range is
+		// [-0.4, 1.0] so centered values stay small and need no extra clamp.
+		mul := expSafe(rewards[src] - meanReward)
 		raw := defWeight * mul
 		// NO floor here — the floor must hold on the FINAL (post-normalization)
 		// weight. Enforcing it pre-normalization let the renormalize below shrink
