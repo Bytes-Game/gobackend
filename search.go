@@ -351,9 +351,14 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 		// Personalization — only when we have a profile.
 		personalBoost := 0.0
 		if profile != nil {
+			// Lowercase to match the canonical casing CategoryAffinity / topCategories
+			// are stored under (all writers force lowercase). Reading the raw DB
+			// ch.Category would deterministically miss a mixed-case category and zero
+			// the personalization.
+			cat := strings.ToLower(ch.Category)
 			// Category-affinity match.
-			if ch.Category != "" {
-				if w, ok := profile.CategoryAffinity[ch.Category]; ok && w > 0 {
+			if cat != "" {
+				if w, ok := profile.CategoryAffinity[cat]; ok && w > 0 {
 					personalBoost += w * 0.15
 				}
 			}
@@ -363,9 +368,9 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 			}
 			// Top-category override — even if the affinity weight is small,
 			// reward results in the user's known interests.
-			if ch.Category != "" {
+			if cat != "" {
 				for _, tc := range topCats {
-					if tc == ch.Category {
+					if tc == cat {
 						personalBoost += 0.05
 						break
 					}

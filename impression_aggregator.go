@@ -174,7 +174,12 @@ func getImpressionStats(userID string) (byCategory map[string]*ImpressionStats, 
 		if len(parts) < 6 {
 			continue
 		}
-		category := parts[0]
+		// Lowercase at the SOURCE so 'Comedy' and 'comedy' merge into one bucket.
+		// Otherwise mixed-case records split: each partial count is gated
+		// independently by minCategoryImpressions, and both buckets write to the
+		// same lowercase CategoryAffinity key — the second read-after-write applies
+		// decay/boost TWICE in one cycle. Canonical lowercase is the key everywhere.
+		category := strings.ToLower(parts[0])
 		dwellMs, _ := strconv.Atoi(parts[1])
 		creator := parts[3]
 
@@ -319,10 +324,9 @@ func aggregateUserImpressions(userID string) error {
 		if stats.Count < minCategoryImpressions {
 			continue // Not enough data to draw conclusion
 		}
-		// Canonical lowercase key — CategoryAffinity/AvoidedCategories must use ONE
-		// casing across all writers (miner, computeUserProfile) and serve-time
-		// readers, or a mixed-case category splits into non-matching keys.
-		category = strings.ToLower(category)
+		// category is already canonical-lowercase (bucketed lowercase in
+		// getImpressionStats), so CategoryAffinity/AvoidedCategories keys match the
+		// miner / computeUserProfile / serve casing and buckets don't split.
 
 		// Match the serve-time scorer's asymmetry so the two paths agree on what
 		// counts as a dislike: the negative/decay/avoided decisions use the

@@ -74,10 +74,17 @@ type SessionState struct {
 	// === Mood & strategy memory (new) ===
 	DetectedMood           string    `json:"detectedMood"`           // "energetic","chill","frustrated","bored","engaged","curious"
 	TriedStrategies        []string  `json:"triedStrategies"`        // Strategies already used this session — don't repeat failed ones
-	StrategyStartItems     int       `json:"strategyStartItems"`     // ItemsSeen when current strategy began
+	StrategyStartItems     int       `json:"strategyStartItems"`     // ItemsSeen when current strategy began — COOLDOWN anchor (advances only on a real switch / session start)
 	StrategyStartLikes     int       `json:"strategyStartLikes"`     // LikeCount when current strategy began
 	StrategyStartShares    int       `json:"strategyStartShares"`    // ShareCount when current strategy began
 	StrategyStartSkips     int       `json:"strategyStartSkips"`     // SkipCount when current strategy began
+	// Separate window baseline for recordStrategyOutcome — advances at EACH credit
+	// (session-end/background) so re-crediting measures only the new delta, WITHOUT
+	// resetting the StrategyStartItems cooldown anchor above.
+	StrategyWindowStartItems  int `json:"strategyWindowStartItems"`
+	StrategyWindowStartLikes  int `json:"strategyWindowStartLikes"`
+	StrategyWindowStartShares int `json:"strategyWindowStartShares"`
+	StrategyWindowStartSkips  int `json:"strategyWindowStartSkips"`
 	LastStrategySwitchAt   time.Time `json:"lastStrategySwitchAt"`   // Prevent thrashing (min 6 items between switches)
 	// === Lifecycle tracking ===
 	LastActivityAt    time.Time `json:"lastActivityAt"`    // Updated on every event — used to compute true session length
@@ -901,19 +908,24 @@ func updateSessionFromEvent(event FeedEvent) {
 				// frustrated sessions (loss-biased). Use a FRESH profile copy:
 				// recordStrategyOutcome mutates+saves it, so we must never hand it
 				// the shared cached profile.
+				credited := false
 				punlock := profileKeyLocks.lock(state.UserID)
 				if p, perr := loadUserProfile(state.UserID); perr == nil && p != nil {
-					recordStrategyOutcome(state, p)
+					credited = recordStrategyOutcome(state, p)
 				}
 				punlock()
-				// Advance the strategy-window start to the current counters so a later
-				// background/foreground cycle credits only the NEW window, not the
-				// already-credited overlapping one (delta crediting — recordStrategyOutcome
-				// measures ItemsSeen-StrategyStartItems et al.).
-				state.StrategyStartItems = state.ItemsSeen
-				state.StrategyStartLikes = state.LikeCount
-				state.StrategyStartShares = state.ShareCount
-				state.StrategyStartSkips = state.SkipCount
+				// Advance ONLY the window baseline (not the StrategyStartItems COOLDOWN
+				// anchor), and ONLY when a credit actually happened. This gives delta
+				// crediting on later background cycles WITHOUT (a) resetting the
+				// resistance-switch cooldown for a still-resisting returning user, or
+				// (b) dropping accumulated credit when small bursts (<3 items) never
+				// reach the crediting threshold.
+				if credited {
+					state.StrategyWindowStartItems = state.ItemsSeen
+					state.StrategyWindowStartLikes = state.LikeCount
+					state.StrategyWindowStartShares = state.ShareCount
+					state.StrategyWindowStartSkips = state.SkipCount
+				}
 				state.LastCreditedItems = state.ItemsSeen
 			}
 		case "app_foreground":
@@ -1250,6 +1262,11 @@ func switchStrategy(state *SessionState, newStrategy string) {
 	state.StrategyStartLikes = state.LikeCount
 	state.StrategyStartShares = state.ShareCount
 	state.StrategyStartSkips = state.SkipCount
+	// Window baseline resets WITH the cooldown anchor on a real switch.
+	state.StrategyWindowStartItems = state.ItemsSeen
+	state.StrategyWindowStartLikes = state.LikeCount
+	state.StrategyWindowStartShares = state.ShareCount
+	state.StrategyWindowStartSkips = state.SkipCount
 	// Skip streak resets — fresh slate for the new strategy
 	state.SkipStreak = 0
 	state.BounceStreak = 0
@@ -1271,17 +1288,19 @@ func switchStrategy(state *SessionState, newStrategy string) {
 // Score is (engagement delta - skip delta) / items seen under this strategy,
 // clamped to [-1, 1]. Persisted so future sessions prefer strategies that
 // worked before for THIS specific user.
-func recordStrategyOutcome(state *SessionState, profile *UserProfile) {
+// Returns true iff it actually credited (>=3 items in the window) — callers use
+// this to advance the window baseline only on a real credit.
+func recordStrategyOutcome(state *SessionState, profile *UserProfile) bool {
 	if profile == nil || state.CurrentStrategy == "" {
-		return
+		return false
 	}
-	items := state.ItemsSeen - state.StrategyStartItems
+	items := state.ItemsSeen - state.StrategyWindowStartItems
 	if items < 3 {
-		return // Not enough signal
+		return false // Not enough signal
 	}
-	likes := state.LikeCount - state.StrategyStartLikes
-	shares := state.ShareCount - state.StrategyStartShares
-	skips := state.SkipCount - state.StrategyStartSkips
+	likes := state.LikeCount - state.StrategyWindowStartLikes
+	shares := state.ShareCount - state.StrategyWindowStartShares
+	skips := state.SkipCount - state.StrategyWindowStartSkips
 	// Weighted: shares count most (intent), likes next, skips subtract
 	delta := (float64(shares)*1.5 + float64(likes) - float64(skips)*0.8) / float64(items)
 	if delta > 1.0 {
@@ -1307,6 +1326,7 @@ func recordStrategyOutcome(state *SessionState, profile *UserProfile) {
 	reward := (delta + 1.0) / 2.0
 	b := loadBandit(profile.UserID)
 	b.updateArm(profile.UserID, state.CurrentStrategy, reward)
+	return true
 }
 
 // detectResistance analyzes session patterns to determine if the user is
