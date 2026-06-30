@@ -3323,10 +3323,12 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		if affinity, ok := profile.CategoryAffinity[catKey]; ok && affinity > 0.7 {
 			egoBonus = 0.15 * profile.EgoSensitivity
 		}
-		// Content from lower leagues = "I'm better than this" feeling
+		// Content from lower leagues = "I'm better than this" feeling.
+		// getUserLeague is CACHED (5-min TTL) — this runs once per candidate in the
+		// scoring hot loop, and the user's league is the same for every candidate;
+		// the old inline per-candidate SELECT was N redundant DB queries per feed.
 		leagueTier := map[string]int{"Bronze": 1, "Silver": 2, "Gold": 3, "Platinum": 4, "Diamond": 5}
-		var userLeague string
-		db.QueryRow(`SELECT league FROM users WHERE CAST(id AS TEXT) = $1`, profile.UserID).Scan(&userLeague)
+		userLeague := getUserLeague(profile.UserID)
 		if leagueTier[userLeague] > leagueTier[cs.CreatorLeague] {
 			egoBonus += 0.1 * profile.EgoSensitivity
 		}
@@ -5186,6 +5188,15 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		if len(tail) > 6 {
 			tail = tail[len(tail)-6:]
 		}
+		// Locked read-modify-write: SmartFeedHandler's only session WRITE is this
+		// LastCategories/LastCreators tally (+ the request's TZOffsetMin). The early
+		// read above is a stale snapshot by now; saving it directly would CLOBBER
+		// concurrent event/impression updates (ItemsSeen, DopamineBudget, SkipStreak)
+		// that landed since. Re-read fresh under the SAME lock updateSessionFromEvent
+		// uses and apply only the fields this handler owns.
+		sunlock := sessionKeyLocks.lock(userID + ":" + session.SessionID)
+		fresh := getSessionState(userID, session.SessionID)
+		fresh.TZOffsetMin = session.TZOffsetMin
 		for _, it := range tail {
 			cid := getItemID(it.Item)
 			cscore := getContentScore(cid, it.Item.Type)
@@ -5193,19 +5204,20 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 				continue // content vanished between scoring and here — avoid a nil deref panic
 			}
 			if cscore.Category != "" {
-				session.LastCategories = append(session.LastCategories, cscore.Category)
+				fresh.LastCategories = append(fresh.LastCategories, cscore.Category)
 			}
 			if cscore.CreatorID != "" {
-				session.LastCreators = append(session.LastCreators, cscore.CreatorID)
+				fresh.LastCreators = append(fresh.LastCreators, cscore.CreatorID)
 			}
 		}
-		if n := len(session.LastCategories); n > 6 {
-			session.LastCategories = session.LastCategories[n-6:]
+		if n := len(fresh.LastCategories); n > 6 {
+			fresh.LastCategories = fresh.LastCategories[n-6:]
 		}
-		if n := len(session.LastCreators); n > 6 {
-			session.LastCreators = session.LastCreators[n-6:]
+		if n := len(fresh.LastCreators); n > 6 {
+			fresh.LastCreators = fresh.LastCreators[n-6:]
 		}
-		saveSessionState(session)
+		saveSessionState(fresh)
+		sunlock()
 	}
 
 	// Pagination

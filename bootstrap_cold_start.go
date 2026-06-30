@@ -317,6 +317,26 @@ func startBootstrapPoolWorker() {
 // fine because cold-status only changes when a user crosses the threshold.
 var userEventCountCache = NewSignalCache[int](5 * time.Minute)
 
+// userLeagueCache caches the user's league for egoBonus, which is read once PER
+// CANDIDATE in the scoring hot loop — the value is per-user (identical across all
+// candidates in a request), so a per-candidate SELECT was N redundant queries.
+var userLeagueCache = NewSignalCache[string](5 * time.Minute)
+
+func getUserLeague(userID string) string {
+	if userID == "" || db == nil {
+		return ""
+	}
+	if v, ok := userLeagueCache.Get(userID); ok {
+		return v
+	}
+	var league string
+	if err := db.QueryRow(`SELECT league FROM users WHERE CAST(id AS TEXT) = $1`, userID).Scan(&league); err != nil {
+		return ""
+	}
+	userLeagueCache.Set(userID, league)
+	return league
+}
+
 func getUserEventCount(userID string) int {
 	if userID == "" || db == nil {
 		return 0
