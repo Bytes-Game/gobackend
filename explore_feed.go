@@ -165,6 +165,14 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// NaN/Inf sanitize before the sort — a non-finite score (e.g. a NaN embedBonus
+	// from a corrupt embedding) would poison the comparator and corrupt the whole
+	// ordering. Mirrors the For You pre-sort guard.
+	for i := range scored {
+		if math.IsNaN(scored[i].Score) || math.IsInf(scored[i].Score, 0) {
+			scored[i].Score = 0
+		}
+	}
 	sort.SliceStable(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
 
 	// Seen-filter. Same graceful fallback applies — if the user has scrolled

@@ -105,10 +105,15 @@ func wrEnsureLoaded() {
 // model's mean output equals the true population mean, which is well below 0.5.
 func wrPredictBonus(cohort Cohort, breakdown map[string]float64) float64 {
 	wrEnsureLoaded()
+	// Hold the RLock through ALL reads of m (Bias, Weights map, MeanRatio,
+	// Samples). The old code released the lock and then read those, racing
+	// wrObserve's writes under the write lock — a concurrent map read/write that
+	// can panic. The body here is a few map reads + arithmetic, so the read lock
+	// is held only briefly and still allows concurrent readers.
 	watchRatio.mu.RLock()
 	m, ok := watchRatio.byCoh[cohort]
-	watchRatio.mu.RUnlock()
 	if !ok || m == nil || m.Samples < wrMinSamples {
+		watchRatio.mu.RUnlock()
 		return 0
 	}
 	z := m.Bias
@@ -117,8 +122,9 @@ func wrPredictBonus(cohort Cohort, breakdown map[string]float64) float64 {
 			z += m.Weights[k] * v
 		}
 	}
-	pred := 1.0 / (1.0 + math.Exp(-z))
 	center := m.MeanRatio
+	watchRatio.mu.RUnlock()
+	pred := 1.0 / (1.0 + math.Exp(-z))
 	if center <= 0 || center >= 1 {
 		// Only the impossible/unset boundary values (e.g. a pre-migration model
 		// with MeanRatio==0) fall back to neutral. A GENUINE low-but-nonzero mean

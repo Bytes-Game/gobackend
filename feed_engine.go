@@ -5013,6 +5013,13 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	if refresh && page == 1 {
 		prevTops := loadPrevRefreshTops(userID)
 		for i := range scored {
+			// Do NOT jitter/demote a hard-blocked or just-bounced item (negMult==0,
+			// score floored to 0 in scoreForUser). A +jitter would re-float it into
+			// the feed, breaking the "blocked = exactly 0" invariant the floor
+			// protects.
+			if scored[i].ScoreBreakdown != nil && scored[i].ScoreBreakdown["negativeMult"] == 0 {
+				continue
+			}
 			scored[i].Score += (rand.Float64() - 0.5) * 0.20
 			id := getItemID(scored[i].Item)
 			if id == "" {
