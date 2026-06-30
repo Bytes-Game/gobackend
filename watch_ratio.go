@@ -126,7 +126,19 @@ func wrPredictBonus(cohort Cohort, breakdown map[string]float64) float64 {
 		// restore the persistent-negative-bonus bias the EMA centering removes.
 		center = 0.5
 	}
-	delta := (pred - center) * 2.0
+	// Piecewise-normalize around the center so delta spans [-1,1] using EACH side's
+	// own range. The old (pred-center)*2.0 over-saturated: with center=0.3 it hit
+	// +1 already at pred=0.8 (everything above maxed out) while the negative side
+	// only reached -0.6 — asymmetric and lossy. Now pred=1→+1, pred=center→0,
+	// pred=0→-1, with no early saturation.
+	delta := 0.0
+	if pred >= center {
+		if center < 1 {
+			delta = (pred - center) / (1 - center)
+		}
+	} else if center > 0 {
+		delta = (pred - center) / center
+	}
 	if delta > 1 {
 		delta = 1
 	} else if delta < -1 {

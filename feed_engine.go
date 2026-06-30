@@ -906,6 +906,14 @@ func updateSessionFromEvent(event FeedEvent) {
 					recordStrategyOutcome(state, p)
 				}
 				punlock()
+				// Advance the strategy-window start to the current counters so a later
+				// background/foreground cycle credits only the NEW window, not the
+				// already-credited overlapping one (delta crediting — recordStrategyOutcome
+				// measures ItemsSeen-StrategyStartItems et al.).
+				state.StrategyStartItems = state.ItemsSeen
+				state.StrategyStartLikes = state.LikeCount
+				state.StrategyStartShares = state.ShareCount
+				state.StrategyStartSkips = state.SkipCount
 				state.LastCreditedItems = state.ItemsSeen
 			}
 		case "app_foreground":
@@ -968,7 +976,11 @@ func updateSessionFromEvent(event FeedEvent) {
 	if label, ok := ltrLabelForEvent(event.EventType, event.CompletionRate); ok {
 		watchRatio := -1.0
 		switch event.EventType {
-		case "view", "complete", "skip":
+		case "complete":
+			watchRatio = 1.0 // a completion IS a full watch — don't train the head toward 0 when the client omits completion_rate
+		case "skip":
+			watchRatio = 0.0
+		case "view":
 			if event.CompletionRate >= 0 {
 				watchRatio = event.CompletionRate
 			}
@@ -3965,6 +3977,13 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 			sustain = -0.5
 		}
 		personaBonus = (profile.AttentionSpan-0.5)*sustain*0.16 + (profile.BingeIntensity-0.5)*sustain*0.11
+		// Explicit hard clamp the comment promises — defends against a malformed
+		// profile (AttentionSpan/BingeIntensity outside [0,1]) blowing the bound.
+		if personaBonus > 0.08 {
+			personaBonus = 0.08
+		} else if personaBonus < -0.08 {
+			personaBonus = -0.08
+		}
 	}
 	breakdown["personaBonus"] = personaBonus
 	finalScore += personaBonus

@@ -36,7 +36,8 @@ import (
 
 const (
 	moodTransitionMaxBonus = 0.12
-	moodMinTransitions     = 8 // need at least this many observations to predict
+	moodMinTransitions     = 8  // need at least this many observations to predict
+	moodLearnedConfidenceK = 12 // pseudo-count: learned overrides the seed only as observations accumulate
 )
 
 // moodHealthyNext is the seed graph — sensible priors that get OVERRIDDEN
@@ -173,9 +174,16 @@ func moodTransitionBonus(currentMood string, contentEmotions []string) float64 {
 	}
 
 	if hasLearned {
-		// Center reward on 0.5 → bonus in ±max range, blended 70/30 learned/seed.
+		// Center reward on 0.5 → bonus in ±max range.
 		learnedComp := (emaReward - 0.5) * 2.0 * moodTransitionMaxBonus
-		blended := learnedComp*0.7 + seedBonus*0.3
+		// CONFIDENCE-weight learned vs seed by observation count, instead of a flat
+		// 70/30. Just crossing moodMinTransitions with NEUTRAL data (emaReward≈0.5 →
+		// learnedComp≈0) used to drop the bonus to 0.3·seed — i.e. BELOW the pure
+		// seed prior — punishing a healthy transition for having a little neutral
+		// evidence. Now sparse learned stays near the seed; only abundant evidence
+		// pulls toward the learned value.
+		conf := float64(count) / float64(count+moodLearnedConfidenceK)
+		blended := seedBonus*(1-conf) + learnedComp*conf
 		if blended > moodTransitionMaxBonus {
 			blended = moodTransitionMaxBonus
 		}

@@ -310,7 +310,17 @@ func exploreScore(cs *ContentScore, ns *negativeSignals) (float64, map[string]fl
 	negMult := negativeCreatorPenalty(ns, cs.CreatorID) *
 		bouncePenalty(ns, cs.ContentType, cs.ContentID)
 	breakdown["negativeMult"] = negMult
+	// Floor to 0 BEFORE the multiplicative penalty: battleBoost can make score
+	// negative, and a negative score * negMult<1 becomes LESS negative — i.e. the
+	// penalty would RAISE a blocked/bounced item's rank. A penalty multiplier must
+	// only ever attenuate toward 0. (Same fix as scoreForUser.)
+	if score < 0 {
+		score = 0
+	}
 	score *= negMult
+	if math.IsNaN(score) || math.IsInf(score, 0) {
+		score = 0
+	}
 
 	return score, breakdown
 }
