@@ -146,6 +146,12 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	if refresh && page == 1 {
 		prevTops := loadPrevRefreshTops(userID)
 		for i := range scored {
+			// Don't jitter a hard-blocked/bounced item (negMult==0, floored to 0):
+			// +jitter would re-float it into the explore feed (which serves the
+			// sorted slice directly). Same guard as the For You path.
+			if scored[i].ScoreBreakdown != nil && scored[i].ScoreBreakdown["negativeMult"] == 0 {
+				continue
+			}
 			scored[i].Score += (rand.Float64() - 0.5) * 0.20
 			id := getItemID(scored[i].Item)
 			if id == "" {

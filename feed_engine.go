@@ -74,10 +74,7 @@ type SessionState struct {
 	// === Mood & strategy memory (new) ===
 	DetectedMood           string    `json:"detectedMood"`           // "energetic","chill","frustrated","bored","engaged","curious"
 	TriedStrategies        []string  `json:"triedStrategies"`        // Strategies already used this session — don't repeat failed ones
-	StrategyStartItems     int       `json:"strategyStartItems"`     // ItemsSeen when current strategy began — COOLDOWN anchor (advances only on a real switch / session start)
-	StrategyStartLikes     int       `json:"strategyStartLikes"`     // LikeCount when current strategy began
-	StrategyStartShares    int       `json:"strategyStartShares"`    // ShareCount when current strategy began
-	StrategyStartSkips     int       `json:"strategyStartSkips"`     // SkipCount when current strategy began
+	StrategyStartItems     int       `json:"strategyStartItems"`     // ItemsSeen when current strategy began — COOLDOWN anchor only (advances only on a real switch / session start; the engagement counters moved to StrategyWindowStart* below)
 	// Separate window baseline for recordStrategyOutcome — advances at EACH credit
 	// (session-end/background) so re-crediting measures only the new delta, WITHOUT
 	// resetting the StrategyStartItems cooldown anchor above.
@@ -1258,10 +1255,7 @@ func updateSessionFromEvent(event FeedEvent) {
 func switchStrategy(state *SessionState, newStrategy string) {
 	state.CurrentStrategy = newStrategy
 	state.LastStrategySwitchAt = time.Now()
-	state.StrategyStartItems = state.ItemsSeen
-	state.StrategyStartLikes = state.LikeCount
-	state.StrategyStartShares = state.ShareCount
-	state.StrategyStartSkips = state.SkipCount
+	state.StrategyStartItems = state.ItemsSeen // cooldown anchor
 	// Window baseline resets WITH the cooldown anchor on a real switch.
 	state.StrategyWindowStartItems = state.ItemsSeen
 	state.StrategyWindowStartLikes = state.LikeCount
@@ -3647,7 +3641,10 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// penalize showing more of it. This is the "I keep ignoring dance content" signal.
 	impressionPenalty := 0.0
 	if byCat, ok := impressionStatsCache.Get(profile.UserID); ok {
-		if stats, exists := byCat[cs.Category]; exists && stats.Count >= minCategoryImpressions {
+		// Use the canonical-lowercase catKey: the impression aggregator now buckets
+		// (and this cache is populated) under lowercase, so a raw-case cs.Category
+		// ('Comedy') would miss the 'comedy' bucket and silently skip the penalty.
+		if stats, exists := byCat[catKey]; exists && stats.Count >= minCategoryImpressions {
 			if br := stats.ShrunkBounceRate(); br > bounceRateNegativeThreshold {
 				// PENALTY path uses the SHRUNK rate so n=5 can't "prove" a dislike
 				// and bury a whole category on noise. Capped at -0.25.
@@ -4941,12 +4938,16 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// sensitive scoring sees it too. Previously this ran after scoring+MMR and
 	// the override was ignored until resistance climbed on its own — so the loop
 	// only got fixed on the NEXT page, defeating the 30-sec retention goal.
+	loopBroke := false
+	var loopStrat string
 	if diag := detectLoop(session); diag.Stuck && diag.SuggestedStrat != "" {
 		session.CurrentStrategy = diag.SuggestedStrat
 		session.TriedStrategies = append(session.TriedStrategies, diag.SuggestedStrat)
 		if session.ResistanceLevel < 2 {
 			session.ResistanceLevel = 2
 		}
+		loopBroke = true
+		loopStrat = diag.SuggestedStrat
 		if metricSignalCapture != nil {
 			metricSignalCapture.WithLabelValues("loop_" + diag.Reason).Inc()
 		}
@@ -5197,6 +5198,27 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		sunlock := sessionKeyLocks.lock(userID + ":" + session.SessionID)
 		fresh := getSessionState(userID, session.SessionID)
 		fresh.TZOffsetMin = session.TZOffsetMin
+		// Persist the serve-time anti-loop override so the loop-break survives into
+		// the NEXT page (its entire purpose — see the detectLoop block above). Only
+		// when the loop actually fired this request, so we don't clobber a
+		// more-recent event-handler strategy switch on `fresh`. ResistanceLevel
+		// takes the max so we never LOWER an event-driven escalation.
+		if loopBroke {
+			fresh.CurrentStrategy = loopStrat
+			if fresh.ResistanceLevel < 2 {
+				fresh.ResistanceLevel = 2
+			}
+			already := false
+			for _, s := range fresh.TriedStrategies {
+				if s == loopStrat {
+					already = true
+					break
+				}
+			}
+			if !already {
+				fresh.TriedStrategies = append(fresh.TriedStrategies, loopStrat)
+			}
+		}
 		for _, it := range tail {
 			cid := getItemID(it.Item)
 			cscore := getContentScore(cid, it.Item.Type)
