@@ -81,30 +81,45 @@ func plattCalibrate(score float64) float64 {
 // plattFit runs a few epochs of batch SGD on the buffer to re-estimate A,B.
 // Safe to call repeatedly; no-op if buffer is too small.
 func plattFit() {
+	// Snapshot the buffer + current params under a BRIEF lock, then run the
+	// 50-epoch SGD (and the Redis persist) WITHOUT holding the lock. The old code
+	// held platt.mu.Lock() across the entire fit + Redis round-trip, so every
+	// hot-path plattCalibrate RLock stalled for the whole duration. Copying the
+	// buffer also removes the data race with concurrent plattRecord appends that
+	// re-slice platt.samples out from under the SGD loop.
 	platt.mu.Lock()
-	defer platt.mu.Unlock()
 	if len(platt.samples) < calibMinSamples {
+		platt.mu.Unlock()
 		return
 	}
+	samples := make([]calibSample, len(platt.samples))
+	copy(samples, platt.samples)
 	a, b := platt.A, platt.B
+	platt.mu.Unlock()
+
 	const epochs = 50
 	const lr = 0.05
 	for e := 0; e < epochs; e++ {
 		var ga, gb float64
-		for _, s := range platt.samples {
+		for _, s := range samples {
 			p := 1.0 / (1.0 + math.Exp(-(a*s.X + b)))
 			err := p - s.Y
 			ga += err * s.X
 			gb += err
 		}
-		inv := 1.0 / float64(len(platt.samples))
+		inv := 1.0 / float64(len(samples))
 		a -= lr * ga * inv
 		b -= lr * gb * inv
 	}
+
+	// Publish the new fit under a brief lock only.
+	platt.mu.Lock()
 	platt.A = a
 	platt.B = b
 	platt.fitted = true
-	// Persist.
+	platt.mu.Unlock()
+
+	// Persist OUTSIDE the lock — a Redis round-trip must not block plattCalibrate.
 	if rdb != nil {
 		if js, err := json.Marshal(map[string]float64{"a": a, "b": b}); err == nil {
 			_ = rdb.Set(rctx, calibRedisKey, js, 30*24*time.Hour).Err()

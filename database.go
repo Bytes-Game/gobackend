@@ -567,6 +567,7 @@ func runMigrations() {
 	if _, err := db.Exec(`
 		CREATE EXTENSION IF NOT EXISTS vector;
 		ALTER TABLE challenges ADD COLUMN IF NOT EXISTS embedding vector(32);
+		ALTER TABLE challenges ADD COLUMN IF NOT EXISTS embedding_attempted_at TIMESTAMPTZ;
 	`); err != nil {
 		log.Printf("pgvector not enabled (%v) — embedding retrieval uses in-process cosine rerank", err)
 	} else {

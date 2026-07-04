@@ -85,7 +85,7 @@ func computeEngagementQuality(userID string) float64 {
 			(SELECT COUNT(*) FROM feed_events WHERE user_id = u.id::text AND event_type = 'complete' AND created_at > NOW() - INTERVAL '30 days') AS completes,
 			(SELECT COUNT(*) FROM feed_events WHERE user_id = u.id::text AND event_type IN ('skip','not_interested') AND created_at > NOW() - INTERVAL '30 days') AS skips,
 			(SELECT COUNT(DISTINCT session_id) FROM feed_events WHERE user_id = u.id::text AND created_at > NOW() - INTERVAL '30 days') AS sessions,
-			(SELECT COUNT(*) FROM reports WHERE target_id = u.id::text AND created_at > NOW() - INTERVAL '30 days') AS flags_against
+			(SELECT COUNT(*) FROM reports WHERE target_id = u.id::text AND target_type = 'user' AND created_at > NOW() - INTERVAL '30 days') AS flags_against
 		FROM users u
 		WHERE u.id::text = $1
 	`, userID).Scan(&ageDays, &totalEvents, &completes, &skips, &sessions, &flagsAgainst)

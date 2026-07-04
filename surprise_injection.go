@@ -87,7 +87,9 @@ func applySurpriseInjection(items []ScoredItem, profile *UserProfile, cohort Coh
 	// Build set of categories the user already engages with strongly so we
 	// can EXCLUDE them — wildcard's whole point is to surface unfamiliar
 	// ground.
-	familiarCats := make(map[string]bool, len(profile.CategoryAffinity))
+	// NOTE: no len(profile.CategoryAffinity) capacity hint here — that dereferences
+	// profile BEFORE the nil-guard below and panics when profile is nil.
+	familiarCats := make(map[string]bool)
 	if profile != nil {
 		for cat, score := range profile.CategoryAffinity {
 			if score > 0.20 {

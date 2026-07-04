@@ -119,8 +119,11 @@ func updateSessionFromImpression(event FeedEvent) {
 	} else {
 		state.BounceStreak = 0
 	}
-	// Recompute resistance level from new bounce data
+	// Recompute resistance level AND mood from new bounce data — a bounce-heavy
+	// burst with no explicit skip events would otherwise leave DetectedMood stale
+	// (frustrated never detected until an engagement event re-ran detectMood).
 	state.ResistanceLevel = detectResistance(state)
+	state.DetectedMood = detectMood(state)
 	saveSessionState(state)
 }
 

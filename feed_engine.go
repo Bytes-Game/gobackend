@@ -821,6 +821,32 @@ func persistSessionLength(state *SessionState) {
 	}
 }
 
+// persistComputedSessionStats authoritatively reconciles the two session-stat
+// columns (total_sessions, avg_session_sec) from computeUserProfile's full
+// recompute over feed_events. These columns are DELIBERATELY not written by the
+// generic saveUserProfile ON CONFLICT path: that path loads a profile, mutates
+// unrelated fields, and rewrites the whole row, which would echo a stale
+// total_sessions and silently clobber persistSessionLength's atomic +1 increment
+// (a cross-writer lost update no in-process lock can prevent, since
+// persistSessionLength writes via lock-free SQL). Ownership is therefore split:
+//   - persistSessionLength (+1 per real session end) → between-recompute freshness
+//   - computeUserProfile (COUNT DISTINCT session_id) → periodic authoritative truth
+//   - generic saveUserProfile → never touches these columns on an existing row
+//
+// A brand-new row is still seeded with them via saveUserProfile's INSERT.
+func persistComputedSessionStats(userID string, totalSessions, avgSessionSec int) {
+	if db == nil || userID == "" {
+		return
+	}
+	_, err := db.Exec(`
+		UPDATE user_profiles
+		SET total_sessions = $2, avg_session_sec = $3
+		WHERE user_id = $1`, userID, totalSessions, avgSessionSec)
+	if err != nil {
+		log.Printf("persistComputedSessionStats: %v", err)
+	}
+}
+
 // sessionWasPositive classifies a finished session as a good or bad outcome for
 // the learned mood-transition model. "Good" = the user engaged at least once,
 // wasn't skipping most of what they saw, and still had attention budget left
@@ -2473,6 +2499,10 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	}
 
 	saveUserProfile(p)
+	// saveUserProfile no longer writes total_sessions/avg_session_sec on an existing
+	// row (see persistComputedSessionStats). computeUserProfile is the authoritative
+	// source for those two columns, so reconcile them explicitly here.
+	persistComputedSessionStats(p.UserID, p.TotalSessions, p.AvgSessionSec)
 	return p, nil
 }
 
@@ -2500,9 +2530,9 @@ func saveUserProfile(p *UserProfile) {
 			$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
 		ON CONFLICT (user_id) DO UPDATE SET
 			category_affinity=$2, energy_preference=$3, social_drive=$4,
-			novelty_tolerance=$5, ego_sensitivity=$6, avg_session_sec=$7,
+			novelty_tolerance=$5, ego_sensitivity=$6,
 			active_hours=$8, preferred_creators=$9, avoided_categories=$10,
-			avg_completion_rate=$11, avg_skip_rate=$12, total_sessions=$13,
+			avg_completion_rate=$11, avg_skip_rate=$12,
 			total_watch_time_ms=$14, recent_wins=$15, recent_losses=$16,
 			last_computed_at=$17, event_count=$18,
 			category_by_hour=$19, category_by_ego=$20, emotion_preference=$21, energy_by_hour=$22,
@@ -5234,6 +5264,12 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 			fresh.StrategyWindowStartLikes = fresh.LikeCount
 			fresh.StrategyWindowStartShares = fresh.ShareCount
 			fresh.StrategyWindowStartSkips = fresh.SkipCount
+			// Reset the skip/bounce streaks too, exactly as switchStrategy does —
+			// a loop-break IS a switch, so the new strategy gets a fresh slate
+			// instead of inheriting the streak that triggered the break (which would
+			// immediately re-escalate resistance).
+			fresh.SkipStreak = 0
+			fresh.BounceStreak = 0
 		}
 		for _, it := range tail {
 			cid := getItemID(it.Item)

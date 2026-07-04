@@ -247,6 +247,12 @@ func applyBootstrapMixIfCold(userID string, primary []ScoredItem, eventCount int
 		if item.Challenge != nil && item.Challenge.CreatorID == userID {
 			continue
 		}
+		// NOTE on scale: e.Score is the Wilson lower bound on engagement rate,
+		// a probability in [0,1] — NOT on the scoreForUser finalScore scale (which
+		// is an unbounded weighted sum). It's carried here only for reference/debug.
+		// The interleave below is POSITIONAL (stride-based), so these scores are
+		// never compared against personalized finalScores. Do not re-sort the
+		// returned slice by .Score without first renormalizing the two scales.
 		bootstrap = append(bootstrap, ScoredItem{
 			Item:  item,
 			Score: e.Score,

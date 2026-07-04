@@ -9,9 +9,9 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 // PER-COHORT LEARNED SOURCE BLENDING
 //
-// `defaultSourceWeights` is a global map (recency 0.30, trending 0.15,
-// trendingRealtime 0.15, follow 0.15, collab 0.10, embedding 0.15). Same
-// for cold users and power users. But:
+// `defaultSourceWeights` is a global map (recency 0.25, trending 0.10,
+// trendingRealtime 0.15, follow 0.15, collab 0.10, embedding 0.15 — see
+// candidate_sources.go). Same for cold users and power users. But:
 //
 //   - Cold users have no follow graph → "follow" weight is wasted budget
 //   - Power users have a tight follow graph → "follow" should weigh more

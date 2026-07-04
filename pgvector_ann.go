@@ -69,7 +69,20 @@ func backfillChallengeEmbeddings(maxRows int) {
 	if !pgvectorAvailable || db == nil {
 		return
 	}
-	rows, err := db.Query(`SELECT id FROM challenges WHERE embedding IS NULL LIMIT $1`, maxRows)
+	// Only consider rows we've never attempted, or last attempted long enough ago
+	// that they may have accumulated engagement and now yield a usable fingerprint.
+	// Without this, a catalog with >=maxRows permanently-cold (all-zero) challenges
+	// re-selects and re-computes the SAME NULL rows on every 5-min tick forever —
+	// wasting getContentScore/embedding work AND head-of-line-blocking genuinely
+	// new challenges out of the LIMIT window. Newest-first so fresh content is
+	// never starved by a backlog of old cold rows.
+	rows, err := db.Query(`
+		SELECT id FROM challenges
+		WHERE embedding IS NULL
+		  AND (embedding_attempted_at IS NULL
+		       OR embedding_attempted_at < NOW() - INTERVAL '6 hours')
+		ORDER BY created_at DESC
+		LIMIT $1`, maxRows)
 	if err != nil {
 		return
 	}
@@ -88,11 +101,16 @@ func backfillChallengeEmbeddings(maxRows int) {
 		vec := l2norm(buildContentEmbeddingStable(cs, emotions))
 		// Skip all-zero vectors: cosine distance (<=>) is undefined against a
 		// zero vector. Leaving embedding NULL excludes the row from ANN until it
-		// has a usable fingerprint.
+		// has a usable fingerprint — but STAMP embedding_attempted_at so this cold
+		// row drops out of the query above for the next 6h instead of being
+		// recomputed every tick.
 		if userEmbeddingIsCold(vec) {
+			if _, err := db.Exec(`UPDATE challenges SET embedding_attempted_at = NOW() WHERE id = $1`, id); err != nil {
+				return
+			}
 			continue
 		}
-		if _, err := db.Exec(`UPDATE challenges SET embedding = $1::vector WHERE id = $2`,
+		if _, err := db.Exec(`UPDATE challenges SET embedding = $1::vector, embedding_attempted_at = NOW() WHERE id = $2`,
 			vecLiteral(vec), id); err != nil {
 			// Likely the column/extension vanished — stop hammering and let the
 			// next tick re-evaluate.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"math/rand"
 	"strconv"
 	"testing"
@@ -101,7 +102,7 @@ func TestGap2_PrunerAppliesDecay(t *testing.T) {
 	startScore := before[0].Score
 	// Apply many prune ticks (~ several half-lives worth of decay).
 	for i := 0; i < 20; i++ {
-		pruneTrendingRealtime(nil)
+		pruneTrendingRealtime(context.TODO())
 	}
 	after := fetchTrendingRealtime(5)
 	if len(after) == 0 {

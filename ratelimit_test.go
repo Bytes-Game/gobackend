@@ -32,7 +32,11 @@ func TestClientIP_Resolution(t *testing.T) {
 
 func TestRateLimiter_DistinctKeysIndependent(t *testing.T) {
 	rl := newRateLimiter(1, 2) // 1 tok/s, burst 2
-	if !rl.allow("a") || !rl.allow("a") {
+	// Bind both calls first: `!allow || !allow` would short-circuit and consume
+	// only one token when the first call fails, silently under-exercising burst 2.
+	ok1 := rl.allow("a")
+	ok2 := rl.allow("a")
+	if !ok1 || !ok2 {
 		t.Fatal("first two requests for A should pass (burst 2)")
 	}
 	if rl.allow("a") {
