@@ -514,7 +514,21 @@ func computeCreatorAffinity() (int, error) {
 		}
 		items := make([]kv, 0, len(m))
 		for k, v := range m {
-			items = append(items, kv{k, v / maxV})
+			// Creator affinity is a POSITIVE preference signal in [0,1] (see the
+			// key contract at the top of this file and signal_lookup.go). A creator
+			// with net-negative accumulated weight — skipped / marked not_interested
+			// more than engaged — must NOT be stored as an unbounded negative:
+			// maxV normalizes only the positive max, so a negative v/maxV has no
+			// floor and grows as maxV shrinks, then reaches the ranker as a
+			// floorless negative additive term (creatorAffinityBoost*cw.Affinity)
+			// that buries the item and pollutes the LTR feature vector. Net-negative
+			// creators are simply "no positive affinity"; suppression of disliked
+			// creators is the job of negativeCreatorPenalty (unfollowed ZSET) and
+			// profile mining, not this signal. Skip non-positive entries.
+			if v <= 0 {
+				continue
+			}
+			items = append(items, kv{k, v / maxV}) // v in (0, maxV] → normalized (0,1]
 		}
 		sort.Slice(items, func(i, j int) bool { return items[i].v > items[j].v })
 		if len(items) > creatorAffinityTopN {

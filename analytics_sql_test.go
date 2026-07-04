@@ -134,6 +134,19 @@ func TestComputeCreatorAffinity_RecencyAndNegatives(t *testing.T) {
 			t.Errorf("cB should be below cA after recency decay, got cA=%v cB=%v", top["cA"], cB)
 		}
 	}
+	// cC accumulated skip(-0.4)+not_interested(-1.0) = -1.4 → net-negative → must
+	// NOT be stored (dislike is not a positive-affinity signal). Before the [0,1]
+	// clamp this was stored as ~-0.42 and reached the ranker as a floorless
+	// negative additive term that buried the creator's content.
+	if cC, ok := top["cC"]; ok {
+		t.Errorf("cC is net-negative and must be absent from stored affinity, got %v", cC)
+	}
+	// Contract invariant: every stored affinity is within [0,1].
+	for creator, v := range top {
+		if v < 0 || v > 1 {
+			t.Errorf("stored affinity out of [0,1] contract: %s=%v", creator, v)
+		}
+	}
 }
 
 func TestComputeCreatorAffinity_EmptyDatasetNoWrites(t *testing.T) {

@@ -80,7 +80,20 @@ func getCreatorAffinity(userID, creatorID string) float64 {
 	if !ok {
 		return 0
 	}
-	return p.creatorAffinity[creatorID]
+	v := p.creatorAffinity[creatorID]
+	// Enforce the [0,1] contract defensively (mirrors getTieStrength's raw<=0
+	// guard above). This protects against (a) stale pre-fix Redis values — the
+	// analytics job used to store net-negative affinities, which linger under
+	// analyticsRedisTTL after this deploy until the next nightly recompute — and
+	// (b) any future regression of the source clamp. A net-negative affinity must
+	// never reach the ranker as a floorless negative additive term.
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }
 
 // getPageDwellMs returns this user's average dwell (ms) on a given page type.
