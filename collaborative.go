@@ -177,9 +177,22 @@ func getSimilarUsers(userID string) []UserSimilarity {
 	return result
 }
 
+// collabBonusCache memoizes the per-(user, content) collaborative bonus. This is
+// called once PER CANDIDATE in the scoring hot loop, so the raw SQL was N queries
+// per feed; a 2-min cache collapses repeat scoring of the same content across
+// pages/refreshes (and popular content across users' re-requests).
+var collabBonusCache = NewSignalCache[float64](2 * time.Minute)
+
 // getCollaborativeBonus returns a score bonus for content that similar users engaged with.
 // This is the "users like you also liked this" signal.
 func getCollaborativeBonus(userID, contentID, contentType string) float64 {
+	if db == nil {
+		return 0
+	}
+	ck := userID + ":" + contentType + ":" + contentID
+	if v, ok := collabBonusCache.Get(ck); ok {
+		return v
+	}
 	// Check if similar users engaged with this content
 	var weightedEngagement float64
 	err := db.QueryRow(`
@@ -207,7 +220,9 @@ func getCollaborativeBonus(userID, contentID, contentType string) float64 {
 		return 0
 	}
 	// Normalize: cap at 0.15 bonus
-	return math.Min(0.15, weightedEngagement*0.1)
+	bonus := math.Min(0.15, weightedEngagement*0.1)
+	collabBonusCache.Set(ck, bonus)
+	return bonus
 }
 
 // startSimilarityWorker runs the similarity computation periodically.

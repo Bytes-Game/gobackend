@@ -287,7 +287,10 @@ func exploreScore(cs *ContentScore, ns *negativeSignals) (float64, map[string]fl
 	// freshness signal).
 	hoursOld := 0.0
 	if !cs.CreatedAt.IsZero() {
-		hoursOld = float64(currentHours()) - float64(cs.CreatedAt.Unix())/3600.0
+		// Both terms as FRACTIONAL hours from the same Unix-seconds base. The old
+		// code mixed currentHours() (integer-truncated hours) with a fractional
+		// created-at, skewing hoursOld by up to ~1h.
+		hoursOld = float64(time.Now().Unix()-cs.CreatedAt.Unix()) / 3600.0
 	}
 	if hoursOld < 0 {
 		hoursOld = 0

@@ -110,21 +110,22 @@ func applyNegativeFeedbackToProfile(profile *UserProfile, eventType string, cs *
 
 	// 3. EnergyPreference drift away from content energy.
 	// If user negs high-energy content, push pref toward low-energy.
-	gap := cs.EnergyLevel - profile.EnergyPreference
-	if gap == 0 {
-		return
-	}
-	step := -nudge * 0.3 // small per-event nudge
-	if gap > 0 {
-		profile.EnergyPreference -= -step // move away from high → lower pref
-	} else {
-		profile.EnergyPreference += -step // move away from low → higher pref
-	}
-	if profile.EnergyPreference < 0 {
-		profile.EnergyPreference = 0
-	}
-	if profile.EnergyPreference > 1 {
-		profile.EnergyPreference = 1
+	// Skip only the energy nudge when content energy already equals preference —
+	// do NOT early-return, or the mining metric below (and any accounting) is
+	// silently dropped even though the category/emotion nudges above did fire.
+	if gap := cs.EnergyLevel - profile.EnergyPreference; gap != 0 {
+		step := -nudge * 0.3 // small per-event nudge
+		if gap > 0 {
+			profile.EnergyPreference -= -step // move away from high → lower pref
+		} else {
+			profile.EnergyPreference += -step // move away from low → higher pref
+		}
+		if profile.EnergyPreference < 0 {
+			profile.EnergyPreference = 0
+		}
+		if profile.EnergyPreference > 1 {
+			profile.EnergyPreference = 1
+		}
 	}
 
 	if metricNegProfileMine != nil {

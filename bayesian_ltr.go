@@ -142,13 +142,19 @@ func bayesianRecord(cohort Cohort, predicted, actual float64) {
 // the strictly-positive finalScore — the per-item modulation below peaks at 0.
 func bayesianUncertaintyBonus(cohort Cohort, centeredScore float64, rnd *rand.Rand) float64 {
 	bayesianEnsureLoaded()
+	// Hold the RLock through ALL reads of s (N, and stddev() which reads N + M2).
+	// The old code released the lock and then read s.N / s.stddev(), racing
+	// bayesianRecord's Welford writes to s.N/s.M2 under the write lock — a data
+	// race that can read torn values or panic. Snapshot N + std under the lock.
 	bayesianLTR.mu.RLock()
 	s, ok := bayesianLTR.byCoh[cohort]
-	bayesianLTR.mu.RUnlock()
 	if !ok || s == nil || s.N < bayesianMinSamples {
+		bayesianLTR.mu.RUnlock()
 		return 0
 	}
+	sN := s.N
 	std := s.stddev()
+	bayesianLTR.mu.RUnlock()
 	if std <= 0 {
 		return 0
 	}
@@ -157,7 +163,7 @@ func bayesianUncertaintyBonus(cohort Cohort, centeredScore float64, rnd *rand.Ra
 	// converges" this module documents. The previous code used the raw residual
 	// std, which never shrinks with data, so the bonus stayed a permanent ±cap
 	// coin-flip forever.
-	se := std / math.Sqrt(float64(s.N))
+	se := std / math.Sqrt(float64(sN))
 	// Per-item modulation: exploration is most valuable where the ranker is
 	// least sure (mid scores) and near-useless where it's already confident
 	// (extreme scores). p = σ(centeredScore); 4·p·(1-p) peaks at 1 (p=0.5) and

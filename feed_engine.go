@@ -2256,7 +2256,10 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		}
 		if maxEmotionScore > 0 {
 			for k, v := range rawEmotions {
-				p.EmotionPreference[k] = math.Max(0, v/maxEmotionScore)
+				// Lowercase to match the miner's mined-negative keys and the
+				// lowercase cs.EmotionVector at serve, so a mixed-case tag can't split
+				// into non-matching keys (mirrors the category-casing fix).
+				p.EmotionPreference[strings.ToLower(k)] = math.Max(0, v/maxEmotionScore)
 			}
 		}
 	}
@@ -2875,7 +2878,7 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			emotions = autoTagFromCaption(subject+" "+prefix, emotions)
 		}
 		for _, e := range emotions {
-			cs.EmotionVector[e] = 1.0
+			cs.EmotionVector[strings.ToLower(e)] = 1.0 // canonical lowercase — matches miner + EmotionPreference keys
 		}
 		cs.CreatorID = creatorID
 		cs.CreatorLeague = league
@@ -2930,7 +2933,7 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			emotions = autoTagFromCaption(caption, emotions)
 		}
 		for _, e := range emotions {
-			cs.EmotionVector[e] = 1.0
+			cs.EmotionVector[strings.ToLower(e)] = 1.0 // canonical lowercase — matches miner + EmotionPreference keys
 		}
 		cs.CreatorID = authorID
 		cs.CreatorLeague = league
@@ -5199,10 +5202,13 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		fresh := getSessionState(userID, session.SessionID)
 		fresh.TZOffsetMin = session.TZOffsetMin
 		// Persist the serve-time anti-loop override so the loop-break survives into
-		// the NEXT page (its entire purpose — see the detectLoop block above). Only
-		// when the loop actually fired this request, so we don't clobber a
-		// more-recent event-handler strategy switch on `fresh`. ResistanceLevel
-		// takes the max so we never LOWER an event-driven escalation.
+		// the NEXT page (its entire purpose — see the detectLoop block above). When
+		// !loopBroke we touch nothing here, so a concurrent event-handler switch on
+		// `fresh` is preserved. When loopBroke we DO overwrite fresh.CurrentStrategy
+		// with loopStrat — this page served loopStrat, so persisting it for the next
+		// page is intended even if an event switched in the interim (the resulting
+		// window reset below keeps attribution correct). ResistanceLevel takes the
+		// max so we never LOWER an event-driven escalation.
 		if loopBroke {
 			fresh.CurrentStrategy = loopStrat
 			if fresh.ResistanceLevel < 2 {
@@ -5218,6 +5224,16 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 			if !already {
 				fresh.TriedStrategies = append(fresh.TriedStrategies, loopStrat)
 			}
+			// The loop-break IS a strategy switch, so reset the measurement windows
+			// on the PERSISTED state — otherwise the next recordStrategyOutcome
+			// credits the OLD strategy's engagement window to the new loop-break
+			// strategy (the loop path never called switchStrategy). Reset to fresh's
+			// current counters (the point the new strategy starts serving from).
+			fresh.StrategyStartItems = fresh.ItemsSeen
+			fresh.StrategyWindowStartItems = fresh.ItemsSeen
+			fresh.StrategyWindowStartLikes = fresh.LikeCount
+			fresh.StrategyWindowStartShares = fresh.ShareCount
+			fresh.StrategyWindowStartSkips = fresh.SkipCount
 		}
 		for _, it := range tail {
 			cid := getItemID(it.Item)
