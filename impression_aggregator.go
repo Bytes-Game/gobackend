@@ -63,14 +63,22 @@ func recordImpression(event FeedEvent) {
 		return
 	}
 
-	// Look up category for the content (cached)
-	category := getContentCategory(event.ContentID, event.ContentType)
-	if category == "" {
-		category = "other"
+	// Source category + creator from getContentScore — the SAME category the
+	// ranker uses. getContentScore applies inferCategory when the DB category is
+	// empty/'other', whereas getContentCategory returned the RAW 'other'. Since
+	// the serve-time scorer reads CategoryAffinity[lower(cs.Category)] (the
+	// inferred key), storing the raw 'other' here siloed the impression-learned
+	// affinity under 'other' where the scorer never looked. getContentScore is
+	// cached, so this also replaces two uncached per-impression point queries
+	// (category + creator) with one cached lookup.
+	category := "other"
+	creator := ""
+	if cs := getContentScore(event.ContentID, event.ContentType); cs != nil {
+		if cs.Category != "" {
+			category = cs.Category
+		}
+		creator = cs.CreatorID
 	}
-
-	// Fetch creator for per-creator aggregation
-	creator := getContentCreator(event.ContentID, event.ContentType)
 
 	// Format: category|dwellMs|timestamp|creator|contentId|contentType
 	entry := fmt.Sprintf("%s|%d|%d|%s|%s|%s",

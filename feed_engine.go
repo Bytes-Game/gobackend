@@ -1210,22 +1210,29 @@ func updateSessionFromEvent(event FeedEvent) {
 		}
 	}
 
-	// Track category saturation
+	// Track category + creator saturation. Source both from getContentScore so the
+	// WRITE keys here match the READ keys in scoreForUser: session.CategoriesSeen
+	// is read by cs.Category (inferred) and session.CreatorsSeen by cs.CreatorID.
+	// getContentCategory returned the RAW 'other' for uncategorized content, so the
+	// write key ('other') never matched the inferred read key and the cross-page
+	// category-saturation penalty silently did nothing for inference-categorized
+	// content. getContentScore is cached (one lookup vs two uncached queries).
 	if event.EventType == "view" {
-		cat := getContentCategory(event.ContentID, event.ContentType)
-		if cat != "" {
-			if state.CategoriesSeen == nil {
-				state.CategoriesSeen = make(map[string]int)
+		if cs := getContentScore(event.ContentID, event.ContentType); cs != nil {
+			if cs.Category != "" {
+				if state.CategoriesSeen == nil {
+					state.CategoriesSeen = make(map[string]int)
+				}
+				// Lowercase key so the fatigue-penalty read (also lowercased) can't
+				// split one category into 'Comedy'/'comedy' buckets and under-count.
+				state.CategoriesSeen[strings.ToLower(cs.Category)]++
 			}
-			state.CategoriesSeen[cat]++
-		}
-		// Track creator diversity
-		creator := getContentCreator(event.ContentID, event.ContentType)
-		if creator != "" {
-			if state.CreatorsSeen == nil {
-				state.CreatorsSeen = make(map[string]int)
+			if cs.CreatorID != "" {
+				if state.CreatorsSeen == nil {
+					state.CreatorsSeen = make(map[string]int)
+				}
+				state.CreatorsSeen[cs.CreatorID]++
 			}
-			state.CreatorsSeen[creator]++
 		}
 	}
 
@@ -3366,7 +3373,7 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// If user has seen too much of this category in current session, penalize
 	fatiguePenalty := 0.0
 	if session.CategoriesSeen != nil {
-		seen := session.CategoriesSeen[cs.Category]
+		seen := session.CategoriesSeen[strings.ToLower(cs.Category)]
 		if seen >= 3 {
 			fatiguePenalty = -0.15 * float64(seen-2) // Increasing penalty
 			if fatiguePenalty < -0.4 {
@@ -6191,24 +6198,8 @@ func getContentEmotions(contentID, contentType string) []string {
 	return emotions
 }
 
-// getContentCategory returns the category for a piece of content.
-func getContentCategory(contentID, contentType string) string {
-	var cat string
-	if contentType == "challenge" {
-		db.QueryRow(`SELECT COALESCE(category, 'other') FROM challenges WHERE id = $1`, contentID).Scan(&cat)
-	} else {
-		db.QueryRow(`SELECT COALESCE(category, 'other') FROM posts WHERE id = $1`, contentID).Scan(&cat)
-	}
-	return cat
-}
+// (getContentCategory / getContentCreator removed: both did an UNCACHED point
+// query per call and were called per event/impression. Callers now read
+// cs.Category / cs.CreatorID off the cached getContentScore, which also applies
+// inferCategory so the category key matches what the ranker reads.)
 
-// getContentCreator returns the creator ID for a piece of content.
-func getContentCreator(contentID, contentType string) string {
-	var creator string
-	if contentType == "challenge" {
-		db.QueryRow(`SELECT CAST(creator_id AS TEXT) FROM challenges WHERE id = $1`, contentID).Scan(&creator)
-	} else {
-		db.QueryRow(`SELECT CAST(author_id AS TEXT) FROM posts WHERE id = $1`, contentID).Scan(&creator)
-	}
-	return creator
-}
