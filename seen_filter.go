@@ -152,7 +152,16 @@ const seenFilterMinKeep = 8
 //     `len(unseen)` slots are still strictly fresh; only the tail gets
 //     re-admitted seen content.
 func filterUnseenScored(userID string, items []ScoredItem) []ScoredItem {
-	seen := loadSeenSet(userID)
+	return filterUnseenScoredWith(items, loadSeenSet(userID))
+}
+
+// filterUnseenScoredWith is filterUnseenScored with a caller-supplied `seen`
+// snapshot (the map loadSeenSet returns, keyed by seenMember). This lets a
+// single feed request load seen:{user} ONCE and thread it into both this and
+// applyBootstrapMixIfCold, eliminating a redundant ZRANGE (up to seenMaxSize
+// members) on every cold feed request. A nil/empty map means "nothing seen"
+// (fail-open), matching loadSeenSet's behaviour on rdb==nil / ZRANGE error.
+func filterUnseenScoredWith(items []ScoredItem, seen map[string]bool) []ScoredItem {
 	if len(seen) == 0 {
 		return items
 	}

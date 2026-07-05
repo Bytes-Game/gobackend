@@ -5116,7 +5116,14 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// Step 6.5: Drop items the user has already been shown in the last TTL
 	// window (impression dedup — stronger than interactedIDs, which only
 	// covered active engagement).
-	scored = filterUnseenScored(userID, scored)
+	//
+	// Load the seen set ONCE here and share the snapshot with the cold-start
+	// bootstrap mix below (applyBootstrapMixIfCold), so the For You path does a
+	// single seen:{user} ZRANGE per request instead of two. No markShownBatch for
+	// this request runs between here and the mix (it happens after composition),
+	// so the shared snapshot stays consistent.
+	seenSet := loadSeenSet(userID)
+	scored = filterUnseenScoredWith(scored, seenSet)
 
 	// Step 6.6: Diversity re-rank (MMR) on the top-K so near-duplicates
 	// don't stack next to each other in the feed.
@@ -5163,7 +5170,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// (~0..3) and no breakdown — sorted to the BOTTOM and never reached the head,
 	// so the entire cold-start injection was a no-op. Injecting on the final
 	// ordered list preserves its head positions. No-op for non-cold users.
-	composed = applyBootstrapMixIfCold(userID, composed, getUserEventCount(userID))
+	composed = applyBootstrapMixIfCold(userID, composed, getUserEventCount(userID), seenSet)
 
 	// Step 7.1: Surprise injection — at most 1 wildcard from a category the user
 	// has zero affinity for. Filter-bubble defense, gated by a small probability

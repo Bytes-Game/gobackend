@@ -212,7 +212,12 @@ func fetchBootstrapPool(limit int) []trendingRealtimeEntry {
 //
 // Called AFTER MMR + anti-loop so the personalized backbone is already
 // stable; bootstrap is purely additive.
-func applyBootstrapMixIfCold(userID string, primary []ScoredItem, eventCount int) []ScoredItem {
+//
+// seen is an optional preloaded seen-set snapshot (from loadSeenSet). The For
+// You path already loads it for filterUnseenScored earlier in the same request
+// and threads it here so we don't ZRANGE seen:{user} twice; pass nil to have it
+// loaded lazily (only when the user is actually cold and the pool is non-empty).
+func applyBootstrapMixIfCold(userID string, primary []ScoredItem, eventCount int, seen map[string]bool) []ScoredItem {
 	mix := userBootstrapMix(eventCount)
 	if mix <= 0 {
 		return primary
@@ -236,8 +241,11 @@ func applyBootstrapMixIfCold(userID string, primary []ScoredItem, eventCount int
 	// absent from `primary` (the seen filter already dropped it there), so the
 	// per-page `exclude` above cannot catch it — the user would see the identical
 	// bootstrap video on consecutive pages of one session. Skip anything already
-	// shown, mirroring filterUnseenScored's dedup.
-	seen := loadSeenSet(userID)
+	// shown, mirroring filterUnseenScored's dedup. Reuse the caller's snapshot
+	// when provided (shared with filterUnseenScored); otherwise load it lazily.
+	if seen == nil {
+		seen = loadSeenSet(userID)
+	}
 
 	// Filter the pool by exclude + seen + self-content + materialize.
 	bootstrap := make([]ScoredItem, 0, 16)
