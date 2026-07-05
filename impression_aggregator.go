@@ -161,10 +161,28 @@ func (s ImpressionStats) AvgDwellMs() float64 {
 	return float64(s.TotalDwellMs) / float64(s.Count)
 }
 
-// getImpressionStats reads raw impressions from Redis and aggregates by category.
+// getImpressionStats reads ALL raw impressions from Redis and aggregates by
+// category. Used by callers that want the full retained window (admin
+// diagnostics, serve-time signal cache).
 func getImpressionStats(userID string) (byCategory map[string]*ImpressionStats, byCreator map[string]*ImpressionStats) {
+	byCategory, byCreator, _ = getImpressionStatsWithFresh(userID, 0)
+	return
+}
+
+// getImpressionStatsWithFresh is getImpressionStats plus the set of categories
+// that received at least one impression recorded strictly AFTER sinceUnix (the
+// entry timestamp, field 3). The aggregator computes rates/sample sizes over the
+// FULL window (so minCategoryImpressions and bounce rates stay stable) but only
+// nudges a category present in freshCategories — so a category with NO new
+// impressions this cycle is not re-nudged over the same 48h-retained list. That
+// stale re-nudging applied the fixed ±delta every 5-min cycle (~576 times over
+// 48h even with zero new activity) and saturated CategoryAffinity to 0/1.
+// sinceUnix<=0 means "track nothing fresh" (freshCategories stays empty), which
+// is what the full-window callers above want.
+func getImpressionStatsWithFresh(userID string, sinceUnix int64) (byCategory, byCreator map[string]*ImpressionStats, freshCategories map[string]bool) {
 	byCategory = make(map[string]*ImpressionStats)
 	byCreator = make(map[string]*ImpressionStats)
+	freshCategories = make(map[string]bool)
 
 	key := fmt.Sprintf("impressions:%s", userID)
 	entries, err := rdb.LRange(rctx, key, 0, -1).Result()
@@ -185,6 +203,15 @@ func getImpressionStats(userID string) (byCategory map[string]*ImpressionStats, 
 		category := strings.ToLower(parts[0])
 		dwellMs, _ := strconv.Atoi(parts[1])
 		creator := parts[3]
+
+		// Mark the category fresh if this impression postdates the aggregator's
+		// cursor. Only parse the timestamp when a cursor is set (full-window
+		// callers pass sinceUnix<=0 and skip this).
+		if sinceUnix > 0 {
+			if ts, e := strconv.ParseInt(parts[2], 10, 64); e == nil && ts > sinceUnix {
+				freshCategories[category] = true
+			}
+		}
 
 		// Aggregate by category
 		if byCategory[category] == nil {
@@ -303,8 +330,31 @@ func aggregateAllUserImpressions() error {
 // aggregateUserImpressions converts a user's raw impressions into affinity adjustments.
 // Categories with high bounce rate get decayed. Categories with high interest get boosted.
 func aggregateUserImpressions(userID string) error {
-	byCategory, _ := getImpressionStats(userID)
+	// Idempotency cursor: impressions are retained ~48h and never consumed, so
+	// re-reading the whole list every 5-min cycle applied the fixed ±delta to the
+	// same categories hundreds of times and saturated CategoryAffinity to 0/1
+	// (#12). We compute rates over the FULL window (stable sample/rate) but only
+	// nudge categories that got a NEW impression since the last successful run.
+	cursorKey := fmt.Sprintf("impressions_aggregated_at:%s", userID)
+	var cursor int64
+	if rdb != nil {
+		if s, e := rdb.Get(rctx, cursorKey).Result(); e == nil {
+			cursor, _ = strconv.ParseInt(s, 10, 64)
+		}
+	}
+	nowUnix := time.Now().Unix()
+
+	byCategory, _, fresh := getImpressionStatsWithFresh(userID, cursor)
 	if len(byCategory) == 0 {
+		return nil
+	}
+	if len(fresh) == 0 {
+		// No new impressions since the last cycle (or first run, cursor==0):
+		// advance the cursor and skip — do NOT re-nudge over the same retained
+		// window. This is the steady-state path for any user not currently active.
+		if rdb != nil {
+			_ = rdb.Set(rctx, cursorKey, nowUnix, impressionRedisTTL).Err()
+		}
 		return nil
 	}
 
@@ -326,6 +376,14 @@ func aggregateUserImpressions(userID string) error {
 	for category, stats := range byCategory {
 		if stats.Count < minCategoryImpressions {
 			continue // Not enough data to draw conclusion
+		}
+		// Only nudge categories with a NEW impression this cycle. The full-window
+		// stats above give a stable rate/sample, but the ±delta must fire once per
+		// genuine new signal, not every cycle over the same retained impressions
+		// (#12 re-decay saturation). A persistently-disliked category still reaches
+		// 0 — but over real continued exposure, not stale re-reads.
+		if !fresh[category] {
+			continue
 		}
 		// category is already canonical-lowercase (bucketed lowercase in
 		// getImpressionStats), so CategoryAffinity/AvoidedCategories keys match the
@@ -371,6 +429,12 @@ func aggregateUserImpressions(userID string) error {
 
 	if changed {
 		saveUserProfile(profile)
+	}
+	// Advance the cursor so this cycle's impressions aren't aggregated again next
+	// time — even when nothing crossed a threshold (changed==false). Only reached
+	// after a successful profile load, so a load failure retries the same window.
+	if rdb != nil {
+		_ = rdb.Set(rctx, cursorKey, nowUnix, impressionRedisTTL).Err()
 	}
 	return nil
 }
