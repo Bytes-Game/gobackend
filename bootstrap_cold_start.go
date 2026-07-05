@@ -229,11 +229,24 @@ func applyBootstrapMixIfCold(userID string, primary []ScoredItem, eventCount int
 		exclude[si.Item.Type+":"+getItemID(si.Item)] = true
 	}
 
-	// Filter the pool by exclude + self-content + materialize.
+	// Also consult the user's CROSS-PAGE seen set. The bootstrap pool is fetched
+	// independently from Redis and never passes through the upstream seen filter
+	// (filterUnseenScored), so a top-of-pool "banger" injected on page 1 is
+	// stamped seen but still returned by fetchBootstrapPool on page 2+. It is
+	// absent from `primary` (the seen filter already dropped it there), so the
+	// per-page `exclude` above cannot catch it — the user would see the identical
+	// bootstrap video on consecutive pages of one session. Skip anything already
+	// shown, mirroring filterUnseenScored's dedup.
+	seen := loadSeenSet(userID)
+
+	// Filter the pool by exclude + seen + self-content + materialize.
 	bootstrap := make([]ScoredItem, 0, 16)
 	for _, e := range pool {
 		key := e.Type + ":" + e.ID
 		if exclude[key] {
+			continue
+		}
+		if seen[seenMember(e.Type, e.ID)] {
 			continue
 		}
 		item, ok := loadHomeFeedItemByID(e.Type, e.ID)

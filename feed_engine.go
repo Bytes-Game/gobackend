@@ -4627,8 +4627,6 @@ func isColdStartUser(profile *UserProfile) bool {
 // coldStartFeed returns a diversity-optimized feed for new users.
 // Uses popularity + diversity instead of personalization.
 func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error) {
-	offset := (page - 1) * limit
-
 	// Tier 2.10 — cold-start QUALITY FLOOR (with widening fallback).
 	// Brand-new users have no personal signal, so everything rides on "good
 	// first impression." The strict pass requires recent + engaged content;
@@ -4660,8 +4658,12 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 	if shortLimit < 1 {
 		shortLimit = 1
 	}
-	battleOffset := (offset * 7) / 10
-	shortOffset := offset - battleOffset
+	// Advance each kind's offset by exactly that kind's PER-PAGE served budget so
+	// page N resumes precisely where page N-1's served budget ended. Deriving
+	// from (offset*7)/10 drifted by integer rounding for limits not a multiple of
+	// 10 and mis-aligned the boundary.
+	battleOffset := battleLimit * (page - 1)
+	shortOffset := shortLimit * (page - 1)
 
 	// Walk tiers from strictest to widest. Each kind is independent: we
 	// keep widening for battles even after shorts are full, and vice versa,
@@ -4696,18 +4698,30 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 		}
 	}
 
+	// hasMore is detected from the one-item-per-kind over-fetch probe, then each
+	// kind is trimmed DETERMINISTICALLY back to its served budget BEFORE mixing.
+	// The old code appended both over-fetched pools, shuffled, and sliced [:limit]
+	// at RANDOM — which (a) could serve the probe row on this page AND re-serve it
+	// as the first row of the next page (whose offset resumes at the budget), a
+	// cross-boundary duplicate, and (b) could randomly drop NON-probe rows that
+	// then fell into neither page's window and were never shown. Trimming to the
+	// exact budget per kind, combined with offsets that advance by that same
+	// budget, gives gap-free and duplicate-free cold-start pagination.
+	hasMore := len(battleItems) > battleLimit || len(shortItems) > shortLimit
+	if len(battleItems) > battleLimit {
+		battleItems = battleItems[:battleLimit]
+	}
+	if len(shortItems) > shortLimit {
+		shortItems = shortItems[:shortLimit]
+	}
+
 	items := append(battleItems, shortItems...)
 
 	// Shuffle to mix battles and shorts so the user doesn't see one big block
-	// of either kind.
+	// of either kind. The set is already trimmed to budget — no random drop.
 	rand.Shuffle(len(items), func(i, j int) {
 		items[i], items[j] = items[j], items[i]
 	})
-
-	hasMore := len(items) > limit
-	if hasMore {
-		items = items[:limit]
-	}
 
 	return items, hasMore, nil
 }

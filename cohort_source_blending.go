@@ -94,14 +94,20 @@ func observeSourceReward(cohort Cohort, source string, reward float64) {
 	}
 	cohortBlendEnsureLoaded()
 	cohortBlend.mu.Lock()
-	defer cohortBlend.mu.Unlock()
 	if cohortBlend.rewards[cohort] == nil {
 		cohortBlend.rewards[cohort] = make(map[string]float64)
 	}
 	prev := cohortBlend.rewards[cohort][source]
 	updated := prev*(1-cohortBlendEMA) + reward*cohortBlendEMA
 	cohortBlend.rewards[cohort][source] = updated
+	cohortBlend.mu.Unlock()
 
+	// Persist + metric OUTSIDE the write lock — a Redis round-trip must NOT block
+	// effectiveSourceWeights' RLock, which the feed hot path takes on every
+	// request. The old code deferred Unlock across the rdb.Set, so one slow Redis
+	// write (a GC/network/tail-latency blip at scale) pinned the write lock and
+	// stalled every concurrent feed read. Mirrors plattFit / wrFlush /
+	// flushBayesianStats, which all snapshot under a brief lock then do I/O free.
 	if rdb != nil {
 		key := cohortBlendRedisKey + string(cohort) + ":" + source
 		_ = rdb.Set(rctx, key, strconv.FormatFloat(updated, 'f', 4, 64), cohortBlendTTL).Err()

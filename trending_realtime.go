@@ -266,45 +266,56 @@ func startTrendingPruner() {
 	}()
 }
 
-// pruneTrendingRealtime applies one decay tick: read the full ZSET, scale
-// every score by trendingDecayFactor, drop members below the floor, and
-// rewrite the surviving ones in a single pipeline.
+// trendingPruneScript applies one decay tick ATOMICALLY on the Redis server.
+// It multiplies every member's score by the decay factor IN PLACE, ZREMs
+// members that fall within ±floor of zero, and refreshes the TTL.
 //
-// O(N) where N is the ZSET size. Bounded by trendingMaxReturn (200) in
-// practice because we only ever surface the top-200 anyway.
+// Why Lua rather than a Go read-modify-write: the writers
+// (noteTrendingEventByUser) do fire-and-forget ZINCRBY from a goroutine per
+// engagement event. The old prune did ZRANGE → decay in Go → Del + ZAdd
+// survivors via a MULTI/EXEC pipeline, which has NO isolation (go-redis
+// TxPipeline emits MULTI/EXEC but not WATCH) against ZINCRBYs landing between
+// the read snapshot and the EXEC. Every such increment was silently discarded
+// (a lost update biased toward the fastest-rising items — exactly the viral
+// spikes this module exists to catch), and the wholesale Del could erase a
+// brand-new member whose first ZINCRBY arrived mid-window. Running the entire
+// decay as one script under Redis's single-threaded execution closes the
+// window: no writer can interleave, members are updated in place (never
+// Del'd en masse), and members added after the script starts are simply left
+// for the next tick. Negative members are kept until they drift within the
+// floor (report-suppression semantics), matching the previous behaviour.
+var trendingPruneScript = redis.NewScript(`
+local key   = KEYS[1]
+local decay = tonumber(ARGV[1])
+local floor = tonumber(ARGV[2])
+local ttl   = tonumber(ARGV[3])
+local vals  = redis.call('ZRANGE', key, 0, -1, 'WITHSCORES')
+for i = 1, #vals, 2 do
+	local member   = vals[i]
+	local newScore = tonumber(vals[i+1]) * decay
+	if newScore < floor and newScore > -floor then
+		redis.call('ZREM', key, member)
+	else
+		redis.call('ZADD', key, newScore, member)
+	end
+end
+if redis.call('ZCARD', key) > 0 then
+	redis.call('EXPIRE', key, ttl)
+end
+return 1
+`)
+
+// pruneTrendingRealtime applies one decay tick. O(N) where N is the ZSET size,
+// bounded by trendingMaxReturn (200) in practice. See trendingPruneScript for
+// why this is an atomic server-side script and not a Go read-modify-write.
 func pruneTrendingRealtime(_ context.Context) {
 	if rdb == nil {
 		return
 	}
-	res, err := rdb.ZRangeWithScores(rctx, trendingRealtimeKey, 0, -1).Result()
-	if err != nil {
-		return
-	}
-	// Pre-allocate the survivor list to avoid reallocs.
-	survivors := make([]redis.Z, 0, len(res))
-	for _, m := range res {
-		mem, ok := m.Member.(string)
-		if !ok {
-			continue
-		}
-		newScore := m.Score * trendingDecayFactor
-		// Drop members whose score has decayed below the noise floor in
-		// either direction. Negative members are kept until they decay
-		// toward zero so a barrage of reports can keep an item suppressed
-		// while spam-fighting is still relevant, but they'll naturally
-		// drift back toward the floor and be evicted.
-		if newScore < trendingFloorScore && newScore > -trendingFloorScore {
-			continue
-		}
-		survivors = append(survivors, redis.Z{Score: newScore, Member: mem})
-	}
-	pipe := rdb.TxPipeline()
-	pipe.Del(rctx, trendingRealtimeKey)
-	if len(survivors) > 0 {
-		pipe.ZAdd(rctx, trendingRealtimeKey, survivors...)
-		pipe.Expire(rctx, trendingRealtimeKey, 24*time.Hour)
-	}
-	_, _ = pipe.Exec(rctx)
+	_ = trendingPruneScript.Run(rctx, rdb,
+		[]string{trendingRealtimeKey},
+		trendingDecayFactor, trendingFloorScore, int((24 * time.Hour).Seconds()),
+	).Err()
 }
 
 // itoa is a tiny strconv shim — keeps the file from depending on strconv just
