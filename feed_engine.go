@@ -4688,10 +4688,10 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 	var battleItems, shortItems []HomeFeedItem
 	for _, tier := range tiers {
 		if len(battleItems) < battleFetch {
-			battleItems = coldStartChallengesTiered("battle", battleFetch, battleOffset, tier.window, tier.minViews, tier.minLikes)
+			battleItems = coldStartChallengesTiered(userID, "battle", battleFetch, battleOffset, tier.window, tier.minViews, tier.minLikes)
 		}
 		if len(shortItems) < shortFetch {
-			shortItems = coldStartChallengesTiered("short", shortFetch, shortOffset, tier.window, tier.minViews, tier.minLikes)
+			shortItems = coldStartChallengesTiered(userID, "short", shortFetch, shortOffset, tier.window, tier.minViews, tier.minLikes)
 		}
 		if len(battleItems) >= battleFetch && len(shortItems) >= shortFetch {
 			break
@@ -4723,13 +4723,25 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 		items[i], items[j] = items[j], items[i]
 	})
 
+	// Final clamp for the degenerate tiny-limit case: the 70/30 min-1 floors make
+	// battleLimit+shortLimit exceed the requested limit only at limit==1 (1+1=2).
+	// For every limit>=2 the per-kind budgets already sum to exactly limit, so
+	// this is a no-op there. Because the over-fetch probes were already trimmed
+	// per-kind above, this clamp never drops a probe/non-probe row at random (the
+	// bug the old post-shuffle [:limit] trim caused) — it only sheds the extra
+	// floor item at limit==1. hasMore stays derived from the pre-clamp probe, so
+	// paging past page 1 still works.
+	if len(items) > limit {
+		items = items[:limit]
+	}
+
 	return items, hasMore, nil
 }
 
 // coldStartChallengesTiered runs one tier of the cold-start challenge query.
 // kind is "battle" (challenges with at least one response) or "short"
 // (challenges nobody has responded to yet) — anything else means "all".
-func coldStartChallengesTiered(kind string, limit, offset int, window string, minViews, minLikes int) []HomeFeedItem {
+func coldStartChallengesTiered(userID, kind string, limit, offset int, window string, minViews, minLikes int) []HomeFeedItem {
 	if db == nil {
 		return nil
 	}
@@ -4754,9 +4766,10 @@ func coldStartChallengesTiered(kind string, limit, offset int, window string, mi
 		AND c.created_at > NOW() - ($3::text)::interval
 		AND c.views >= $4
 		AND COALESCE(cl.likes,0) >= $5
+		AND c.creator_id::text <> $6
 		`+responseFilter+`
 		ORDER BY (c.views + COALESCE(cl.likes,0) * 3) DESC, c.created_at DESC
-		LIMIT $1 OFFSET $2`, limit, offset, window, minViews, minLikes)
+		LIMIT $1 OFFSET $2`, limit, offset, window, minViews, minLikes, userID)
 	if err != nil {
 		return nil
 	}
