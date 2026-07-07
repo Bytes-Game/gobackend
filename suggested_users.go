@@ -88,12 +88,10 @@ func BuildSuggestedAccountsCard(userID string, page int) *SuggestedAccountsCard 
 	// Step 3: Merge into a deduped map keyed by user ID. Each lane left a
 	// per-row hint that we'll fold into the scoring.
 	type accum struct {
-		base              SuggestedAccount
-		fofCount          int
-		categoryFit       float64
-		recentActivity    bool
-		dominantReason    string
-		dominantReasonAt  float64 // signal strength of the chosen dominant reason
+		base           SuggestedAccount
+		fofCount       int
+		categoryFit    float64
+		recentActivity bool
 	}
 	pool := make(map[string]*accum)
 
@@ -168,15 +166,12 @@ func BuildSuggestedAccountsCard(userID string, page int) *SuggestedAccountsCard 
 		// social signals are weak.
 		popSig := logSafe(float64(a.base.Followers)+1) * 0.10
 		s += popSig
+		// Only crown popularity as the dominant reason for cold users
+		// (where the social/category signals are missing) — otherwise
+		// FoF or category should hold the banner spot. This is the last
+		// signal, so dominantSig doesn't need updating past this point.
 		if dominant == "" || (cold && popSig > dominantSig) {
-			// Only crown popularity as the dominant reason for cold users
-			// (where the social/category signals are missing) — otherwise
-			// FoF or category should hold the banner spot.
-			if cold && popSig > dominantSig {
-				dominant, dominantSig = "popular", popSig
-			} else if dominant == "" {
-				dominant, dominantSig = "popular", popSig
-			}
+			dominant = "popular"
 		}
 
 		// Recent activity — flat bonus, gate against ghost-town accounts.

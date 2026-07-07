@@ -131,20 +131,15 @@ func SendVoteNotification(payload ChallengeVotePayload) {
 }
 
 // deliverNotification is a helper that sends a notification to a user
-// (directly if online, stored for later if offline).
+// (directly if online — on any replica — stored for later if offline).
 func deliverNotification(recipientUsername string, notification Notification) {
-	conn, isOnline := IsUserOnline(recipientUsername)
-
-	if isOnline && conn != nil {
-		log.Printf("User %s is ONLINE. Sending notification directly.", recipientUsername)
-		notificationJSON, _ := json.Marshal(notification)
-		if err := conn.WriteMessage(1, notificationJSON); err != nil {
-			log.Printf("Error sending notification to %s: %v", recipientUsername, err)
-		}
-	} else {
-		log.Printf("User %s is OFFLINE. Storing notification.", recipientUsername)
-		StoreNotificationInRedis(recipientUsername, notification)
+	notificationJSON, _ := json.Marshal(notification)
+	if wsDeliver(recipientUsername, notificationJSON) {
+		log.Printf("User %s is ONLINE. Sent notification.", recipientUsername)
+		return
 	}
+	log.Printf("User %s is OFFLINE. Storing notification.", recipientUsername)
+	StoreNotificationInRedis(recipientUsername, notification)
 }
 
 // SendStoredNotifications is called when a user connects via WebSocket
@@ -159,17 +154,12 @@ func SendStoredNotifications(username string) {
 
 	log.Printf("Found %d stored notifications for %s. Sending them now.", len(notifications), username)
 
-	conn, isOnline := IsUserOnline(username)
-	if !isOnline {
-		log.Printf("Cannot send stored notifications because user %s is not online.", username)
-		return
-	}
-
+	// Called from the connect path of THIS replica, so local send is the
+	// right primitive (no relay — the user just connected here).
 	for _, notification := range notifications {
 		notificationJSON, _ := json.Marshal(notification)
-		if err := conn.WriteMessage(1, notificationJSON); err != nil {
-			log.Printf("Error sending stored notification to %s: %v", username, err)
-			// Decide if you want to stop or continue sending other notifications
+		if !wsSendLocal(username, notificationJSON) {
+			log.Printf("Error sending stored notification to %s (disconnected mid-flush)", username)
 		} else {
 			log.Printf("Successfully sent stored notification to %s", username)
 		}

@@ -1,0 +1,4 @@
+# Local build artifacts — binaries are produced by CI/Render, never committed.
+# (smoketest.exe / loadtest.exe / mymodule.exe were tracked before this file
+# existed; git rm them whenever convenient — ignoring only affects new files.)
+*.exe

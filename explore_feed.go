@@ -186,20 +186,19 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	scored = filterUnseenScored(userID, scored)
 
 	// Aggressive MMR: lambda=0.40 (way more diversity weight than For You's
-	// 0.55-0.85 ramp), creator penalty 0.30 (much stronger) so the same
-	// creator can't dominate even if they're trending hard.
-	scored = applyMMRWithCreator(scored, 0.40, mmrTopK,
+	// 0.55-0.85 ramp), creator penalty 0.30 (vs 0.18 default) so the same
+	// creator can't dominate even if they're trending hard. The penalty
+	// finally applies for real — applyMMRWithCreatorPenalty takes it as a
+	// parameter instead of hard-reading the package constant.
+	scored = applyMMRWithCreatorPenalty(scored, 0.40, mmrTopK,
 		func(si ScoredItem) []float64 {
 			cs := getContentScore(getItemID(si.Item), si.Item.Type)
 			emotions := getContentEmotions(getItemID(si.Item), si.Item.Type)
 			return getOrBuildContentEmbedding(cs, emotions)
 		},
 		defaultCreatorOf,
+		0.30,
 	)
-	// Override the creator penalty for explore — applyMMRWithCreator uses
-	// the package-level mmrCreatorPenalty constant. We can't change that
-	// here without rebuilding the function; the lambda=0.40 already enforces
-	// strong diversity so this is acceptable as an MVP.
 
 	// Always sprinkle 1-2 wildcards from the bootstrap pool, even for warm
 	// users — explore is supposed to broaden horizons.
@@ -393,8 +392,3 @@ func logSafe(x float64) float64 {
 	return math.Log10(x)
 }
 
-// currentHours returns the current hour count since the Unix epoch. Used by
-// exploreScore's recency calc to avoid pulling time into every loop iteration.
-func currentHours() int64 {
-	return time.Now().Unix() / 3600
-}

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"log"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -99,12 +101,74 @@ func noteSessionTransition(cohort Cohort, fromKey, toKey string) {
 	sessionTrajectories.mu.Unlock()
 
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	if st.transitions[fromKey] == nil {
 		st.transitions[fromKey] = make(map[string]int)
 	}
 	st.transitions[fromKey][toKey]++
 	st.fromTotals[fromKey]++
+	st.mu.Unlock()
+
+	// Durable write-through outside the lock. HINCRBY merges across
+	// replicas; the field vocabulary is bounded (categories × 3 energy
+	// buckets squared), so the hash stays small.
+	go persistTrajObservation(cohort, fromKey, toKey)
+}
+
+// trajRedisKeyPrefix + cohort holds the durable per-cohort transition
+// hash. Field = "from|to", value = observation count.
+const trajRedisKeyPrefix = "sesstraj:"
+
+func persistTrajObservation(cohort Cohort, fromKey, toKey string) {
+	if rdb == nil {
+		return
+	}
+	_ = rdb.HIncrBy(rctx, trajRedisKeyPrefix+string(cohort), fromKey+"|"+toKey, 1).Err()
+}
+
+// loadSessionTrajectories rebuilds the in-process Markov tables from
+// Redis at boot — previously the learned trajectory model was wiped by
+// every deploy/restart (and multiple replicas would each learn a
+// divergent model from their slice of traffic).
+func loadSessionTrajectories() {
+	if rdb == nil {
+		return
+	}
+	loaded := 0
+	for _, cohort := range []Cohort{CohortColdStart, CohortNew, CohortEngaged, CohortPower, CohortAtRisk} {
+		fields, err := rdb.HGetAll(rctx, trajRedisKeyPrefix+string(cohort)).Result()
+		if err != nil || len(fields) == 0 {
+			continue
+		}
+		sessionTrajectories.mu.Lock()
+		st, ok := sessionTrajectories.byCoh[cohort]
+		if !ok {
+			st = newTrajectoryState()
+			sessionTrajectories.byCoh[cohort] = st
+		}
+		sessionTrajectories.mu.Unlock()
+
+		st.mu.Lock()
+		for field, cntStr := range fields {
+			from, to, ok := strings.Cut(field, "|")
+			if !ok || from == "" || to == "" {
+				continue
+			}
+			cnt, err := strconv.Atoi(cntStr)
+			if err != nil || cnt <= 0 {
+				continue
+			}
+			if st.transitions[from] == nil {
+				st.transitions[from] = make(map[string]int)
+			}
+			st.transitions[from][to] = cnt
+			st.fromTotals[from] += cnt
+			loaded++
+		}
+		st.mu.Unlock()
+	}
+	if loaded > 0 {
+		log.Printf("session trajectories: restored %d learned transitions from Redis", loaded)
+	}
 }
 
 // trajectoryBonus returns a bounded score adjustment for a candidate based

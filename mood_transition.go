@@ -1,6 +1,8 @@
 package main
 
 import (
+	"log"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -99,7 +101,6 @@ func observeMoodTransition(fromMood, toMood string, reward float64) {
 		reward = 1
 	}
 	moodTransitions.mu.Lock()
-	defer moodTransitions.mu.Unlock()
 	if moodTransitions.rewards[fromMood] == nil {
 		moodTransitions.rewards[fromMood] = make(map[string]float64)
 		moodTransitions.counts[fromMood] = make(map[string]int)
@@ -112,6 +113,84 @@ func observeMoodTransition(fromMood, toMood string, reward float64) {
 		moodTransitions.rewards[fromMood][toMood] = prev*(1-ema) + reward*ema
 	}
 	moodTransitions.counts[fromMood][toMood]++
+	moodTransitions.mu.Unlock()
+
+	// Durable write-through OUTSIDE the store lock (never hold an
+	// in-process lock across a Redis round-trip — the audit's rule).
+	// Increments merge correctly across replicas, unlike a JSON
+	// snapshot that the last replica to flush would overwrite.
+	go persistMoodObservation(fromMood, toMood, reward)
+}
+
+// Redis keys for the durable mood-transition graph. Field = "from|to";
+// rsum accumulates rewards, cnt accumulates observations — reward
+// average = rsum/cnt. Increment-only fields merge across any number of
+// replicas; the in-process EMA is rebuilt from the average at boot and
+// then continues locally (EMA recency-weighting resumes immediately).
+const (
+	moodTransRewardSumKey = "moodtrans:rsum"
+	moodTransCountKey     = "moodtrans:cnt"
+)
+
+func persistMoodObservation(fromMood, toMood string, reward float64) {
+	if rdb == nil {
+		return
+	}
+	field := fromMood + "|" + toMood
+	_ = rdb.HIncrByFloat(rctx, moodTransRewardSumKey, field, reward).Err()
+	_ = rdb.HIncrBy(rctx, moodTransCountKey, field, 1).Err()
+}
+
+// loadMoodTransitions rebuilds the in-process mood graph from Redis at
+// boot. Before this existed the learned graph lived only in process
+// memory — every deploy/restart wiped it and the mood-regulation signal
+// re-learned from zero (seed priors only) each time.
+func loadMoodTransitions() {
+	if rdb == nil {
+		return
+	}
+	sums, err := rdb.HGetAll(rctx, moodTransRewardSumKey).Result()
+	if err != nil || len(sums) == 0 {
+		return
+	}
+	counts, err := rdb.HGetAll(rctx, moodTransCountKey).Result()
+	if err != nil {
+		return
+	}
+	loaded := 0
+	moodTransitions.mu.Lock()
+	for field, sumStr := range sums {
+		from, to, ok := strings.Cut(field, "|")
+		if !ok || from == "" || to == "" {
+			continue
+		}
+		cnt, _ := strconv.Atoi(counts[field])
+		if cnt <= 0 {
+			continue
+		}
+		sum, err := strconv.ParseFloat(sumStr, 64)
+		if err != nil {
+			continue
+		}
+		avg := sum / float64(cnt)
+		if avg < 0 {
+			avg = 0
+		}
+		if avg > 1 {
+			avg = 1
+		}
+		if moodTransitions.rewards[from] == nil {
+			moodTransitions.rewards[from] = make(map[string]float64)
+			moodTransitions.counts[from] = make(map[string]int)
+		}
+		moodTransitions.rewards[from][to] = avg
+		moodTransitions.counts[from][to] = cnt
+		loaded++
+	}
+	moodTransitions.mu.Unlock()
+	if loaded > 0 {
+		log.Printf("mood transitions: restored %d learned pairs from Redis", loaded)
+	}
 }
 
 // moodTransitionBonus returns a bounded score adjustment for a candidate

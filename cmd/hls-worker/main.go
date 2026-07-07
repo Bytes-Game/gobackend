@@ -106,18 +106,18 @@ func main() {
 			time.Sleep(*pollInterval)
 			continue
 		}
-		log.Printf("claimed job challenge=%s source=%s", job.ChallengeID, job.SourceURL)
+		log.Printf("claimed job kind=%s id=%s source=%s", jobKind(*job), job.ChallengeID, job.SourceURL)
 		manifestURL, err := processJob(cfg, *job)
 		if err != nil {
-			log.Printf("process error for challenge=%s: %v", job.ChallengeID, err)
-			_ = reportFail(cfg, job.ChallengeID, err.Error())
+			log.Printf("process error for %s=%s: %v", jobKind(*job), job.ChallengeID, err)
+			_ = reportFail(cfg, *job, err.Error())
 			continue
 		}
-		if err := reportComplete(cfg, job.ChallengeID, manifestURL); err != nil {
-			log.Printf("complete report error for challenge=%s: %v", job.ChallengeID, err)
+		if err := reportComplete(cfg, *job, manifestURL); err != nil {
+			log.Printf("complete report error for %s=%s: %v", jobKind(*job), job.ChallengeID, err)
 			continue
 		}
-		log.Printf("completed challenge=%s manifest=%s", job.ChallengeID, manifestURL)
+		log.Printf("completed %s=%s manifest=%s", jobKind(*job), job.ChallengeID, manifestURL)
 	}
 }
 
@@ -169,13 +169,19 @@ func loadConfig() (*workerConfig, error) {
 }
 
 type pendingJob struct {
-	ChallengeID string `json:"challengeId"`
+	ChallengeID string `json:"challengeId"` // row id in the kind's table
 	SourceURL   string `json:"sourceUrl"`
+	// Kind selects which table the job came from: "challenge" (default,
+	// also what pre-kind backends send as "") or "response" for the
+	// challenge_responses leg of a battle. Echoed back verbatim on
+	// complete/fail so the backend updates the right row.
+	Kind string `json:"kind"`
 }
 
 type reportPayload struct {
 	ChallengeID string `json:"challengeId"`
 	ManifestURL string `json:"manifestUrl"`
+	Kind        string `json:"kind"`
 }
 
 // ─── HTTP calls to the backend ───────────────────────────────────────
@@ -202,8 +208,17 @@ func claimJob(cfg *workerConfig) (*pendingJob, error) {
 	return &j, nil
 }
 
-func reportComplete(cfg *workerConfig, challengeID, manifestURL string) error {
-	body, _ := json.Marshal(reportPayload{ChallengeID: challengeID, ManifestURL: manifestURL})
+// jobKind normalizes the wire kind — pre-kind backends send "" which
+// means the challenges table.
+func jobKind(j pendingJob) string {
+	if j.Kind == "response" {
+		return "response"
+	}
+	return "challenge"
+}
+
+func reportComplete(cfg *workerConfig, job pendingJob, manifestURL string) error {
+	body, _ := json.Marshal(reportPayload{ChallengeID: job.ChallengeID, ManifestURL: manifestURL, Kind: jobKind(job)})
 	req, _ := http.NewRequest("POST", cfg.BackendURL+"/api/v1/internal/hls/complete", bytes.NewReader(body))
 	req.Header.Set("X-Worker-Token", cfg.WorkerToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -219,8 +234,8 @@ func reportComplete(cfg *workerConfig, challengeID, manifestURL string) error {
 	return nil
 }
 
-func reportFail(cfg *workerConfig, challengeID, reason string) error {
-	body, _ := json.Marshal(reportPayload{ChallengeID: challengeID, ManifestURL: reason})
+func reportFail(cfg *workerConfig, job pendingJob, reason string) error {
+	body, _ := json.Marshal(reportPayload{ChallengeID: job.ChallengeID, ManifestURL: reason, Kind: jobKind(job)})
 	req, _ := http.NewRequest("POST", cfg.BackendURL+"/api/v1/internal/hls/fail", bytes.NewReader(body))
 	req.Header.Set("X-Worker-Token", cfg.WorkerToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -257,8 +272,15 @@ func processJob(cfg *workerConfig, job pendingJob) (string, error) {
 		return "", fmt.Errorf("transcode: %w", err)
 	}
 
-	// 3. Upload everything in outDir to R2 under hls/<challengeId>/.
+	// 3. Upload everything in outDir to R2 under hls/<id>/ for
+	// challenges, hls/resp/<id>/ for battle responses — the two tables
+	// have independent id sequences, so without the kind segment a
+	// response's output could collide with (and overwrite) an unrelated
+	// challenge's ladder.
 	prefix := fmt.Sprintf("hls/%s/%s", job.ChallengeID, randHex(8))
+	if jobKind(job) == "response" {
+		prefix = fmt.Sprintf("hls/resp/%s/%s", job.ChallengeID, randHex(8))
+	}
 	files, err := os.ReadDir(outDir)
 	if err != nil {
 		return "", err

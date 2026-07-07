@@ -146,7 +146,7 @@ func buildCreatorOverview(creatorID string, windowDays int) (CreatorOverview, er
 	}
 
 	// 5. Compute completion rank (text label) vs ALL creators.
-	overview.CompletionRank = completionRankLabel(creatorID, overview.AvgCompletion, windowDays)
+	overview.CompletionRank = completionRankLabel(overview.AvgCompletion, windowDays)
 
 	// 6. Plain-English recommendations.
 	overview.Recommendations = recommendationsForOverview(overview, contents)
@@ -290,19 +290,32 @@ func categoryBenchmark(category string, yours float64, creatorID string, windowD
 }
 
 // completionRankLabel turns the creator's avg completion into a friendly
-// percentile label vs ALL creators with at least one view in the window.
-func completionRankLabel(creatorID string, yourAvg float64, windowDays int) string {
+// percentile label vs ALL creators with enough views in the window.
+//
+// Two bugs fixed here: (1) the old query text referenced only $2 while
+// binding two args — Postgres rejected the statement every time, so the
+// label was permanently "no data yet"; (2) the distribution was grouped
+// per CONTENT item, not per creator, so the "you beat X% of creators"
+// copy compared against the wrong population. Now each sample is one
+// creator's average completion across their content (challenges + legacy
+// posts), matching the label's claim.
+func completionRankLabel(yourAvg float64, windowDays int) string {
 	if db == nil {
 		return "no data yet"
 	}
 	rows, err := db.Query(`
-		SELECT AVG(completion_rate) AS avg_c
+		SELECT AVG(fe.completion_rate) AS avg_c
 		FROM feed_events fe
+		JOIN (
+			SELECT id::text AS content_id, creator_id::text AS owner, 'challenge' AS ctype FROM challenges
+			UNION ALL
+			SELECT id::text, author_id::text, 'post' FROM posts
+		) c ON c.content_id = fe.content_id AND c.ctype = fe.content_type
 		WHERE fe.event_type = 'view'
-		  AND fe.created_at > NOW() - ($2::int || ' days')::interval
-		GROUP BY fe.content_id
+		  AND fe.created_at > NOW() - ($1::int || ' days')::interval
+		GROUP BY c.owner
 		HAVING COUNT(*) >= 3
-	`, creatorID, windowDays)
+	`, windowDays)
 	if err != nil {
 		return "no data yet"
 	}
@@ -335,7 +348,7 @@ func completionRankLabel(creatorID string, yourAvg float64, windowDays int) stri
 	case pct >= 25:
 		return fmt.Sprintf("below average (you beat %d%% of creators)", pct)
 	default:
-		return fmt.Sprintf("bottom quartile (room to grow)")
+		return "bottom quartile (room to grow)"
 	}
 }
 

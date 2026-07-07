@@ -234,6 +234,11 @@ func probeNegativeSignals(r *DiagnosticsReport, userID string) {
 		r.NegativeSignals["lastSessionEnd"] = s
 	}
 
+	// Process-wide mining epoch — a monotonic counter bumped on every
+	// negative-feedback profile nudge. Nonzero and growing = the miner
+	// is alive; the per-user signals above show WHAT it learned.
+	r.NegativeSignals["mineEpoch"] = negativeProfileMineDiag()
+
 	count := len(blocked) + len(unfollowed) + len(bounced) + len(searches)
 	if count == 0 {
 		r.Summary["negativeSignals"] = "EMPTY — no negative actions recorded"

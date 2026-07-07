@@ -203,26 +203,12 @@ func categoryHint(category string) float64 {
 // Public entrypoint
 // ════════════════════════════════════════════════════════════════════
 
-// deriveEnergyLevel returns "low" | "medium" | "high" for a new
-// challenge. Backwards-compatible with the older 3-arg signature: the
-// caller is free to pass empty strings for any signal it doesn't have.
-// The creator-baseline path activates only when [creatorID] is
-// non-empty AND we have a DB handle — otherwise we just run on the
-// text + category signals.
-//
-// This is the canonical entry point from CreateChallenge. Tests and
-// any other classifier consumers should also call it (rather than
-// reaching into scoreEnergy directly) so the threshold logic stays
-// in one place.
-func deriveEnergyLevel(category, subject, caption string) string {
-	return deriveEnergyLevelWithCreator(category, subject, caption, "")
-}
-
-// deriveEnergyLevelWithCreator is the variant that folds in the
-// creator-baseline signal. Most callers should use the 3-arg
-// [deriveEnergyLevel]; this version exists so CreateChallenge can
-// pass the creator ID without forcing every other call site to
-// thread it through.
+// deriveEnergyLevelWithCreator returns "low" | "medium" | "high" for a
+// new challenge, folding in the creator-baseline signal. This is the
+// canonical entry point from CreateChallenge; callers without a creator
+// pass "" and the classifier runs on the text + category signals alone.
+// Consumers should call this (rather than reaching into scoreEnergy
+// directly) so the threshold logic stays in one place.
 func deriveEnergyLevelWithCreator(category, subject, caption, creatorID string) string {
 	high, low := scoreEnergy(category, subject, caption, creatorID)
 	gap := high - low

@@ -32,13 +32,29 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// maxHLSAttempts bounds how many times a source video gets claimed for
+// transcoding before we give up on it. Attempts are counted at CLAIM
+// time (not fail time) so worker crashes mid-job count too — a corrupt
+// mp4 or a codec FFmpeg can't read stops consuming worker cycles after
+// this many tries instead of being re-claimed and re-failed forever.
+const maxHLSAttempts = 5
+
+// hlsKindResponse marks a job/report as targeting the
+// challenge_responses table; anything else (including the empty string
+// older workers send) means the challenges table. Battle responses get
+// the same adaptive-bitrate treatment as the primary video — before
+// this, the opponent leg of every battle played the raw MP4 only.
+const hlsKindResponse = "response"
 
 // pendingHLSJob is the payload the worker pulls. Empty string fields
 // mean "no work right now" — the worker should sleep and retry.
 type pendingHLSJob struct {
-	ChallengeID string `json:"challengeId"`
-	SourceURL   string `json:"sourceUrl"` // the original mp4 in R2 the worker fetches
+	ChallengeID string `json:"challengeId"` // row id in the kind's table (name kept for wire compat)
+	SourceURL   string `json:"sourceUrl"`   // the original mp4 in R2 the worker fetches
+	Kind        string `json:"kind"`        // "challenge" (default) | "response"
 }
 
 // hlsCompleteRequest is what the worker POSTs after a successful
@@ -46,6 +62,18 @@ type pendingHLSJob struct {
 type hlsCompleteRequest struct {
 	ChallengeID string `json:"challengeId"`
 	ManifestURL string `json:"manifestUrl"`
+	Kind        string `json:"kind"` // "" / "challenge" | "response"
+}
+
+// hlsTableForKind maps the wire kind to the table whose
+// hls_manifest_url state machine the request drives. Defaulting to
+// challenges keeps already-deployed workers (which don't send kind)
+// working unchanged.
+func hlsTableForKind(kind string) string {
+	if kind == hlsKindResponse {
+		return "challenge_responses"
+	}
+	return "challenges"
 }
 
 // workerAuthed wraps a handler with the X-Worker-Token check. We do
@@ -87,32 +115,56 @@ func HLSNextPendingHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	row := db.QueryRow(`
-		UPDATE challenges
-		   SET hls_manifest_url = 'PENDING'
-		 WHERE id = (
-		   SELECT id FROM challenges
-		    WHERE hls_manifest_url = ''
-		      AND video_url <> ''
-		    ORDER BY created_at DESC
-		    LIMIT 1
-		    FOR UPDATE SKIP LOCKED
-		 )
-		 RETURNING id, video_url`)
-	var idInt int
-	var srcURL string
-	if err := row.Scan(&idInt, &srcURL); err != nil {
-		// No rows = no work available. 204 lets the worker treat this
-		// as a non-error and sleep before polling again.
-		w.WriteHeader(http.StatusNoContent)
+	// Challenges first (the primary video every viewer sees), then
+	// battle responses. Two cheap indexed probes instead of a UNION so
+	// each table keeps its own partial index and the common case (no
+	// backlog) stays a single no-op query.
+	//
+	// hls_attempts is incremented AT CLAIM so crashes count as attempts;
+	// rows that reach maxHLSAttempts stop being offered. hls_claimed_at
+	// lets startHLSReaper reset jobs orphaned by a worker that died
+	// mid-transcode (state stuck at 'PENDING').
+	claim := func(table string) (int, string, bool) {
+		row := db.QueryRow(`
+			UPDATE ` + table + `
+			   SET hls_manifest_url = 'PENDING',
+			       hls_claimed_at   = NOW(),
+			       hls_attempts     = hls_attempts + 1
+			 WHERE id = (
+			   SELECT id FROM ` + table + `
+			    WHERE hls_manifest_url = ''
+			      AND video_url <> ''
+			      AND hls_attempts < ` + strconv.Itoa(maxHLSAttempts) + `
+			    ORDER BY created_at DESC
+			    LIMIT 1
+			    FOR UPDATE SKIP LOCKED
+			 )
+			 RETURNING id, video_url`)
+		var idInt int
+		var srcURL string
+		if err := row.Scan(&idInt, &srcURL); err != nil {
+			return 0, "", false
+		}
+		return idInt, srcURL, true
+	}
+
+	if id, src, ok := claim("challenges"); ok {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(pendingHLSJob{
+			ChallengeID: strconv.Itoa(id), SourceURL: src, Kind: "challenge",
+		})
 		return
 	}
-	resp := pendingHLSJob{
-		ChallengeID: strconv.Itoa(idInt),
-		SourceURL:   srcURL,
+	if id, src, ok := claim("challenge_responses"); ok {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(pendingHLSJob{
+			ChallengeID: strconv.Itoa(id), SourceURL: src, Kind: hlsKindResponse,
+		})
+		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	// No rows = no work available. 204 lets the worker treat this
+	// as a non-error and sleep before polling again.
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // HLSCompleteHandler is called by the worker after successful upload.
@@ -137,23 +189,24 @@ func HLSCompleteHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid challengeId", http.StatusBadRequest)
 		return
 	}
+	table := hlsTableForKind(req.Kind)
 	_, err = db.Exec(
-		`UPDATE challenges SET hls_manifest_url = $2 WHERE id = $1`,
+		`UPDATE `+table+` SET hls_manifest_url = $2 WHERE id = $1`,
 		cid, req.ManifestURL,
 	)
 	if err != nil {
-		log.Printf("HLSComplete update error for challenge=%s: %v", req.ChallengeID, err)
+		log.Printf("HLSComplete update error for %s=%s: %v", table, req.ChallengeID, err)
 		http.Error(w, "db update failed", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// HLSFailHandler lets the worker mark a job as failed so we don't
-// keep retrying a broken source forever. We reset hls_manifest_url
-// back to '' so other workers can have a go, but also log so we can
-// find broken sources in the metrics. A "max-attempts" cap could
-// live here later if we see repeat-failure patterns in production.
+// HLSFailHandler lets the worker mark a job as failed. We reset
+// hls_manifest_url back to '' so another attempt can claim it — but
+// only while hls_attempts stays under maxHLSAttempts (counted at claim
+// time in HLSNextPendingHandler), so a genuinely broken source stops
+// being retried after the cap instead of looping forever.
 func HLSFailHandler(w http.ResponseWriter, r *http.Request) {
 	if db == nil {
 		http.Error(w, "db unavailable", http.StatusServiceUnavailable)
@@ -169,10 +222,47 @@ func HLSFailHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid challengeId", http.StatusBadRequest)
 		return
 	}
-	log.Printf("HLS transcode failed for challenge=%d reason=%q", cid, req.ManifestURL)
+	table := hlsTableForKind(req.Kind)
+	log.Printf("HLS transcode failed for %s=%d reason=%q", table, cid, req.ManifestURL)
 	_, _ = db.Exec(
-		`UPDATE challenges SET hls_manifest_url = '' WHERE id = $1 AND hls_manifest_url = 'PENDING'`,
+		`UPDATE `+table+` SET hls_manifest_url = '' WHERE id = $1 AND hls_manifest_url = 'PENDING'`,
 		cid,
 	)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// startHLSReaper resets jobs orphaned in the 'PENDING' state — a worker
+// that crashed (or was redeployed) mid-transcode never reports
+// complete/fail, and without this sweep the row is invisible to
+// next-pending forever. 30 minutes is ~20x a normal 60s-reel transcode,
+// so a reset here virtually never races a live job; if it somehow does,
+// the duplicate transcode is idempotent (last complete wins, R2 keys
+// are random-prefixed per attempt).
+//
+// Rows that already burned maxHLSAttempts stay reset-to-'' but are
+// never re-offered by the claim query's attempts filter.
+func startHLSReaper() {
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			if db == nil {
+				continue
+			}
+			for _, table := range []string{"challenges", "challenge_responses"} {
+				res, err := db.Exec(`
+					UPDATE ` + table + `
+					   SET hls_manifest_url = ''
+					 WHERE hls_manifest_url = 'PENDING'
+					   AND hls_claimed_at < NOW() - INTERVAL '30 minutes'`)
+				if err != nil {
+					log.Printf("hls reaper %s error: %v", table, err)
+					continue
+				}
+				if n, _ := res.RowsAffected(); n > 0 {
+					log.Printf("hls reaper: reset %d stuck PENDING row(s) in %s", n, table)
+				}
+			}
+		}
+	}()
 }

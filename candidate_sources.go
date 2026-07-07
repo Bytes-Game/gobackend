@@ -56,18 +56,8 @@ var defaultSourceWeights = map[string]float64{
 	"searchAffinity": 0.10,
 }
 
-// multiSourceFetch runs all default sources in parallel and merges results,
-// deduping by (type, id). Per-source budget = totalLimit * weight.
-//
-// This wrapper preserves the legacy signature for callers that don't carry
-// cohort context. Production should call multiSourceFetchForCohort so the
-// learned per-cohort blending weights are applied.
-func multiSourceFetch(userID string, totalLimit int) []HomeFeedItem {
-	items, _ := multiSourceFetchForCohort(userID, totalLimit, "")
-	return items
-}
-
-// multiSourceFetchForCohort is the cohort-aware variant. Returns items AND
+// multiSourceFetchForCohort runs all sources in parallel and merges results,
+// deduping by (type, id). Per-source budget = totalLimit * weight. Returns items AND
 // a per-item source-attribution map (keyed by item type+id) so the LTR
 // stash can record which source produced each impression. Reward observation
 // at outcome time then credits the right source.

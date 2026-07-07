@@ -5,8 +5,6 @@ import (
 	"log"
 	"sync"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -43,6 +41,11 @@ import (
 // scroller burning through 10 reels in 5s only gets ~3 hints (one every
 // other swipe). The client's velocity-aware prefetch covers the gap.
 const hintThrottleWindow = 2 * time.Second
+
+// hintSweepThreshold triggers the stale-stamp sweep of hintLastSent.
+// Every entry older than hintThrottleWindow is dead weight; sweeping
+// only past this size keeps the common case allocation-free.
+const hintSweepThreshold = 4096
 
 var (
 	hintLastSentMu sync.Mutex
@@ -83,15 +86,27 @@ func SendNextReelHint(userID, currentContentID string) {
 	// (e.g. user went offline between checks), the throttle stamp is
 	// still correct because the next call will re-check time.Since().
 	hintLastSent[username] = time.Now()
+	// Opportunistic sweep: every stamp is stale after the throttle
+	// window, so anything older is pure garbage. Without this the map
+	// grew by one entry per distinct user for the life of the process
+	// (a slow leak at the millions-of-users target). Amortized: only
+	// runs when the map has grown past the sweep threshold.
+	if len(hintLastSent) > hintSweepThreshold {
+		cutoff := time.Now().Add(-hintThrottleWindow)
+		for u, t := range hintLastSent {
+			if t.Before(cutoff) {
+				delete(hintLastSent, u)
+			}
+		}
+	}
 	hintLastSentMu.Unlock()
 
-	// Only do real work if the user is actually online. There's no
-	// point picking and sending if the WebSocket isn't there to
+	// Only do real work if the user is actually online (on any replica).
+	// There's no point picking and sending if no WebSocket is there to
 	// deliver — and storing an ephemeral prefetch URL in Redis for
 	// "later" delivery is worse than nothing (the URL could be evicted
 	// from CDN, the user's interests could have shifted, etc.).
-	conn, online := IsUserOnline(username)
-	if !online || conn == nil {
+	if !IsUserOnline(username) {
 		return
 	}
 
@@ -133,7 +148,7 @@ func SendNextReelHint(userID, currentContentID string) {
 	if err != nil {
 		return
 	}
-	if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+	if !wsDeliver(username, payload) {
 		// Lost connection mid-write. Don't try to recover — the next
 		// watch event will trigger a fresh hint if the user reconnects.
 		// Drop the throttle stamp so the reconnected client gets a
@@ -142,6 +157,6 @@ func SendNextReelHint(userID, currentContentID string) {
 		hintLastSentMu.Lock()
 		delete(hintLastSent, username)
 		hintLastSentMu.Unlock()
-		log.Printf("next_reel_hint: write failed for %s: %v", username, err)
+		log.Printf("next_reel_hint: delivery failed for %s", username)
 	}
 }

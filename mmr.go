@@ -79,8 +79,20 @@ func positionLambda(pos, topK int) float64 {
 // Existing callers using applyMMR get the default creator extractor and
 // position-varying λ scheme.
 func applyMMRWithCreator(items []ScoredItem, lambda float64, topK int, embedOf func(ScoredItem) []float64, creatorOf func(ScoredItem) string) []ScoredItem {
+	return applyMMRWithCreatorPenalty(items, lambda, topK, embedOf, creatorOf, mmrCreatorPenalty)
+}
+
+// applyMMRWithCreatorPenalty is applyMMRWithCreator with an explicit
+// per-repeat creator penalty. Exists because explore wants a stronger
+// penalty (0.30) than the For You default — the old code couldn't
+// express that (the penalty was a hard-read package constant) and
+// shipped with an "acceptable as an MVP" comment instead.
+func applyMMRWithCreatorPenalty(items []ScoredItem, lambda float64, topK int, embedOf func(ScoredItem) []float64, creatorOf func(ScoredItem) string, creatorPenalty float64) []ScoredItem {
 	if len(items) <= 1 {
 		return items
+	}
+	if creatorPenalty <= 0 {
+		creatorPenalty = mmrCreatorPenalty
 	}
 	if topK <= 0 || topK > len(items) {
 		topK = len(items)
@@ -156,10 +168,10 @@ func applyMMRWithCreator(items []ScoredItem, lambda float64, topK int, embedOf f
 				}
 			}
 			// Per-creator soft penalty: each prior pick from this creator
-			// shaves mmrCreatorPenalty off the candidate's MMR score.
+			// shaves creatorPenalty off the candidate's MMR score.
 			creatorPen := 0.0
 			if creators[i] != "" {
-				creatorPen = mmrCreatorPenalty * float64(creatorCount[creators[i]])
+				creatorPen = creatorPenalty * float64(creatorCount[creators[i]])
 			}
 			penalty := (1-effLambda)*maxSim + creatorPen
 			mmr := effLambda*head[i].Score - penalty

@@ -66,27 +66,9 @@ func noteSessionCategories(sessionID string, categories []string) {
 	_, _ = pipe.Exec(rctx)
 }
 
-// sessionDiversityPenalty looks up how often this category has appeared
-// earlier in the session and returns a bounded score penalty. Returns 0
-// for the first appearance, growing superlinearly thereafter.
-//
-// Cheap: one HGET per call. For a typical 30-item feed × 6 categories,
-// that's 6 lookups per page (callers should bulk-fetch via
-// loadSessionCategoryCounts when ranking many candidates from few categories).
-func sessionDiversityPenalty(sessionID, category string) float64 {
-	if rdb == nil || sessionID == "" || category == "" {
-		return 0
-	}
-	v, err := rdb.HGet(rctx, sessionDiversityKeyPrefix+sessionID, strings.ToLower(category)).Result()
-	if err != nil || v == "" {
-		return 0
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		return 0
-	}
-	return diversityPenaltyForCount(n)
-}
+// (The per-call HGET variant sessionDiversityPenalty was removed — the
+// bulk path below is what production uses: hydrate the hash once per
+// request, then diversityPenaltyForCount per candidate at O(1).)
 
 // loadSessionCategoryCounts hydrates the full session-categories hash so
 // the per-candidate penalty lookup is O(1) without a Redis round-trip per

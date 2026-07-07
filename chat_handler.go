@@ -19,6 +19,12 @@ type SendMessagePayload struct {
 	ReplyToID  string `json:"replyToId,omitempty"`
 }
 
+// maxChatMessageLen bounds a single chat message. Generous for real
+// conversation (~15 sentences), tight enough that a hostile client
+// can't stuff megabytes into a TEXT column per request — the send
+// endpoint previously had no cap at all.
+const maxChatMessageLen = 4000
+
 // SendMessageHandler handles POST /api/v1/chat/send
 func SendMessageHandler(w http.ResponseWriter, r *http.Request) {
 	var payload SendMessagePayload
@@ -29,10 +35,38 @@ func SendMessageHandler(w http.ResponseWriter, r *http.Request) {
 	// The sender is the authenticated user — you can't send as someone else.
 	payload.SenderID = authUserID(r)
 
+	// Rate limit: the "chat" bucket (1/s, burst 10) existed in
+	// actionLimitTable all along but chat was the one mutating surface
+	// that never consulted it.
+	if !allowAction(payload.SenderID, "chat") {
+		writeRateLimited(w, "chat")
+		return
+	}
+
 	senderID, _ := strconv.Atoi(payload.SenderID)
 	receiverID, _ := strconv.Atoi(payload.ReceiverID)
 	if senderID == 0 || receiverID == 0 || payload.Message == "" {
 		http.Error(w, "senderId, receiverId, and message are required", http.StatusBadRequest)
+		return
+	}
+	if len(payload.Message) > maxChatMessageLen {
+		http.Error(w, "message too long", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	// Respect blocks in either direction — a block means no DMs, same
+	// as every mainstream social product. Fail-open on query error
+	// (chat availability beats block strictness on a transient DB blip).
+	var blocked bool
+	if db != nil {
+		_ = db.QueryRow(`SELECT EXISTS(
+			SELECT 1 FROM user_blocks
+			 WHERE (blocker_id = $1 AND blocked_id = $2)
+			    OR (blocker_id = $2 AND blocked_id = $1))`,
+			senderID, receiverID).Scan(&blocked)
+	}
+	if blocked {
+		http.Error(w, "cannot message this user", http.StatusForbidden)
 		return
 	}
 
@@ -304,13 +338,11 @@ func GetSavedChallengesHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(challenges)
 }
 
-// deliverChatMessage sends a chat message to a user via WebSocket.
+// deliverChatMessage sends a chat message to a user via WebSocket —
+// locally, or through the cross-replica relay when the recipient is
+// connected to a different replica. Offline recipients simply don't get
+// a push (the message is already durable in chat_messages).
 func deliverChatMessage(recipientUsername string, msg ChatMessage) {
-	conn, isOnline := IsUserOnline(recipientUsername)
-	if !isOnline || conn == nil {
-		return
-	}
-
 	// Wrap the message in a notification-like envelope with type "chat"
 	envelope := map[string]interface{}{
 		"type":             "chat",
@@ -328,7 +360,7 @@ func deliverChatMessage(recipientUsername string, msg ChatMessage) {
 		return
 	}
 
-	if err := conn.WriteMessage(1, data); err != nil {
-		log.Printf("Failed to deliver chat message to %s: %v", recipientUsername, err)
+	if !wsDeliver(recipientUsername, data) && IsUserOnline(recipientUsername) {
+		log.Printf("Failed to deliver chat message to %s", recipientUsername)
 	}
 }

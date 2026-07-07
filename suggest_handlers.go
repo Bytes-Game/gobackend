@@ -139,10 +139,6 @@ func seedChallengeSubjects() {
 	// Build the doc set: every curated subject + every distinct
 	// subject already in the challenges table. Distinct because the
 	// real signal lives in the usage count, not in row duplicates.
-	type subjectRow struct {
-		subject    string
-		usageCount int
-	}
 	combined := map[string]int{}
 	for _, s := range challengeSubjectsRaw {
 		key := strings.ToLower(strings.TrimSpace(s))

@@ -102,6 +102,14 @@ func noteTrendingEvent(contentType, contentID, eventType string, completionRate 
 // noteTrendingEventByUser is noteTrendingEvent with the user multiplier
 // applied. Production callers should use this when they have the userID;
 // back-compat callers fall through to the unweighted path with neutral 1.0.
+//
+// Self-engagement is excluded at WRITE time: a creator watching/liking
+// their own upload must not push it up the global trending board. The
+// read side (sourceTrendingRealtime) already hides a user's own content
+// from their own feed, but that alone still let creators farm trending
+// score for everyone ELSE's feed by looping their own video. The
+// creator lookup rides the 60s-TTL content-score cache, so the common
+// case (content recently scored or engaged) costs a map read.
 func noteTrendingEventByUser(userID, contentType, contentID, eventType string, completionRate float64) {
 	if rdb == nil || contentID == "" {
 		return
@@ -111,6 +119,14 @@ func noteTrendingEventByUser(userID, contentType, contentID, eventType string, c
 		return
 	}
 	if userID != "" {
+		// db-nil guard: the Redis-only test harness (and any degraded
+		// boot where Postgres is down) can't resolve creators —
+		// fail open to the weighted write rather than panic.
+		if db != nil {
+			if cs := getContentScore(contentID, contentType); cs != nil && cs.CreatorID == userID {
+				return // self-engagement never moves the trending board
+			}
+		}
 		w *= userEngagementQuality(userID)
 	}
 	member := contentType + ":" + contentID

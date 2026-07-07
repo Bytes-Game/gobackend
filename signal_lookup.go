@@ -105,12 +105,8 @@ func getPageDwellMs(userID, pageName string) int64 {
 	return p.pageDwellMs[pageName]
 }
 
-// getSocialDriveFallback is used only when UserProfile failed to load; the
-// ranker should prefer UserProfile.SocialDrive when available.
-func getSocialDriveFallback(userID string) float64 {
-	p, ok := precomputedCache.Get(userID)
-	if !ok {
-		return 0.5
-	}
-	return p.socialDrive
-}
+// (getSocialDriveFallback removed — it was written for a "UserProfile
+// failed to load" ranker path that doesn't exist: getOrComputeProfile
+// always synthesizes a profile, so UserProfile.SocialDrive is the only
+// serve-time source. The nightly job's activity-based variant is still
+// warmed into precomputedCache for future consumers.)

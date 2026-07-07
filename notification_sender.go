@@ -72,18 +72,33 @@ func redactToken(t string) string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// fcmSender — production stub. The HTTP body construction is done; the
-// actual fetch is left as a TODO with the right method signature so a
-// production deploy can drop in `httpClient.Post(...)` without touching
-// dispatch logic. This keeps the dispatcher fully testable in dev.
+// fcmSender — real FCM HTTP v1 delivery (see fcm_v1.go for the OAuth +
+// send plumbing). Without a parseable FCM_SERVICE_ACCOUNT_JSON it
+// reports "fcm_not_configured" per token — the old stub behavior — so
+// an unconfigured deploy stays safe and observable.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type fcmSender struct {
 	projectID string
-	apiKey    string
+	tokens    *fcmTokenSource // nil = not configured
+}
+
+// newFCMSender builds the sender from env. FCM_PROJECT overrides the
+// project_id embedded in the service-account key.
+func newFCMSender() *fcmSender {
+	s := &fcmSender{projectID: getEnv("FCM_PROJECT", "")}
+	if sa := parseFCMServiceAccount(getEnv("FCM_SERVICE_ACCOUNT_JSON", "")); sa != nil {
+		s.tokens = &fcmTokenSource{sa: sa}
+		if s.projectID == "" {
+			s.projectID = sa.ProjectID
+		}
+	}
+	return s
 }
 
 func (s *fcmSender) Name() string { return "fcm" }
+
+func (s *fcmSender) configured() bool { return s.tokens != nil && s.projectID != "" }
 
 func (s *fcmSender) Send(notif OutboxRow, tokens []DeviceTokenRow) []SendResult {
 	out := make([]SendResult, 0, len(tokens))
@@ -91,17 +106,16 @@ func (s *fcmSender) Send(notif OutboxRow, tokens []DeviceTokenRow) []SendResult 
 		if t.Platform != "fcm" {
 			continue
 		}
-		// In production: POST to https://fcm.googleapis.com/v1/projects/{projectID}/messages:send
-		// Body: {"message":{"token":t.Token,"notification":{...},"data":{"deeplink":...}}}
-		// Auth: Bearer <oauth token from service-account>
-		//
-		// For the MVP we fail-open with a recognizable reason so dispatcher
-		// behavior is observable — production swap is one HTTP call.
-		out = append(out, SendResult{
-			Token:  t.Token,
-			OK:     false,
-			Reason: "fcm_not_configured",
-		})
+		if !s.configured() {
+			out = append(out, SendResult{
+				Token:  t.Token,
+				OK:     false,
+				Reason: "fcm_not_configured",
+			})
+			continue
+		}
+		ok, dead, reason := sendFCMMessage(s.tokens, s.projectID, notif, t.Token)
+		out = append(out, SendResult{Token: t.Token, OK: ok, Dead: dead, Reason: reason})
 	}
 	return out
 }
@@ -191,10 +205,7 @@ func initPushSender() {
 	want := strings.ToLower(strings.TrimSpace(getEnv("NOTIFICATION_SENDER", "log")))
 	switch want {
 	case "fcm":
-		setCurrentSender(&fcmSender{
-			projectID: getEnv("FCM_PROJECT", ""),
-			apiKey:    getEnv("FCM_KEY", ""),
-		})
+		setCurrentSender(newFCMSender())
 	case "apns":
 		setCurrentSender(&apnsSender{
 			teamID: getEnv("APNS_TEAM", ""),
@@ -204,10 +215,7 @@ func initPushSender() {
 	case "multi":
 		setCurrentSender(&multiSender{
 			byPlatform: map[string]PushSender{
-				"fcm": &fcmSender{
-					projectID: getEnv("FCM_PROJECT", ""),
-					apiKey:    getEnv("FCM_KEY", ""),
-				},
+				"fcm": newFCMSender(),
 				"apns": &apnsSender{
 					teamID: getEnv("APNS_TEAM", ""),
 					keyID:  getEnv("APNS_KEY_ID", ""),
@@ -219,7 +227,11 @@ func initPushSender() {
 	default:
 		setCurrentSender(logSender{})
 	}
-	log.Printf("notifications: sender=%s", getCurrentSender().Name())
+	sender := getCurrentSender()
+	if f, ok := sender.(*fcmSender); ok && !f.configured() {
+		log.Printf("notifications: FCM selected but FCM_SERVICE_ACCOUNT_JSON missing/unparseable — sends will fail with fcm_not_configured")
+	}
+	log.Printf("notifications: sender=%s", sender.Name())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

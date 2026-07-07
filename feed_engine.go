@@ -4805,39 +4805,10 @@ func coldStartChallengesTiered(userID, kind string, limit, offset int, window st
 // What used to be the "post" cold-start branch is replaced by "shorts": the
 // kind="short" call into coldStartChallengesTiered above.)
 
-// enforceDiversity ensures no more than 2 consecutive items of the same type.
-func enforceDiversity(items []HomeFeedItem) []HomeFeedItem {
-	if len(items) <= 2 {
-		return items
-	}
-
-	result := []HomeFeedItem{items[0]}
-	sameCount := 1
-
-	for i := 1; i < len(items); i++ {
-		if items[i].Type == result[len(result)-1].Type {
-			sameCount++
-			if sameCount > 2 {
-				// Find next item of different type and swap
-				for j := i + 1; j < len(items); j++ {
-					if items[j].Type != items[i].Type {
-						items[i], items[j] = items[j], items[i]
-						sameCount = 1
-						break
-					}
-				}
-				if sameCount > 2 {
-					continue // Skip if no different type found
-				}
-			}
-		} else {
-			sameCount = 1
-		}
-		result = append(result, items[i])
-	}
-
-	return result
-}
+// (enforceDiversity retired — it alternated item TYPES (challenge vs
+// post) from the mixed-feed era. The feed is challenge-only now and
+// diversity is owned by MMR (embedding + creator) and the cross-page
+// session-category penalty.)
 
 // ════════════════════════════════════════════════════════════════════════════════
 // LAYER 8: API HANDLERS
@@ -4933,6 +4904,19 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 3: Cold start check
+	// Step 2.9: Log experiment exposure BEFORE the cold-start gate.
+	// Exposures used to be logged after it, which systematically
+	// excluded every cold-start session from variant metrics — the
+	// exact population most sensitive to scoring-weight changes once
+	// they warm up. Logging is per (user, experiment, session) with
+	// ON CONFLICT dedup, so cold sessions cost one row, not one per page.
+	for _, exp := range activeExperiments {
+		if exp.Active {
+			variantID := assignVariant(userID, exp.ID)
+			go logExperimentExposure(userID, exp.ID, variantID, sessionID)
+		}
+	}
+
 	if isColdStartUser(profile) {
 		items, hasMore, err := coldStartFeed(userID, page, limit)
 		if err != nil {
@@ -4949,14 +4933,6 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 			"profile":  nil,
 		})
 		return
-	}
-
-	// Step 3.5: Log experiment exposure
-	for _, exp := range activeExperiments {
-		if exp.Active {
-			variantID := assignVariant(userID, exp.ID)
-			go logExperimentExposure(userID, exp.ID, variantID, sessionID)
-		}
 	}
 
 	// Step 4: Build context (following set, interacted IDs)
@@ -5076,7 +5052,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	//     while a clearly-better item still beats a clearly-worse one.
 	//
 	//   * Demotion of the items that landed at the head of the previous
-	//     refresh: top1 -0.15, top2 -0.10, top3 -0.05. Big enough to
+	//     refresh: top1 -0.30, top2 -0.20, top3 -0.10. Big enough to
 	//     guarantee a different #1 most of the time, small enough that an
 	//     item that's dramatically better than every other candidate can
 	//     still keep its top spot if it actually deserves it.
@@ -5636,10 +5612,15 @@ func populateTopResponses(items []HomeFeedItem) {
 	// fetch — the vote endpoint's contract is (challengeId, responseId,
 	// voterId), and the response id is otherwise only available behind the
 	// detail page.
+	// hls_manifest_url uses the same ''/'PENDING'/URL state machine as
+	// the challenges column — CASE it to '' unless it's a real URL so
+	// the client never receives the claim sentinel as a playable URL.
 	query := `
 		SELECT DISTINCT ON (cr.challenge_id)
 			cr.challenge_id, cr.id, cr.video_url, COALESCE(cr.thumbnail_url, ''),
 			COALESCE(cr.video_variants, '{}'::jsonb),
+			CASE WHEN COALESCE(cr.hls_manifest_url, '') IN ('', 'PENDING') THEN ''
+			     ELSE cr.hls_manifest_url END,
 			ru.username, ru.league,
 			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = cr.challenge_id)
 		FROM challenge_responses cr
@@ -5654,9 +5635,9 @@ func populateTopResponses(items []HomeFeedItem) {
 	defer rows.Close()
 	for rows.Next() {
 		var cid, rid, totalCount int
-		var videoURL, thumbURL, username, league string
+		var videoURL, thumbURL, hlsURL, username, league string
 		var variantsRaw []byte
-		if err := rows.Scan(&cid, &rid, &videoURL, &thumbURL, &variantsRaw, &username, &league, &totalCount); err != nil {
+		if err := rows.Scan(&cid, &rid, &videoURL, &thumbURL, &variantsRaw, &hlsURL, &username, &league, &totalCount); err != nil {
 			continue
 		}
 		// Decode variants leniently — a malformed payload should NOT
@@ -5678,6 +5659,7 @@ func populateTopResponses(items []HomeFeedItem) {
 			ch.TopResponseID = ridStr
 			ch.TopResponseVideoUrl = videoURL
 			ch.TopResponseThumbnailUrl = thumbURL
+			ch.TopResponseHLSManifestURL = hlsURL
 			ch.TopResponseUsername = username
 			ch.TopResponseLeague = league
 			ch.TopResponseVideoVariants = variants
@@ -5910,11 +5892,16 @@ func populateHLSManifestURLs(items []HomeFeedItem) {
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 		args[i] = id
 	}
+	// The <> 'PENDING' leg matters: 'PENDING' is the worker-claim
+	// sentinel, not a URL. Without it, any challenge served during its
+	// transcode window shipped the literal string "PENDING" as
+	// hlsManifestUrl and the client tried to play it as a video.
 	rows, err := db.Query(`
 		SELECT id, COALESCE(hls_manifest_url, '')
 		FROM challenges
 		WHERE id IN (`+strings.Join(placeholders, ",")+`)
-		  AND hls_manifest_url <> ''`, args...)
+		  AND hls_manifest_url <> ''
+		  AND hls_manifest_url <> 'PENDING'`, args...)
 	if err != nil {
 		log.Printf("populateHLSManifestURLs query error: %v", err)
 		return

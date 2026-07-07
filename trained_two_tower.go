@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"sync"
 	"time"
 )
 
@@ -180,22 +179,3 @@ func persistTrainedContent(key string, v *ttContentVec) {
 	_ = rdb.Set(rctx, ttContentRedisKey+key, js, ttContentTTL).Err()
 }
 
-// twoTowerCosineDriftFromPrior measures how far a content vector has
-// drifted from its initial hash-trick prior. Useful for diagnostics +
-// admin dashboards: high drift means the vector has learned something
-// surprising about its real audience.
-func twoTowerCosineDriftFromPrior(cs *ContentScore, emotions []string) float64 {
-	if cs == nil || cs.ContentID == "" {
-		return 0
-	}
-	tt := loadOrInitTrainedContent(cs, emotions)
-	if tt == nil || tt.Updates < ttMinUpdatesForTrained {
-		return 0
-	}
-	// 1 - cosine = drift; clamp to [0, 2].
-	return 1.0 - cosineSim(tt.Trained, tt.Prior)
-}
-
-// trainedTwoTowerInitMu is exported only so tests can serialize concurrent
-// writes that share the same content key during high-volume simulations.
-var trainedTwoTowerInitMu sync.Mutex

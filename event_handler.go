@@ -163,6 +163,12 @@ func HandleReportEvent(w http.ResponseWriter, r *http.Request) {
 		go MarkBlocked(payload.ReporterID, payload.TargetID)
 	}
 
+	// A report counts against the target's engagement-quality trust
+	// multiplier (flags-against penalty in computeEngagementQuality).
+	// Drop their cached multiplier so the next trending-weight read
+	// reflects the report immediately instead of after the 10-min TTL.
+	go invalidateEngagementQuality(payload.TargetID)
+
 	// Drop the content's cached two-tower embedding so the next ranker pass
 	// rebuilds it from current metadata (which moderation may have changed,
 	// e.g. category re-tagging or visibility flip). Cheap and best-effort.

@@ -139,12 +139,40 @@ type rateLimiter struct {
 	buckets  map[string]*bucket
 	rate     float64 // tokens per second
 	capacity int
+	// name namespaces this limiter's keys in Redis for the distributed
+	// path. Empty = in-process only (tests, or unnamed limiters).
+	name string
 }
 
 type bucket struct {
 	tokens    float64
 	lastCheck time.Time
 }
+
+// rateLimitLua is an atomic token bucket in Redis — the multi-replica
+// variant of (rl *rateLimiter).allow. State per key is a hash
+// {t: tokens, ts: last-check ms}; the script refills by elapsed time,
+// consumes one token when available, and returns 1/0. A 15-minute TTL
+// mirrors the in-process janitor (an idle bucket is full anyway, so
+// expiry loses nothing).
+const rateLimitLua = `
+local rate = tonumber(ARGV[1])
+local cap  = tonumber(ARGV[2])
+local now  = tonumber(ARGV[3])
+local h = redis.call('HMGET', KEYS[1], 't', 'ts')
+local tokens = tonumber(h[1])
+local ts     = tonumber(h[2])
+if tokens == nil then tokens = cap; ts = now end
+local elapsed = (now - ts) / 1000.0
+if elapsed > 0 then
+  tokens = math.min(cap, tokens + elapsed * rate)
+end
+local allowed = 0
+if tokens >= 1 then tokens = tokens - 1; allowed = 1 end
+redis.call('HSET', KEYS[1], 't', tokens, 'ts', now)
+redis.call('PEXPIRE', KEYS[1], 900000)
+return allowed
+`
 
 // limiterRegistry tracks every rateLimiter created so a single background
 // janitor can sweep idle buckets out of all of them. Without this the buckets
@@ -164,6 +192,16 @@ func newRateLimiter(rps float64, burst int) *rateLimiter {
 	limiterRegistryMu.Lock()
 	limiterRegistry = append(limiterRegistry, rl)
 	limiterRegistryMu.Unlock()
+	return rl
+}
+
+// newNamedRateLimiter is newRateLimiter plus a Redis key namespace,
+// which opts the limiter into the distributed token bucket when
+// MULTI_REPLICA is on. Production limiters use this; unnamed limiters
+// (tests) always stay in-process.
+func newNamedRateLimiter(name string, rps float64, burst int) *rateLimiter {
+	rl := newRateLimiter(rps, burst)
+	rl.name = name
 	return rl
 }
 
@@ -222,6 +260,20 @@ func clientIP(r *http.Request) string {
 }
 
 func (rl *rateLimiter) allow(key string) bool {
+	// Multi-replica mode: one shared token bucket in Redis instead of a
+	// per-replica bucket (N replicas would otherwise multiply every
+	// budget by N). On Redis error, fall THROUGH to the in-process
+	// bucket — degraded to per-replica limiting, never to unlimited.
+	if rl.name != "" && multiReplica() && rdb != nil {
+		res, err := rdb.Eval(rctx, rateLimitLua,
+			[]string{"rl:" + rl.name + ":" + key},
+			rl.rate, rl.capacity, time.Now().UnixMilli()).Result()
+		if err == nil {
+			n, _ := res.(int64)
+			return n == 1
+		}
+	}
+
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
@@ -285,6 +337,14 @@ func main() {
 	initPushSender()
 	startNotificationDispatcher()
 	startNotificationTriggers()
+	// Reset HLS transcode jobs orphaned at 'PENDING' by crashed workers.
+	startHLSReaper()
+	// Restore the learned mood-transition + session-trajectory state
+	// that lives in process memory (write-through keeps Redis current).
+	loadMoodTransitions()
+	loadSessionTrajectories()
+	// Cross-replica WebSocket delivery (no-op unless MULTI_REPLICA=1).
+	startWSRelay()
 	// Evict idle rate-limiter buckets so the in-memory limiter maps don't grow
 	// without bound (one entry per client/user forever).
 	startLimiterJanitor()
@@ -292,7 +352,7 @@ func main() {
 	r := mux.NewRouter()
 
 	// Apply rate limiting: 10 requests/sec with burst of 20 per IP
-	limiter := newRateLimiter(10, 20)
+	limiter := newNamedRateLimiter("ip", 10, 20)
 	r.Use(rateLimitMiddleware(limiter))
 	r.Use(metricsMiddleware)
 

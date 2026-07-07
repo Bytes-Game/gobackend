@@ -333,15 +333,24 @@ func runMigrations() {
 	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN video_variants JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 
 	-- HLS master manifest URL produced by the background transcode worker.
-	-- Empty string means "worker hasn't transcoded this challenge yet" —
-	-- clients fall back to video_url / video_variants until the column
-	-- gets populated by the worker callback (POST /api/challenges/:id/hls-ready).
+	-- State machine: '' = untranscoded, 'PENDING' = claimed by a worker,
+	-- anything else = the public master.m3u8 URL. Clients fall back to
+	-- video_url / video_variants until the worker reports completion via
+	-- POST /api/v1/internal/hls/complete.
 	--
 	-- Stored as TEXT (not VARCHAR(N)) because R2 + custom-domain URLs can
 	-- be long once query params for cache-busting land. Default '' keeps
 	-- the column safe to NOT NULL filter on without a separate IS NULL leg.
 	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN hls_manifest_url TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN hls_manifest_url TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	-- HLS queue bookkeeping: hls_attempts caps how many times a broken
+	-- source gets claimed (incremented at claim in HLSNextPendingHandler),
+	-- hls_claimed_at lets startHLSReaper reset rows a crashed worker left
+	-- stuck at 'PENDING'.
+	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN hls_attempts INT DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN hls_attempts INT DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN hls_claimed_at TIMESTAMPTZ; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN hls_claimed_at TIMESTAMPTZ; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	-- Partial index so the transcode worker's "find next untranscoded
 	-- challenge" query is a fast index scan instead of a sequential one.
 	-- Filtering on the empty string is functionally the same as IS NULL
@@ -349,6 +358,14 @@ func runMigrations() {
 	DO $$ BEGIN
 		CREATE INDEX IF NOT EXISTS challenges_pending_hls_idx
 			ON challenges (created_at)
+			WHERE hls_manifest_url = '';
+	EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+	-- Same queue index for the battle-response leg of the pipeline
+	-- (responses joined the transcode queue when kind-aware claiming
+	-- shipped).
+	DO $$ BEGIN
+		CREATE INDEX IF NOT EXISTS responses_pending_hls_idx
+			ON challenge_responses (created_at)
 			WHERE hls_manifest_url = '';
 	EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
@@ -480,6 +497,18 @@ func runMigrations() {
 
 	CREATE INDEX IF NOT EXISTS idx_experiment_exposures_exp ON experiment_exposures(experiment_id, variant_id);
 	CREATE INDEX IF NOT EXISTS idx_experiment_exposures_user ON experiment_exposures(user_id, experiment_id);
+	-- Exposure dedup: one row per (user, experiment, session). Pre-index
+	-- rows were written once per FEED PAGE, so first collapse historical
+	-- duplicates (keep the earliest), then enforce uniqueness — the
+	-- logExperimentExposure INSERT relies on ON CONFLICT against this.
+	DELETE FROM experiment_exposures a
+	 USING experiment_exposures b
+	 WHERE a.id > b.id
+	   AND a.user_id = b.user_id
+	   AND a.experiment_id = b.experiment_id
+	   AND a.session_id = b.session_id;
+	CREATE UNIQUE INDEX IF NOT EXISTS uniq_experiment_exposures_session
+		ON experiment_exposures(user_id, experiment_id, session_id);
 	CREATE INDEX IF NOT EXISTS idx_user_similarities_user ON user_similarities(user_id, similarity_score DESC);
 
 	-- /users/{id}/likes — reverse lookup of challenges a user liked,
@@ -774,7 +803,10 @@ func GetUserByID(idStr string) (User, bool) {
 // UserExists checks whether a username is already taken.
 func UserExists(username string) bool {
 	var exists bool
-	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE username = $1`, username).Scan(&exists)
+	// NB: this had a missing closing paren for months — no callers
+	// exercised it, so the syntax error only surfaced when the future
+	// signup flow reached for it and always got `false`.
+	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)`, username).Scan(&exists)
 	return exists
 }
 

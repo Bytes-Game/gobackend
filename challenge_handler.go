@@ -156,11 +156,20 @@ func GetChallengeDetailHandler(w http.ResponseWriter, r *http.Request) {
 		votes = []VoteSummary{}
 	}
 
-	// Check league eligibility if userId provided
+	// Check league eligibility for the AUTHENTICATED viewer. Advisory
+	// only (drives the client's canAccept flag; AcceptChallengeHandler
+	// re-checks authoritatively), but it used to read userId from the
+	// query string — the one identity-shaped input in the codebase not
+	// derived from the token. Token first; query-param fallback kept for
+	// the public (unauthed) detail route where there is no token.
 	canAccept := true
 	leagueMsg := ""
-	if userID := r.URL.Query().Get("userId"); userID != "" {
-		if err := checkLeagueEligibility(challenge.CreatorID, userID); err != nil {
+	viewerID := authUserID(r)
+	if viewerID == "" {
+		viewerID = r.URL.Query().Get("userId")
+	}
+	if viewerID != "" {
+		if err := checkLeagueEligibility(challenge.CreatorID, viewerID); err != nil {
 			canAccept = false
 			leagueMsg = err.Error()
 		}

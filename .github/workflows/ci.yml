@@ -1,0 +1,64 @@
+name: ci
+
+# This workflow lives in the gobackend repo — the repo Render deploys —
+# so it runs against the REAL backend source on every push.
+#
+# History: a copy of this pipeline existed only in the Frontend repo
+# (.github/workflows/backend-ci.yml), where devb is a bare gitlink
+# submodule pointer. That workflow could never run: pointer bumps
+# change the path `devb` (not `devb/**`, so the filter never matched)
+# and checkout without .gitmodules leaves devb/ empty anyway. The
+# backend effectively shipped with zero CI until this file.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      # Race detector. CGO is available on Linux runners, so -race works
+      # here even when developers on Windows machines can't run it locally.
+      - name: go test -race
+        run: go test -race -count=1 ./...
+        timeout-minutes: 10
+
+      - name: staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: '2025.1'
+          install-go: false
+
+  load-smoke:
+    # Manually dispatched: runs the native Go load harness against a
+    # target URL. Requires the STAGING_URL secret to be configured on
+    # THIS (gobackend) repo.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+          cache-dependency-path: go.sum
+      - name: smoke test
+        run: go run ./smoketest -base=${{ secrets.STAGING_URL }}
+      - name: load test (gentle)
+        run: go run ./loadtest -base=${{ secrets.STAGING_URL }} -users=50 -rps=100 -duration=60s

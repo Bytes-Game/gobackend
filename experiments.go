@@ -126,10 +126,18 @@ func getExperimentConfig(userID string) map[string]float64 {
 
 // logExperimentExposure records that a user saw content under a specific variant.
 // This is the measurement side — we aggregate these later to compare variants.
+//
+// One row per (user, experiment, session) — an exposure is a fact about
+// the session, not about each feed page in it. The old unconditional
+// INSERT grew the table linearly with feed traffic (dozens of identical
+// rows per scroll session) while adding nothing statistically, since the
+// results query already groups per session. Backed by
+// uniq_experiment_exposures_session (see runMigrations).
 func logExperimentExposure(userID, experimentID, variantID, sessionID string) {
 	_, err := db.Exec(`
 		INSERT INTO experiment_exposures (user_id, experiment_id, variant_id, session_id)
-		VALUES ($1, $2, $3, $4)`,
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (user_id, experiment_id, session_id) DO NOTHING`,
 		userID, experimentID, variantID, sessionID)
 	if err != nil {
 		log.Printf("Failed to log experiment exposure: %v", err)

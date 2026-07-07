@@ -226,6 +226,11 @@ type Challenge struct {
 	// fall back to TopResponseVideoUrl in that case (which is already
 	// the canonical/720p URL by convention).
 	TopResponseVideoVariants VideoVariants `json:"topResponseVideoVariants,omitempty"`
+	// HLS master manifest for the top response, mirroring HLSManifestURL
+	// on the primary video. Populated once the transcode worker finishes
+	// the response leg; empty (and omitted) until then — client falls
+	// back to TopResponseVideoUrl exactly like the primary fallback chain.
+	TopResponseHLSManifestURL string `json:"topResponseHlsManifestUrl,omitempty"`
 }
 
 // HomeFeedItem wraps a post, challenge, or suggested-accounts card for the

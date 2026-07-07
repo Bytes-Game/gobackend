@@ -1,6 +1,11 @@
 package main
 
-import "sync"
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"sync"
+	"time"
+)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // KEYED LOCKS — serialize read-modify-write on a string key within this process.
@@ -21,10 +26,10 @@ import "sync"
 // forever. Same key always maps to the same shard; two distinct keys may rarely
 // share a shard (a harmless bit of extra serialization).
 //
-// SCOPE: in-process — correct for a single instance (Render free tier). For a
-// multi-instance deployment these RMW sequences need Redis WATCH/MULTI or a Lua
-// CAS; an in-process lock can't serialize across replicas. Documented so the
-// next person scaling out knows to revisit.
+// SCOPE: the shard mutex serializes within this process; with
+// MULTI_REPLICA=1 a best-effort Redis lease (SET NX PX + owner-checked
+// release) additionally serializes across replicas. The lease is
+// fail-open by design — see lock() below.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type shardedMutex struct {
@@ -37,6 +42,14 @@ func newShardedMutex() *shardedMutex { return &shardedMutex{} }
 //
 //	unlock := keyLocks.lock(userID)
 //	defer unlock()
+//
+// In multi-replica mode a Redis lease is layered ON TOP of the local
+// shard mutex: the local mutex serializes goroutines in this process
+// (cheap, always), the lease serializes processes. Lease acquisition
+// spins briefly and then proceeds WITHOUT the lease rather than fail —
+// for recommender state, a rare lost update beats stalling the event
+// pipeline behind a slow peer (same fail-open philosophy as every other
+// Redis dependency here).
 func (s *shardedMutex) lock(key string) func() {
 	// FNV-1a, inline — no allocation on the hot path.
 	var h uint32 = 2166136261
@@ -46,7 +59,66 @@ func (s *shardedMutex) lock(key string) func() {
 	}
 	mu := &s.shards[h%uint32(len(s.shards))]
 	mu.Lock()
-	return mu.Unlock
+
+	if !multiReplica() || rdb == nil {
+		return mu.Unlock
+	}
+	release := acquireRedisLease("lk:"+key, redisLeaseTTL)
+	return func() {
+		release()
+		mu.Unlock()
+	}
+}
+
+const (
+	// redisLeaseTTL bounds how long a crashed holder can block peers.
+	// RMW sections here are load-blob → mutate → save-blob: a few Redis
+	// or Postgres round-trips, single-digit milliseconds normally.
+	redisLeaseTTL = 3 * time.Second
+	// redisLeaseWait is the max total time we spin waiting for a peer
+	// before proceeding un-leased (fail-open).
+	redisLeaseWait = 500 * time.Millisecond
+)
+
+// releaseLeaseLua releases a lease only if we still hold it — deleting
+// unconditionally could release a lease a peer legitimately acquired
+// after ours expired.
+const releaseLeaseLua = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`
+
+// acquireRedisLease takes a best-effort cross-process lease and returns
+// its release func. Always returns a usable func — on timeout or Redis
+// failure it returns a no-op and the caller proceeds un-leased.
+func acquireRedisLease(key string, ttl time.Duration) func() {
+	tok := make([]byte, 12)
+	if _, err := rand.Read(tok); err != nil {
+		return func() {}
+	}
+	token := hex.EncodeToString(tok)
+	deadline := time.Now().Add(redisLeaseWait)
+	backoff := 5 * time.Millisecond
+	for {
+		ok, err := rdb.SetNX(rctx, key, token, ttl).Result()
+		if err != nil {
+			return func() {} // Redis down — proceed un-leased
+		}
+		if ok {
+			return func() {
+				_ = rdb.Eval(rctx, releaseLeaseLua, []string{key}, token).Err()
+			}
+		}
+		if time.Now().After(deadline) {
+			return func() {} // peer is slow/crashed — proceed un-leased
+		}
+		time.Sleep(backoff)
+		if backoff < 80*time.Millisecond {
+			backoff *= 2
+		}
+	}
 }
 
 // sessionKeyLocks serializes SessionState RMW per (userID:sessionID).

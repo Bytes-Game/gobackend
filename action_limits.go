@@ -109,7 +109,7 @@ func getActionLimiter(action string) *rateLimiter {
 	if rl, ok = actionLimiters[action]; ok {
 		return rl
 	}
-	rl = newRateLimiter(cfg.tokensPerSecond, cfg.burst)
+	rl = newNamedRateLimiter("act:"+action, cfg.tokensPerSecond, cfg.burst)
 	actionLimiters[action] = rl
 	return rl
 }

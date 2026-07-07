@@ -19,9 +19,9 @@ import (
 //   GET /api/v1/admin/errors     → JSON: error counts by surface + errorType (7d)
 //   GET /admin                   → inline HTML dashboard that fetches above
 //
-// Auth: intentionally NOT implemented here — wire auth middleware via whatever
-// pattern the rest of the admin surface uses (e.g. /admin/reseed). Left as a
-// TODO to avoid inventing an auth story.
+// Auth: every route in this file is wrapped in adminOnly() (HTTP Basic,
+// ADMIN_USER/ADMIN_PASS — see admin_auth.go) at registration time in
+// main.go. Handlers here assume the wrapper has already vetted the caller.
 
 // AdminFunnelsHandler returns per-uploadType funnel counts for the last 7 days.
 // Response shape:

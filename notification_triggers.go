@@ -270,15 +270,19 @@ func scanInactiveWinbackTrigger() {
 		if err := rows.Scan(&userID, &username); err != nil {
 			continue
 		}
+		// Dedupe per ISO calendar week so we don't spam someone every
+		// 5 min while they're inactive — at most one win-back ping per
+		// week. The old key used Format("2006-W02"), but "W" is not a
+		// Go layout verb and "02" is DAY-of-month — the key rotated
+		// every day, so inactive users could get pinged daily.
+		year, week := time.Now().ISOWeek()
 		_, _, _ = enqueueNotification(EnqueueParams{
 			UserID:      userID,
 			TriggerKind: TriggerInactiveWinback,
-			// Dedupe per calendar week so we don't spam someone every 5 min
-			// while they're inactive — at most one win-back ping per week.
-			DedupeKey: fmt.Sprintf("iw:%s:%s", userID, time.Now().Format("2006-W02")),
-			Title:     "We saved your spot",
-			Body:      "3 challenges you'd crush are waiting →",
-			Deeplink:  "devf://feed",
+			DedupeKey:   fmt.Sprintf("iw:%s:%d-W%02d", userID, year, week),
+			Title:       "We saved your spot",
+			Body:        "3 challenges you'd crush are waiting →",
+			Deeplink:    "devf://feed",
 		})
 	}
 }
