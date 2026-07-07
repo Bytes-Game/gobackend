@@ -69,8 +69,19 @@ func TestBuildContentEmbedding_Deterministic(t *testing.T) {
 	}
 	a := buildContentEmbedding(cs, []string{"happy", "competitive"})
 	b := buildContentEmbedding(cs, []string{"happy", "competitive"})
+	// Near-equal, not bit-equal: the recency slot is computed from
+	// time.Now() and the vector is L2-normalized, so if the clock ticks
+	// between the two builds EVERY component shifts by ~1e-12 (the first
+	// -race CI run caught exactly that — the detector's slowdown makes
+	// crossing a time boundary between calls likely). The property under
+	// test is that the HASH-TRICK slots are deterministic, which a 1e-9
+	// tolerance still verifies while tolerating the documented time
+	// dependence of slots 2-3 (pgvector_ann zeroes them for the same
+	// reason).
+	const eps = 1e-9
 	for i := range a {
-		if a[i] != b[i] {
+		d := a[i] - b[i]
+		if d < -eps || d > eps {
 			t.Fatalf("same inputs must produce same vector; diff at %d (%v vs %v)", i, a[i], b[i])
 		}
 	}
