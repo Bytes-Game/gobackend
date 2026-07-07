@@ -179,3 +179,21 @@ func persistTrainedContent(key string, v *ttContentVec) {
 	_ = rdb.Set(rctx, ttContentRedisKey+key, js, ttContentTTL).Err()
 }
 
+// twoTowerCosineDriftFromPrior measures how far a content vector has
+// drifted from its initial hash-trick prior. High drift means the
+// engagement-trained vector has learned something the metadata didn't
+// predict — the content found a different audience than its category/
+// emotion tags suggested. Surfaced to creators as audienceDrift in
+// /creator/insights/content (buildCreatorPerContent).
+func twoTowerCosineDriftFromPrior(cs *ContentScore, emotions []string) float64 {
+	if cs == nil || cs.ContentID == "" {
+		return 0
+	}
+	tt := loadOrInitTrainedContent(cs, emotions)
+	if tt == nil || tt.Updates < ttMinUpdatesForTrained {
+		return 0
+	}
+	// 1 - cosine = drift; 0 = matches prior exactly, →2 = opposite.
+	return 1.0 - cosineSim(tt.Trained, tt.Prior)
+}
+

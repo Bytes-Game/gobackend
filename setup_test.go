@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"log"
+	"net/http"
 	"os"
 	"testing"
 
@@ -50,6 +52,23 @@ func resetRedis(t *testing.T) {
 	mr.FlushAll()
 }
 
-// (testToken and withAuth helpers were removed as unused — handler-auth
-// tests mint tokens via issueToken directly. Recover from git history
-// if a future test needs pre-injected identity context.)
+// testToken mints a valid session token for handler tests (JWT_SECRET is set
+// in TestMain). Use when a test drives a request through the authed() wrapper
+// or a full router and needs a real Authorization header.
+func testToken(t *testing.T, userID, username string) string {
+	t.Helper()
+	tok, err := issueToken(userID, username)
+	if err != nil {
+		t.Fatalf("issueToken: %v", err)
+	}
+	return tok
+}
+
+// withAuth returns req carrying the trusted-identity context that authed()
+// would normally inject, so a handler invoked directly in a test (without
+// routing through the middleware) sees the given authUserID(r)/authUsername(r).
+func withAuth(req *http.Request, userID, username string) *http.Request {
+	ctx := context.WithValue(req.Context(), userIDContextKey, userID)
+	ctx = context.WithValue(ctx, usernameContextKey, username)
+	return req.WithContext(ctx)
+}

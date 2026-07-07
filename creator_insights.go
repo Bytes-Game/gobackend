@@ -79,6 +79,12 @@ type CreatorPerContent struct {
 	WatchHistogram    map[string]int     `json:"watchHistogram"` // bucket → count (0-25%, 25-50%, ...)
 	HookStrength      string             `json:"hookStrength"`   // "strong" | "ok" | "weak"
 	EarlySkipPct      float64            `json:"earlySkipPct"`   // % of skips in first 25% of duration
+	// AudienceDrift is how far the engagement-trained content vector has
+	// moved from its metadata prior (0 = the audience matches what the
+	// category/emotion tags predicted; higher = the content found a
+	// different audience than its tags suggested). 0 until the two-tower
+	// model has enough engagement updates to speak.
+	AudienceDrift     float64            `json:"audienceDrift"`
 	Recommendations   []string           `json:"recommendations"`
 }
 
@@ -433,6 +439,13 @@ func buildCreatorPerContent(creatorID, contentType, contentID string, windowDays
 	out.SkipRate = one.SkipRate
 	out.QualityScore = one.QualityScore
 
+	// Audience drift from the online two-tower model — tells the creator
+	// whether their actual audience matches what the metadata predicted.
+	if cs := getContentScore(contentID, contentType); cs != nil {
+		out.AudienceDrift = twoTowerCosineDriftFromPrior(
+			cs, getContentEmotions(contentID, contentType))
+	}
+
 	// Watch-time histogram + drop-off seconds from feed_events.
 	watchRows, err := db.Query(`
 		SELECT
@@ -580,6 +593,13 @@ func recommendationsForContent(c CreatorPerContent) []string {
 	}
 	if c.SkipRate > 0.65 {
 		out = append(out, "Skip rate above 65%. The thumbnail or first frame might be the issue — viewers are bouncing before audio plays.")
+	}
+	// AudienceDrift ranges 0-2 (1 - cosine to the metadata prior). Above
+	// ~0.5 the engagement-learned vector points meaningfully away from
+	// what the tags predicted — the mismatch usually means mislabeled
+	// category/emotions, which hurts cold-start distribution.
+	if c.AudienceDrift > 0.5 && c.Views > 50 {
+		out = append(out, "This video's actual audience differs from what its category/emotion tags predict. Consider re-tagging it — accurate tags help the algorithm find its real audience faster.")
 	}
 	if len(out) == 0 {
 		out = append(out, "Performance is healthy. Pin this in your insights — it's a useful baseline for future content.")
