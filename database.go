@@ -242,6 +242,16 @@ func runMigrations() {
 		energy_by_hour       JSONB DEFAULT '{}'
 	);
 
+	CREATE TABLE IF NOT EXISTS experiments (
+		id          TEXT PRIMARY KEY,
+		name        TEXT NOT NULL DEFAULT '',
+		description TEXT NOT NULL DEFAULT '',
+		variants    JSONB NOT NULL DEFAULT '[]',
+		active      BOOLEAN NOT NULL DEFAULT false,
+		started_at  TIMESTAMPTZ DEFAULT NOW(),
+		ended_at    TIMESTAMPTZ
+	);
+
 	CREATE TABLE IF NOT EXISTS experiment_exposures (
 		id            SERIAL PRIMARY KEY,
 		user_id       TEXT NOT NULL,
@@ -602,6 +612,20 @@ func runMigrations() {
 	} else {
 		pgvectorAvailable = true
 		log.Println("pgvector enabled: challenges.embedding ready for ANN retrieval")
+		// HNSW index so the ANN query is a graph walk instead of the
+		// sequential scan the file previously (deliberately) ran.
+		// Guarded separately: HNSW needs pgvector >= 0.5.0; on older
+		// versions the CREATE fails and we keep seq-scan behavior (same
+		// results, just slower) rather than losing pgvector entirely.
+		// vector_cosine_ops matches sourceEmbeddingANN's <=> operator.
+		if _, err := db.Exec(`
+			CREATE INDEX IF NOT EXISTS challenges_embedding_hnsw_idx
+				ON challenges USING hnsw (embedding vector_cosine_ops)
+		`); err != nil {
+			log.Printf("pgvector HNSW index not created (%v) — ANN uses seq scan", err)
+		} else {
+			log.Println("pgvector HNSW index ready: ANN retrieval is indexed")
+		}
 	}
 
 	log.Println("Database migrations completed")

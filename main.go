@@ -339,6 +339,10 @@ func main() {
 	startNotificationTriggers()
 	// Reset HLS transcode jobs orphaned at 'PENDING' by crashed workers.
 	startHLSReaper()
+	// DB-backed experiments: seed on fresh DB, refresh every 60s so
+	// experiment edits (incl. the active=false kill switch) apply
+	// without a redeploy.
+	startExperimentRefresher()
 	// Restore the learned mood-transition + session-trajectory state
 	// that lives in process memory (write-through keeps Redis current).
 	loadMoodTransitions()
@@ -450,6 +454,10 @@ func main() {
 	// session length, new-content discovery, catalog coverage) with good/watch/bad
 	// verdicts. See admin_feed_health.go.
 	api.HandleFunc("/admin/feed-health", adminOnly(AdminFeedHealthHandler)).Methods("GET", "OPTIONS")
+	// Experiment CRUD: upsert an experiment (or kill one with
+	// "active": false) without a redeploy — refresher propagates the
+	// change to every replica within 60s.
+	api.HandleFunc("/admin/experiments", adminOnly(AdminUpsertExperimentHandler)).Methods("POST", "OPTIONS")
 
 	// Push notifications: token registration, prefs, click tracking.
 	// /unregister and /clicked are intentionally unauthenticated: the push token

@@ -233,18 +233,34 @@ func recordSessionTrajectoryFromEvent(cohort Cohort, session *SessionState, even
 	if toKey == "" {
 		return
 	}
-	// `from` is the most-recent prior category in the session.
-	fromKey := ""
-	if n := len(session.LastCategories); n > 0 {
-		// We don't have the energy of the prior item handy; default to "med"
-		// which is a reasonable fallback. Production could stash energies
-		// alongside categories in the session state — small upgrade.
-		fromKey = strings.ToLower(session.LastCategories[n-1]) + ":med"
-	}
+	// `from` is the most-recent prior (category, energy) in the session.
+	fromKey := lastTrajectoryFromKey(session)
 	if fromKey == "" {
 		return
 	}
 	noteSessionTransition(cohort, fromKey, toKey)
+}
+
+// lastTrajectoryFromKey builds the "category:energyBucket" from-state
+// from the session's parallel LastCategories/LastEnergies tails. Both
+// trajectory sites (serve-time bonus in scoreForUser and the record
+// path above) share this so train and serve agree on the state space.
+// Sessions serialized before LastEnergies existed have a length
+// mismatch — fall back to "med", the value both sites hard-coded
+// before, so old sessions keep their historical behavior.
+func lastTrajectoryFromKey(session *SessionState) string {
+	if session == nil {
+		return ""
+	}
+	n := len(session.LastCategories)
+	if n == 0 {
+		return ""
+	}
+	bucket := "med"
+	if len(session.LastEnergies) == n {
+		bucket = trajectoryEnergyBucket(session.LastEnergies[n-1])
+	}
+	return strings.ToLower(session.LastCategories[n-1]) + ":" + bucket
 }
 
 // isPositiveEngagementForTrajectory decides whether an event is a useful

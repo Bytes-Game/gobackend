@@ -110,6 +110,14 @@ type SessionState struct {
 	// clumpy repeats (same category/creator 3+ in a row = feed feels monotonous).
 	LastCategories []string `json:"lastCategories"`
 	LastCreators   []string `json:"lastCreators"`
+	// LastEnergies runs in lockstep with LastCategories (same indices,
+	// same trim) so the trajectory model's CATEGORY × ENERGY from-state
+	// uses the REAL energy of the prior item. Before this field both
+	// trajectory sites hard-coded ":med", collapsing one axis of the
+	// transition model (the acknowledged TODO in session_trajectory.go).
+	// Sessions serialized before the field existed simply lack it —
+	// readers detect the length mismatch and fall back to "med".
+	LastEnergies []float64 `json:"lastEnergies,omitempty"`
 	// TZOffsetMin is the user's UTC offset in minutes (e.g. IST = +330), set
 	// from the feed request each page. Lets hour-of-day routing bucket by the
 	// user's LOCAL hour instead of server/UTC time. 0 = unknown (behaves as UTC,
@@ -628,6 +636,7 @@ func applyRefreshSignal(userID, sessionID string) {
 	state.CategoriesSeen = make(map[string]int)
 	state.CreatorsSeen = make(map[string]int)
 	state.LastCategories = nil
+	state.LastEnergies = nil
 	state.LastCreators = nil
 	saveSessionState(state)
 }
@@ -3977,7 +3986,7 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// only when the cohort has enough observed transitions to make a useful
 	// prediction (cold model returns 0).
 	if session != nil && cs.Category != "" && len(session.LastCategories) > 0 {
-		fromKey := strings.ToLower(session.LastCategories[len(session.LastCategories)-1]) + ":med"
+		fromKey := lastTrajectoryFromKey(session)
 		toKey := trajectoryStateKey(cs.Category, cs.EnergyLevel)
 		trajBonus := trajectoryBonus(cohort, fromKey, toKey)
 		if trajBonus != 0 {
@@ -4910,7 +4919,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// exact population most sensitive to scoring-weight changes once
 	// they warm up. Logging is per (user, experiment, session) with
 	// ON CONFLICT dedup, so cold sessions cost one row, not one per page.
-	for _, exp := range activeExperiments {
+	for _, exp := range getActiveExperiments() {
 		if exp.Active {
 			variantID := assignVariant(userID, exp.ID)
 			go logExperimentExposure(userID, exp.ID, variantID, sessionID)
@@ -5296,6 +5305,8 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			if cscore.Category != "" {
 				fresh.LastCategories = append(fresh.LastCategories, cscore.Category)
+				// Lockstep with LastCategories — same guard, same trim.
+				fresh.LastEnergies = append(fresh.LastEnergies, cscore.EnergyLevel)
 			}
 			if cscore.CreatorID != "" {
 				fresh.LastCreators = append(fresh.LastCreators, cscore.CreatorID)
@@ -5303,6 +5314,9 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if n := len(fresh.LastCategories); n > 6 {
 			fresh.LastCategories = fresh.LastCategories[n-6:]
+		}
+		if n := len(fresh.LastEnergies); n > 6 {
+			fresh.LastEnergies = fresh.LastEnergies[n-6:]
 		}
 		if n := len(fresh.LastCreators); n > 6 {
 			fresh.LastCreators = fresh.LastCreators[n-6:]

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -53,8 +54,13 @@ type ExperimentAssignment struct {
 	UserID       string `json:"userId"`
 }
 
-// Active experiments — in production, load from DB. For now, in-memory.
-var activeExperiments = []Experiment{
+// defaultExperiments seeds the experiments TABLE on first boot (and
+// serves as the in-memory snapshot until the first DB load). The live
+// set is DB-backed: edit rows (or POST /api/v1/admin/experiments) and
+// every replica picks the change up within experimentsRefreshEvery —
+// no redeploy, and setting active=false is the kill switch the old
+// hard-coded slice never had.
+var defaultExperiments = []Experiment{
 	{
 		ID:          "scoring_weights_v1",
 		Name:        "Social vs Freshness Weight",
@@ -80,10 +86,153 @@ var activeExperiments = []Experiment{
 	},
 }
 
+// experimentsStore holds the current []Experiment snapshot. atomic.Value
+// because every feed request reads it while the refresher goroutine
+// replaces it — a plain global slice would be a data race the moment
+// the refresher shipped.
+var experimentsStore atomic.Value
+
+func init() { experimentsStore.Store(defaultExperiments) }
+
+// getActiveExperiments returns the current experiment snapshot. Callers
+// must treat it as read-only.
+func getActiveExperiments() []Experiment {
+	v, _ := experimentsStore.Load().([]Experiment)
+	return v
+}
+
+const experimentsRefreshEvery = 60 * time.Second
+
+// loadExperimentsFromDB replaces the in-memory snapshot from the
+// experiments table. On any error the previous snapshot stays — an
+// unreachable DB must never turn experiments off mid-flight (variant
+// reassignment would contaminate every running measurement).
+func loadExperimentsFromDB() {
+	if db == nil {
+		return
+	}
+	rows, err := db.Query(`SELECT id, name, description, variants, active, started_at, ended_at FROM experiments`)
+	if err != nil {
+		log.Printf("experiments: load failed (keeping previous snapshot): %v", err)
+		return
+	}
+	defer rows.Close()
+	out := make([]Experiment, 0, 4)
+	for rows.Next() {
+		var e Experiment
+		var variantsRaw []byte
+		if err := rows.Scan(&e.ID, &e.Name, &e.Description, &variantsRaw, &e.Active, &e.StartedAt, &e.EndedAt); err != nil {
+			continue
+		}
+		if err := json.Unmarshal(variantsRaw, &e.Variants); err != nil {
+			log.Printf("experiments: bad variants JSON for %s — skipping row: %v", e.ID, err)
+			continue
+		}
+		out = append(out, e)
+	}
+	if len(out) > 0 {
+		experimentsStore.Store(out)
+	}
+}
+
+// seedExperimentsIfEmpty writes defaultExperiments into the table on a
+// fresh database so the historical hard-coded experiment continues
+// uninterrupted (same ID → same deterministic assignments).
+func seedExperimentsIfEmpty() {
+	if db == nil {
+		return
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM experiments`).Scan(&n); err != nil || n > 0 {
+		return
+	}
+	for _, e := range defaultExperiments {
+		variants, err := json.Marshal(e.Variants)
+		if err != nil {
+			continue
+		}
+		_, _ = db.Exec(`
+			INSERT INTO experiments (id, name, description, variants, active, started_at)
+			VALUES ($1, $2, $3, $4, $5, NOW())
+			ON CONFLICT (id) DO NOTHING`,
+			e.ID, e.Name, e.Description, variants, e.Active)
+	}
+}
+
+// startExperimentRefresher seeds the table if needed, loads once, then
+// keeps the snapshot fresh. Called from main() after InitDatabase.
+func startExperimentRefresher() {
+	seedExperimentsIfEmpty()
+	loadExperimentsFromDB()
+	go func() {
+		t := time.NewTicker(experimentsRefreshEvery)
+		defer t.Stop()
+		for range t.C {
+			loadExperimentsFromDB()
+		}
+	}()
+}
+
+// AdminUpsertExperimentHandler creates or updates one experiment.
+// POST /api/v1/admin/experiments with an Experiment JSON body. The
+// change is applied to the DB and the local snapshot immediately;
+// other replicas converge within experimentsRefreshEvery. Kill switch:
+// POST the same experiment with "active": false.
+func AdminUpsertExperimentHandler(w http.ResponseWriter, r *http.Request) {
+	if db == nil {
+		http.Error(w, "db unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var e Experiment
+	if err := json.NewDecoder(r.Body).Decode(&e); err != nil || e.ID == "" {
+		http.Error(w, "invalid experiment JSON (id required)", http.StatusBadRequest)
+		return
+	}
+	// Weights must cover the whole population: assignVariant buckets
+	// 0-99 against the cumulative weights, so a sum under 100 silently
+	// dumps the remainder into the first variant (fallback), skewing
+	// the measurement.
+	sum := 0
+	for _, v := range e.Variants {
+		if v.ID == "" {
+			http.Error(w, "every variant needs an id", http.StatusBadRequest)
+			return
+		}
+		sum += v.Weight
+	}
+	if e.Active && sum != 100 {
+		http.Error(w, "variant weights must sum to 100 for an active experiment", http.StatusBadRequest)
+		return
+	}
+	variants, err := json.Marshal(e.Variants)
+	if err != nil {
+		http.Error(w, "variants not serializable", http.StatusBadRequest)
+		return
+	}
+	_, err = db.Exec(`
+		INSERT INTO experiments (id, name, description, variants, active, started_at, ended_at)
+		VALUES ($1, $2, $3, $4, $5, NOW(), $6)
+		ON CONFLICT (id) DO UPDATE SET
+			name = EXCLUDED.name,
+			description = EXCLUDED.description,
+			variants = EXCLUDED.variants,
+			active = EXCLUDED.active,
+			ended_at = EXCLUDED.ended_at`,
+		e.ID, e.Name, e.Description, variants, e.Active, e.EndedAt)
+	if err != nil {
+		log.Printf("experiment upsert failed for %s: %v", e.ID, err)
+		http.Error(w, "db upsert failed", http.StatusInternalServerError)
+		return
+	}
+	loadExperimentsFromDB()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "id": e.ID})
+}
+
 // assignVariant deterministically assigns a user to an experiment variant.
 // Uses SHA-256 hash so assignment is uniform and stable.
 func assignVariant(userID, experimentID string) string {
-	for _, exp := range activeExperiments {
+	for _, exp := range getActiveExperiments() {
 		if exp.ID != experimentID || !exp.Active {
 			continue
 		}
@@ -110,7 +259,7 @@ func assignVariant(userID, experimentID string) string {
 // getExperimentConfig returns the scoring weight overrides for a user.
 // If no experiment is active, returns nil (use defaults).
 func getExperimentConfig(userID string) map[string]float64 {
-	for _, exp := range activeExperiments {
+	for _, exp := range getActiveExperiments() {
 		if !exp.Active {
 			continue
 		}
@@ -157,7 +306,7 @@ func ExperimentResultsHandler(w http.ResponseWriter, r *http.Request) {
 		// Return all active experiments
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"experiments": activeExperiments,
+			"experiments": getActiveExperiments(),
 		})
 		return
 	}
@@ -230,6 +379,6 @@ func ExperimentsListHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"experiments": activeExperiments,
+		"experiments": getActiveExperiments(),
 	})
 }
