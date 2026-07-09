@@ -459,6 +459,11 @@ func main() {
 	// change to every replica within 60s.
 	api.HandleFunc("/admin/experiments", adminOnly(AdminUpsertExperimentHandler)).Methods("POST", "OPTIONS")
 
+	// Search-page empty state: the caller's recent queries (authed —
+	// personal data) and the platform's trending queries (public).
+	api.HandleFunc("/search/recent", authed(RecentSearchesHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/search/trending", TrendingSearchesHandler).Methods("GET", "OPTIONS")
+
 	// Push notifications: token registration, prefs, click tracking.
 	// /unregister and /clicked are intentionally unauthenticated: the push token
 	// (resp. notification id) is itself the capability, and both must work during

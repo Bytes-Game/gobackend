@@ -24,7 +24,9 @@ package main
 // house style.
 
 import (
+	"encoding/json"
 	"math"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -206,4 +208,95 @@ func searchIntentCategory(intent string) string {
 		return c
 	}
 	return ""
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// TRENDING + RECENT SEARCHES (search page empty state)
+// ─────────────────────────────────────────────────────────────────────
+
+// Trending queries live in per-day ZSETs so "trending" naturally means
+// "today, with yesterday as fallback" — no decay job needed, expiry is
+// the decay.
+const (
+	searchTrendKeyPrefix = "searchtrend:"
+	searchTrendTTL       = 48 * time.Hour
+	searchTrendMinLen    = 2
+)
+
+func searchTrendKey(t time.Time) string {
+	return searchTrendKeyPrefix + t.UTC().Format("20060102")
+}
+
+// noteTrendingSearchFromEvent counts a submitted query toward today's
+// trending board. Ingestion hook for search_query events.
+func noteTrendingSearchFromEvent(e FeedEvent) {
+	if rdb == nil || e.Metadata == nil {
+		return
+	}
+	query, _ := e.Metadata["query"].(string)
+	nq := normalizeSearchQuery(query)
+	if len(nq) < searchTrendMinLen {
+		return
+	}
+	key := searchTrendKey(time.Now())
+	_ = rdb.ZIncrBy(rctx, key, 1, nq).Err()
+	_ = rdb.Expire(rctx, key, searchTrendTTL).Err()
+}
+
+// fetchTrendingSearches returns today's top queries, topping up from
+// yesterday when today is still sparse (early-morning cold board).
+func fetchTrendingSearches(limit int) []string {
+	if rdb == nil || limit <= 0 {
+		return nil
+	}
+	now := time.Now()
+	out := make([]string, 0, limit)
+	seen := map[string]bool{}
+	for _, key := range []string{searchTrendKey(now), searchTrendKey(now.Add(-24 * time.Hour))} {
+		if len(out) >= limit {
+			break
+		}
+		qs, err := rdb.ZRevRange(rctx, key, 0, int64(limit-1)).Result()
+		if err != nil {
+			continue
+		}
+		for _, q := range qs {
+			if len(out) >= limit {
+				break
+			}
+			if !seen[q] {
+				seen[q] = true
+				out = append(out, q)
+			}
+		}
+	}
+	return out
+}
+
+// RecentSearchesHandler returns the caller's own recent queries.
+// GET /api/v1/search/recent — reads the same recent_searches:{user}
+// LIST the For You ranker's searchBoost consumes (signals_negative.go),
+// so the UI and the algorithm share one source of truth.
+func RecentSearchesHandler(w http.ResponseWriter, r *http.Request) {
+	userID := authUserID(r)
+	queries := []string{}
+	if rdb != nil && userID != "" {
+		if qs, err := rdb.LRange(rctx, "recent_searches:"+userID, 0, 9).Result(); err == nil && qs != nil {
+			queries = qs
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"recent": queries})
+}
+
+// TrendingSearchesHandler returns the platform's current top queries.
+// GET /api/v1/search/trending — public; queries are normalized strings,
+// no user data.
+func TrendingSearchesHandler(w http.ResponseWriter, r *http.Request) {
+	trending := fetchTrendingSearches(10)
+	if trending == nil {
+		trending = []string{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"trending": trending})
 }

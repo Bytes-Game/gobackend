@@ -27,12 +27,24 @@ func InitMeilisearch() {
 	meili.CreateIndex(&meilisearch.IndexConfig{Uid: "challenges", PrimaryKey: "id"})
 	meili.CreateIndex(&meilisearch.IndexConfig{Uid: "users", PrimaryKey: "id"})
 
-	// Configure challenges index
+	// Configure challenges index. Searchable order matters — Meili
+	// weights earlier attributes higher, so the title parts stay first
+	// and the enrichment fields (category, emotion tags) act as
+	// secondary match surfaces ("funny" finds emotion-tagged content
+	// even when no title contains the word).
 	ci := meili.Index("challenges")
-	ci.UpdateSearchableAttributes(&[]string{"prefix", "subject", "creatorUsername"})
+	ci.UpdateSearchableAttributes(&[]string{"prefix", "subject", "creatorUsername", "category", "emotionTags"})
 	filterAttrs := []interface{}{"visibility", "status"}
 	ci.UpdateFilterableAttributes(&filterAttrs)
-	ci.UpdateSortableAttributes(&[]string{"views", "likes"})
+	ci.UpdateSortableAttributes(&[]string{"views", "likes", "engagementScore"})
+	// Custom ranking rule: after lexical relevance (words/typo/proximity/
+	// attribute), break ties by engagement instead of arbitrary order —
+	// the SHORTLIST Meili returns is what the Go reranker sees, so a
+	// better-ordered shortlist raises the ceiling of the whole pipeline.
+	ci.UpdateRankingRules(&[]string{
+		"words", "typo", "proximity", "attribute",
+		"engagementScore:desc", "sort", "exactness",
+	})
 
 	// Configure users index
 	ui := meili.Index("users")
@@ -96,6 +108,11 @@ func challengeToMeiliDoc(c Challenge) map[string]interface{} {
 		"videoUrl":        c.VideoURL,
 		"thumbnailUrl":    c.ThumbnailURL,
 		"createdAt":       c.CreatedAt,
+		// Enrichment: secondary match surfaces + the ranking-rule metric.
+		// Backfill is free — seedMeilisearchData re-upserts every boot.
+		"category":        c.Category,
+		"emotionTags":     c.EmotionTags,
+		"engagementScore": c.Views + 5*c.Likes,
 	}
 }
 
