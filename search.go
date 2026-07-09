@@ -49,6 +49,14 @@ type UnifiedSearchResponse struct {
 	Shorts     []Challenge `json:"shorts"`
 	Challenges []Challenge `json:"challenges"` // legacy: battles + shorts merged
 	Users      []User      `json:"users"`      // legacy alias for accounts
+	// Intent is the server's query classification: "user",
+	// "category:<name>", or "general". Clients may use it to order
+	// sections (e.g. accounts first for username-shaped queries).
+	Intent string `json:"intent,omitempty"`
+	// Related is true when the query itself had zero matches and the
+	// results are a trending fallback — client should render a "no
+	// exact matches, trending now" header instead of the plain list.
+	Related bool `json:"related,omitempty"`
 }
 
 // per-section caps. Generous enough for an Instagram-style "Top" tab to
@@ -157,8 +165,89 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 	// Legacy alias.
 	resp.Users = resp.Accounts
 
+	// Query-intent classification for the client's section ordering
+	// ("user" only when the accounts lane actually found something —
+	// a username-shaped query with zero account hits is just a word).
+	resp.Intent = searchIntent(query, len(resp.Accounts) > 0)
+
+	// Zero-result rescue: never render an empty search page. Fall back
+	// to realtime-trending content (category-filtered when the query
+	// smells like a topic), flagged so the client can label it honestly.
+	if len(resp.Accounts) == 0 && len(resp.Battles) == 0 && len(resp.Shorts) == 0 {
+		if rescued := searchZeroResultRescue(resp.Intent); len(rescued) > 0 {
+			resp.Related = true
+			for _, ch := range rescued {
+				if ch.ResponseCount > 0 && len(resp.Battles) < searchBattleCap {
+					resp.Battles = append(resp.Battles, ch)
+				} else if len(resp.Shorts) < searchShortCap {
+					resp.Shorts = append(resp.Shorts, ch)
+				}
+			}
+			resp.Challenges = append(append([]Challenge{}, resp.Battles...), resp.Shorts...)
+		}
+	}
+
+	// Log impressions for the click-through learner — exactly what the
+	// client will render (skip rescued results: clicks on trending
+	// fallbacks shouldn't teach the ORIGINAL query anything). Top-10
+	// per section keeps write volume and hash growth bounded.
+	if !resp.Related {
+		keys := make([]string, 0, 20)
+		for i, u := range resp.Accounts {
+			if i >= 10 {
+				break
+			}
+			keys = append(keys, "user:"+u.ID)
+		}
+		shown := 0
+		for _, ch := range resp.Challenges {
+			if shown >= 10 {
+				break
+			}
+			keys = append(keys, "challenge:"+ch.ID)
+			shown++
+		}
+		go searchLogImpressions(query, keys)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// searchZeroResultRescue returns trending challenges as a fallback for
+// queries with no matches. Category-filtered when the intent carries
+// one; falls back to unfiltered trending, then recency, so the rescue
+// itself never comes back empty on a healthy catalog.
+func searchZeroResultRescue(intent string) []Challenge {
+	wantCat := searchIntentCategory(intent)
+	entries := fetchTrendingRealtime(30)
+	out := make([]Challenge, 0, 10)
+	backup := make([]Challenge, 0, 10)
+	for _, e := range entries {
+		if e.Type != "challenge" {
+			continue
+		}
+		item, ok := loadHomeFeedItemByID(e.Type, e.ID)
+		if !ok || item.Challenge == nil {
+			continue
+		}
+		ch := *item.Challenge
+		if wantCat != "" && strings.EqualFold(ch.Category, wantCat) {
+			out = append(out, ch)
+		} else if len(backup) < 10 {
+			backup = append(backup, ch)
+		}
+		if len(out) >= 10 {
+			break
+		}
+	}
+	if len(out) == 0 {
+		out = backup
+	}
+	if len(out) > 0 {
+		populateTopResponsesChallenges(out)
+	}
+	return out
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -183,6 +272,8 @@ func rankSearchAccounts(query, userID string, following, fof map[string]bool, vi
 		User  User
 		Score float64
 	}
+	// Learned click-through prior for this query (see search_ctr.go).
+	ctrBoosts := searchCTRBoosts(query)
 	out := make([]scored, 0, len(hits))
 	for i, hit := range hits {
 		// Skip the viewer themselves — surfacing your own account is just
@@ -234,7 +325,8 @@ func rankSearchAccounts(query, userID string, following, fof map[string]bool, vi
 			}
 		}
 
-		score := lex + 0.20*quality + 0.10*winRate + social + leagueBonus
+		score := lex + 0.20*quality + 0.10*winRate + social + leagueBonus +
+			ctrBoosts["user:"+hit.User.ID]
 		out = append(out, scored{User: hit.User, Score: score})
 	}
 
@@ -326,6 +418,15 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 	// loop through the map for every hit.
 	topCats := topCategories(profile, 3)
 
+	// Click-through prior: what users who searched this exact query
+	// actually tapped before (Wilson-smoothed, position-debiased).
+	// One Redis read per query; empty map when the query is unseen.
+	ctrBoosts := searchCTRBoosts(query)
+	// Intent hint: queries that look like a content topic give matching
+	// categories a nudge (accounts-shaped intent is handled by the
+	// handler via the response's intent field).
+	intentCat := searchIntentCategory(searchIntent(query, false))
+
 	for i, hit := range hits {
 		ch := hit.Ch
 
@@ -377,7 +478,7 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 				}
 			}
 		}
-		_ = userID // captured for future per-user reranking; unused in v1
+		_ = userID // per-user CTR could key on (user, query) later; global CTR ships first
 
 		// Quality nudge — a battle (responseCount > 0) is more interactive
 		// content than a static short. Tiny bonus so battles edge out shorts
@@ -388,7 +489,15 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 			qualityNudge = 0.05
 		}
 
-		score := lex + 0.20*eng + 0.20*recency + personalBoost + qualityNudge
+		// Learned click-through prior for THIS query + intent-category
+		// nudge — the two additions that make search self-correct.
+		ctr := ctrBoosts["challenge:"+ch.ID]
+		intentBoost := 0.0
+		if intentCat != "" && strings.EqualFold(ch.Category, intentCat) {
+			intentBoost = 0.15
+		}
+
+		score := lex + 0.20*eng + 0.20*recency + personalBoost + qualityNudge + ctr + intentBoost
 		out = append(out, scored{Ch: ch, Score: score})
 	}
 

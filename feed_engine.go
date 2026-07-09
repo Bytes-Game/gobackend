@@ -420,6 +420,12 @@ func TrackEventHandler(w http.ResponseWriter, r *http.Request) {
 		noteTrendingEventByUser(e.UserID, e.ContentType, e.ContentID, e.EventType, e.CompletionRate)
 	}(event)
 
+	// Search click-through learning: taps on search results (query +
+	// position in metadata) teach the search reranker. See search_ctr.go.
+	if event.EventType == "search_result_tap" {
+		go searchObserveClickFromEvent(event)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
@@ -498,6 +504,11 @@ func TrackBatchEventsHandler(w http.ResponseWriter, r *http.Request) {
 			updateSessionFromEvent(event)
 			applyEmbeddingFromEvent(event)
 			noteTrendingEventByUser(event.UserID, event.ContentType, event.ContentID, event.EventType, event.CompletionRate)
+			// Search click-through learning: taps on search results
+			// (query + position in metadata) teach the search reranker.
+			if event.EventType == "search_result_tap" {
+				searchObserveClickFromEvent(event)
+			}
 		}
 	}()
 
