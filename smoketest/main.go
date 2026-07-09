@@ -260,9 +260,12 @@ func (r *runner) stepFollowingFeed() error {
 }
 
 func (r *runner) stepUnblock() error {
+	// Contract per UnblockUserHandler: { blockerId, blockedId }, with
+	// blockerId overwritten from the session token server-side — only
+	// blockedId matters on the wire. The old {userId, creatorId} shape
+	// predated the user_blocks handlers and always got a 400.
 	payload := map[string]any{
-		"userId":    r.user,
-		"creatorId": r.target,
+		"blockedId": r.target,
 	}
 	return r.expectStatus("POST", "/api/v1/unblock", payload, 200, nil)
 }
