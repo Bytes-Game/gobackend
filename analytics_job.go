@@ -112,7 +112,48 @@ func startAnalyticsScheduler() {
 	log.Println("[analytics] scheduler started (24h cadence)")
 }
 
-// runAnalyticsBatch runs all four jobs sequentially. Each failure is logged but
+// computeSessionOutcomes writes the next-day-return label: for every
+// session whose 24h label window has CLOSED (last event 24-48h ago),
+// did the user come back within 24 hours of that session ending?
+//
+// Nothing consumes this yet, deliberately — the point is to START
+// ACCUMULATING the label now. Long-term-value ranking (Netflix-style
+// "did this session make them return", as opposed to "did they swipe
+// to the next reel") needs months of labels, and unlike most training
+// data this one CAN'T be reliably backfilled once feed_events ages
+// out. Idempotent: 72h lookback + ON CONFLICT DO NOTHING, so daily
+// runs overlap safely and a skipped day self-heals on the next run.
+func computeSessionOutcomes() (int, error) {
+	if db == nil {
+		return 0, fmt.Errorf("db unavailable")
+	}
+	res, err := db.Exec(`
+		INSERT INTO session_outcomes (session_id, user_id, session_end, returned_within_24h)
+		SELECT s.session_id, s.user_id, s.ended,
+			EXISTS (
+				SELECT 1 FROM feed_events r
+				WHERE r.user_id = s.user_id
+				  AND r.session_id <> s.session_id
+				  AND r.created_at > s.ended
+				  AND r.created_at <= s.ended + INTERVAL '24 hours'
+			)
+		FROM (
+			SELECT session_id, user_id, MAX(created_at) AS ended
+			FROM feed_events
+			WHERE created_at > NOW() - INTERVAL '72 hours'
+			  AND session_id <> '' AND user_id <> ''
+			GROUP BY session_id, user_id
+			HAVING MAX(created_at) < NOW() - INTERVAL '24 hours'
+		) s
+		ON CONFLICT (session_id) DO NOTHING`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// runAnalyticsBatch runs the sub-jobs sequentially. Each failure is logged but
 // doesn't abort the others — partial freshness is better than none. Results are
 // written to analyticsHealthState so /admin/health can surface stale/failing runs.
 func runAnalyticsBatch() {
@@ -145,6 +186,7 @@ func runAnalyticsBatch() {
 	runOne("creator_affinity", computeCreatorAffinity)
 	runOne("page_dwell", computePageDwell)
 	runOne("golden_hour", computeNotificationGoldenHour)
+	runOne("session_outcomes", computeSessionOutcomes)
 
 	dur := time.Since(start)
 	analyticsHealthState.mu.Lock()

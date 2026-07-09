@@ -491,6 +491,14 @@ func main() {
 	api.HandleFunc("/saved/{userId}", authed(GetSavedChallengesHandler)).Methods("GET", "OPTIONS")
 
 	r.HandleFunc("/login", LoginHandler).Methods("POST", "OPTIONS")
+	// Registration + live username availability (both public; signup is
+	// anonymous-rate-limited via the "signup" action bucket).
+	r.HandleFunc("/signup", SignupHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/signup/available", UsernameAvailableHandler).Methods("GET", "OPTIONS")
+	// Token refresh (authed) — active users never hit the 7-day expiry.
+	api.HandleFunc("/auth/refresh", authed(RefreshTokenHandler)).Methods("POST", "OPTIONS")
+	// Onboarding interest picker → seeds CategoryAffinity for cold start.
+	api.HandleFunc("/profile/interests", authed(SeedInterestsHandler)).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
 	r.HandleFunc("/search", SearchHandler).Methods("GET", "OPTIONS")
 

@@ -242,6 +242,18 @@ func runMigrations() {
 		energy_by_hour       JSONB DEFAULT '{}'
 	);
 
+	-- Next-day-return labels, one row per closed session (written by the
+	-- nightly computeSessionOutcomes job). Not consumed yet — accumulating
+	-- for future long-term-value ranking; can't be backfilled later.
+	CREATE TABLE IF NOT EXISTS session_outcomes (
+		session_id          TEXT PRIMARY KEY,
+		user_id             TEXT NOT NULL,
+		session_end         TIMESTAMPTZ NOT NULL,
+		returned_within_24h BOOLEAN NOT NULL,
+		created_at          TIMESTAMPTZ DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_session_outcomes_user ON session_outcomes(user_id, session_end DESC);
+
 	CREATE TABLE IF NOT EXISTS experiments (
 		id          TEXT PRIMARY KEY,
 		name        TEXT NOT NULL DEFAULT '',

@@ -273,6 +273,30 @@ func getExperimentConfig(userID string) map[string]float64 {
 	return nil
 }
 
+// experimentFloat looks up a single numeric config key across ALL
+// active experiments' assigned variants (first experiment that defines
+// the key wins). getExperimentConfig only returns the FIRST active
+// experiment's whole config, which breaks down once two experiments
+// run at once with different key sets — use this for scalar knobs like
+// candidateMultiplier. Returns def when no experiment defines the key.
+func experimentFloat(userID, key string, def float64) float64 {
+	for _, exp := range getActiveExperiments() {
+		if !exp.Active {
+			continue
+		}
+		variantID := assignVariant(userID, exp.ID)
+		for _, v := range exp.Variants {
+			if v.ID != variantID {
+				continue
+			}
+			if val, ok := v.Config[key]; ok {
+				return val
+			}
+		}
+	}
+	return def
+}
+
 // logExperimentExposure records that a user saw content under a specific variant.
 // This is the measurement side — we aggregate these later to compare variants.
 //

@@ -429,6 +429,12 @@ func TrackEventHandler(w http.ResponseWriter, r *http.Request) {
 		go noteTrendingSearchFromEvent(event)
 	}
 
+	// Item-item co-occurrence graph (cooccurrence.go) — positive
+	// engagements only; skips are noise, not preference.
+	if isPositiveEngagementForTrajectory(event.EventType, event.CompletionRate) {
+		go recordCoOccurrence(event.UserID, event.ContentType, event.ContentID)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
@@ -514,6 +520,12 @@ func TrackBatchEventsHandler(w http.ResponseWriter, r *http.Request) {
 				searchObserveClickFromEvent(event)
 			case "search_query":
 				noteTrendingSearchFromEvent(event)
+			}
+			// Item-item co-occurrence graph (cooccurrence.go) —
+			// positive engagements only. Sequential within the batch
+			// so lasteng list order mirrors true engagement order.
+			if isPositiveEngagementForTrajectory(event.EventType, event.CompletionRate) {
+				recordCoOccurrence(event.UserID, event.ContentType, event.ContentID)
 			}
 		}
 	}()
@@ -2736,12 +2748,20 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		EmotionVector: make(map[string]float64),
 	}
 
-	// Get aggregate engagement metrics
+	// Get aggregate engagement metrics — batch-warmed cache first
+	// (warmContentAggregates loads the whole candidate pool in one
+	// GROUP BY), per-item query as fallback for uncached callers.
 	var viewCount, likeCount, commentCount int
 	var avgCompletion, avgWatchMs float64
 	var skipCount, rewatchCount, shareCount, notIntCount int
-
-	db.QueryRow(`
+	var warmAgg *contentEventAggregates
+	if a, ok := contentAggCache.Get(contentAggKey(contentType, contentID)); ok {
+		warmAgg = a
+		viewCount, likeCount, commentCount = a.ViewCount, a.LikeCount, a.CommentCount
+		skipCount, rewatchCount, shareCount, notIntCount = a.SkipCount, a.RewatchCount, a.ShareCount, a.NotInterestedCount
+		avgCompletion, avgWatchMs = a.AvgCompletion, a.AvgWatchMs
+	} else {
+		db.QueryRow(`
 		SELECT
 			COUNT(*) FILTER (WHERE event_type = 'view'),
 			COUNT(*) FILTER (WHERE event_type = 'like'),
@@ -2755,11 +2775,12 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		FROM feed_events
 		WHERE content_id = $1 AND content_type = $2
 		  AND created_at > NOW() - INTERVAL '90 days'`,
-		contentID, contentType).Scan(
-		&viewCount, &likeCount, &commentCount,
-		&skipCount, &rewatchCount, &shareCount, &notIntCount,
-		&avgCompletion, &avgWatchMs,
-	)
+			contentID, contentType).Scan(
+			&viewCount, &likeCount, &commentCount,
+			&skipCount, &rewatchCount, &shareCount, &notIntCount,
+			&avgCompletion, &avgWatchMs,
+		)
+	}
 
 	cs.ViewCount = viewCount
 	cs.LikeCount = likeCount
@@ -2819,14 +2840,18 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 	// small audience, the way TikTok escalates a high-performing test). Either
 	// path can trend an item, so capable content isn't gated behind raw volume.
 	var recentEng, recentViews int
-	db.QueryRow(`
+	if warmAgg != nil {
+		recentEng, recentViews = warmAgg.RecentEng, warmAgg.RecentViews
+	} else {
+		db.QueryRow(`
 		SELECT
 			COUNT(*) FILTER (WHERE event_type IN ('like','comment','share','save')),
 			COUNT(*) FILTER (WHERE event_type = 'view')
 		FROM feed_events
 		WHERE content_id = $1 AND content_type = $2
 		  AND created_at > NOW() - INTERVAL '2 hours'`,
-		contentID, contentType).Scan(&recentEng, &recentViews)
+			contentID, contentType).Scan(&recentEng, &recentViews)
+	}
 	velocity := math.Min(1.0, float64(recentEng)/15.0)
 	rate := 0.0
 	if recentViews >= 3 {
@@ -4986,13 +5011,26 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	if poolPages > 3 {
 		poolPages = 3
 	}
-	candidateLimit := limit * candidateMultiplier * poolPages
+	// candidateMultiplier is experiment-overridable (config key
+	// "candidateMultiplier") so pool depth can be A/B'd without a
+	// deploy — deeper pools = better feeds IF latency holds, which the
+	// batched aggregate warm-up below is what makes affordable.
+	cm := candidateMultiplier
+	if v := experimentFloat(userID, "candidateMultiplier", 0); v >= 1 {
+		cm = int(v)
+	}
+	candidateLimit := limit * cm * poolPages
 	candidates, candidateSourceMap := multiSourceFetchForCohort(userID, candidateLimit, preCohort)
 	if len(candidates) == 0 {
 		// Safety net: if every source failed, use the legacy single path.
 		candidates = fetchCandidates(userID, candidateLimit)
 		candidateSourceMap = nil
 	}
+
+	// Batch-load the feed_events aggregates for the WHOLE pool in two
+	// GROUP BY queries — replaces ~2 queries × N candidates inside the
+	// scoring loop (the single biggest DB cost of a cold feed page).
+	warmContentAggregates(candidates)
 
 	// Load the user's two-tower embedding ONCE per request. If cold, cosine
 	// term is skipped (returns 0 below) so new users don't get a noisy signal.

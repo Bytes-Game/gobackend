@@ -41,12 +41,18 @@ type candidateSource struct {
 // the 48h SQL trending which is daily-batch); it gets a meaningful slice
 // at the expense of pulling 5pp from each of recency / trending / collab.
 var defaultSourceWeights = map[string]float64{
-	"recency":          0.25,
-	"trending":         0.10,
+	"recency":          0.20,
+	"trending":         0.05,
 	"trendingRealtime": 0.15,
 	"follow":           0.15,
 	"collab":           0.10,
 	"embedding":        0.15,
+	// coocurrence = "users who engaged with X also engaged Y" — pure
+	// engagement co-counts (cooccurrence.go). Funded by 5pp each from
+	// recency and SQL-trending: both are redundant with other lanes
+	// (realtime trending covers virality; freshness scoring re-ranks
+	// recency anyway), while nothing else covers item-item affinity.
+	"coocurrence": 0.10,
 	// searchAffinity uses the user's recent search history (captured by
 	// RecordSearchQuery) as a query against Meilisearch, then surfaces the
 	// best-matching live challenges as candidates. Closes the loop between
@@ -159,6 +165,7 @@ func buildSourcesForCohort(cohort Cohort) []candidateSource {
 		{name: "follow", weight: weights["follow"], fetch: sourceFollowGraph},
 		{name: "collab", weight: weights["collab"], fetch: sourceCollaborative},
 		{name: "embedding", weight: weights["embedding"], fetch: sourceEmbeddingNeighbors},
+		{name: "coocurrence", weight: weights["coocurrence"], fetch: sourceCoOccurrence},
 		{name: "searchAffinity", weight: weights["searchAffinity"], fetch: sourceSearchAffinity},
 	}
 }
@@ -204,6 +211,7 @@ func buildDefaultSources() []candidateSource {
 		{name: "follow", weight: defaultSourceWeights["follow"], fetch: sourceFollowGraph},
 		{name: "collab", weight: defaultSourceWeights["collab"], fetch: sourceCollaborative},
 		{name: "embedding", weight: defaultSourceWeights["embedding"], fetch: sourceEmbeddingNeighbors},
+		{name: "coocurrence", weight: defaultSourceWeights["coocurrence"], fetch: sourceCoOccurrence},
 		{name: "searchAffinity", weight: defaultSourceWeights["searchAffinity"], fetch: sourceSearchAffinity},
 	}
 }
