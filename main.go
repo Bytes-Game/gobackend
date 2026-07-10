@@ -418,6 +418,9 @@ func main() {
 	// inside the handler (path-id must match body userId until
 	// session auth lands). See profile_handlers.go.
 	api.HandleFunc("/users/{id}", authed(UpdateUserProfileHandler)).Methods("PATCH", "OPTIONS")
+	// Self-service account deletion (owner-only; Google Play requires
+	// in-app deletion for apps with account creation).
+	api.HandleFunc("/users/{id}", authed(DeleteAccountHandler)).Methods("DELETE")
 	// Activity surfaces — paginated list of challenges the user has
 	// liked / watched. Cursor-based on the action timestamp so the
 	// page stays stable as the user keeps engaging.
