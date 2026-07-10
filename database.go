@@ -391,6 +391,21 @@ func runMigrations() {
 			WHERE hls_manifest_url = '';
 	EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
+	-- Heal denormalized response_count against the actual rows. Seed
+	-- data was found in production with response_count=1 but ZERO
+	-- challenge_responses rows ("ghost battles" — counted as battles in
+	-- lists, but with no opponent video the client rightly renders them
+	-- as shorts). The triggers keep counts exact from here on; this
+	-- repairs whatever history got out of sync. Idempotent no-op when
+	-- everything already matches.
+	UPDATE challenges c SET response_count = sub.n
+	FROM (
+		SELECT c2.id, COUNT(cr.id) AS n
+		FROM challenges c2 LEFT JOIN challenge_responses cr ON cr.challenge_id = c2.id
+		GROUP BY c2.id
+	) sub
+	WHERE sub.id = c.id AND c.response_count IS DISTINCT FROM sub.n;
+
 	-- Extended personality dimensions on user_profiles
 	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN attention_span REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN binge_intensity REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
