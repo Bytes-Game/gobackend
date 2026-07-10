@@ -1,0 +1,51 @@
+name: hls-worker
+
+# $0 transcode fleet: GitHub-hosted runners are free for public repos
+# and ship with ffmpeg preinstalled. Every 30 minutes (and on manual
+# dispatch) this drains the pending-transcode queue and exits — an
+# always-on background worker with ≤30min latency and zero hosting cost.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   HLS_WORKER_TOKEN     — same value as the backend's env var
+#   R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+#   R2_PUBLIC_BASE_URL   — optional (defaults to the pub-*.r2.dev URL)
+#
+# Concurrency-safe by construction: the backend's FOR UPDATE SKIP LOCKED
+# claim means overlapping runs never double-transcode; the group setting
+# below avoids wasting minutes anyway.
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: hls-worker
+  cancel-in-progress: false
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: ffmpeg version (preinstalled on ubuntu runners)
+        run: ffmpeg -version | head -1
+
+      - name: drain transcode queue
+        env:
+          BACKEND_URL: https://gobackend-9nd8.onrender.com
+          HLS_WORKER_TOKEN: ${{ secrets.HLS_WORKER_TOKEN }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
+        run: go run ./cmd/hls-worker -drain

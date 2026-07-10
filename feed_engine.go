@@ -4775,11 +4775,13 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 
 	items := append(battleItems, shortItems...)
 
-	// Shuffle to mix battles and shorts so the user doesn't see one big block
-	// of either kind. The set is already trimmed to budget — no random drop.
-	rand.Shuffle(len(items), func(i, j int) {
-		items[i], items[j] = items[j], items[i]
-	})
+	// TikTok-style cold ordering (replaces the old random shuffle):
+	// Wilson-smoothed engagement RATE (rate-with-confidence, so a small
+	// sample can't win by luck and raw view volume can't buy the top
+	// slot), freshness half-life, an explicit boost for categories the
+	// user picked in onboarding, and a no-3-in-a-row category
+	// diversification pass. See rankColdStartItems.
+	items = rankColdStartItems(userID, items)
 
 	// Final clamp for the degenerate tiny-limit case: the 70/30 min-1 floors make
 	// battleLimit+shortLimit exceed the requested limit only at limit==1 (1+1=2).
@@ -4794,6 +4796,83 @@ func coldStartFeed(userID string, page, limit int) ([]HomeFeedItem, bool, error)
 	}
 
 	return items, hasMore, nil
+}
+
+// rankColdStartItems orders a cold-start page the way the big platforms
+// order a new user's first session:
+//
+//  1. Wilson lower-bound on like-rate — engagement RATE with
+//     confidence. A 10%-like-rate video from 300 views outranks a
+//     3%-rate video with 10x the views; tiny samples shrink toward
+//     zero instead of winning by luck. This replaces the raw
+//     views+likes ordering, which just measured age and seeding.
+//  2. Freshness (7-day half-life) so the cold pool isn't a museum.
+//  3. Onboarding interests: categories the user explicitly picked
+//     (CategoryAffinity >= 0.5, seeded by the interest picker) jump
+//     the queue — the picker finally shapes literal page 1.
+//  4. Category diversification: no 3 identical categories in a row,
+//     so one dominant category can't wall off the first impression.
+func rankColdStartItems(userID string, items []HomeFeedItem) []HomeFeedItem {
+	if len(items) <= 2 {
+		return items
+	}
+	interests := map[string]bool{}
+	if p, _ := loadUserProfile(userID); p != nil {
+		for cat, w := range p.CategoryAffinity {
+			if w >= 0.5 {
+				interests[strings.ToLower(cat)] = true
+			}
+		}
+	}
+	type scoredCold struct {
+		item  HomeFeedItem
+		score float64
+	}
+	now := time.Now()
+	ranked := make([]scoredCold, 0, len(items))
+	for _, it := range items {
+		s := 0.0
+		if ch := it.Challenge; ch != nil {
+			views := float64(ch.Views)
+			if views < 1 {
+				views = 1
+			}
+			s = wilsonLowerBound(float64(ch.Likes), views) * 0.6
+			if t, err := time.Parse(time.RFC3339, ch.CreatedAt); err == nil {
+				s += math.Exp(-now.Sub(t).Hours()/(24*7)) * 0.15
+			}
+			if interests[strings.ToLower(ch.Category)] {
+				s += 0.35
+			}
+		}
+		ranked = append(ranked, scoredCold{it, s})
+	}
+	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
+	out := make([]HomeFeedItem, len(ranked))
+	for i, sc := range ranked {
+		out[i] = sc.item
+	}
+	// No 3 consecutive same-category items: swap the offender with the
+	// next different-category item further down.
+	catOf := func(it HomeFeedItem) string {
+		if it.Challenge == nil {
+			return ""
+		}
+		return strings.ToLower(it.Challenge.Category)
+	}
+	for i := 2; i < len(out); i++ {
+		c := catOf(out[i])
+		if c == "" || c != catOf(out[i-1]) || c != catOf(out[i-2]) {
+			continue
+		}
+		for j := i + 1; j < len(out); j++ {
+			if catOf(out[j]) != c {
+				out[i], out[j] = out[j], out[i]
+				break
+			}
+		}
+	}
+	return out
 }
 
 // coldStartChallengesTiered runs one tier of the cold-start challenge query.
@@ -4982,13 +5061,11 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		// chicken-and-egg lock. Guarantee the newest uploads a slot.
 		items = injectFreshUploads(userID, items, page)
 
-		// Same payload enrichment the warm path runs. Without it,
-		// battles reached cold users with no topResponse* fields and
-		// the client rendered them as plain shorts — every brand-new
-		// user saw a battle-less "shorts only" feed (and no HLS).
-		populateTopResponses(items)
-		populateChallengeCommentCounts(items)
-		populateHLSManifestURLs(items)
+		// Same payload enrichment every other feed path runs. Without
+		// it, battles reached cold users with no topResponse* fields
+		// and the client rendered them as plain shorts — every
+		// brand-new user saw a battle-less "shorts only" feed.
+		finalizeFeedItems(items)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -5398,19 +5475,11 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// Pagination
 	hasMore := len(composed) >= limit
 
-	// Attach top-response data so the client can render the opponent's
-	// video on a left-swipe for any challenge with responseCount > 0.
-	// One DB round-trip per page; safely no-ops on plain shorts.
-	populateTopResponsesScored(composed)
-	// Same boundary-call pattern for comment counts so the right-rail
-	// number on every challenge tile matches the comment sheet's truth.
-	populateChallengeCommentCountsScored(composed)
-	// And the HLS manifest URL — once the transcode worker has produced
-	// the segmented ladder, the client switches to HLS playback and
-	// gets sub-500ms time-to-first-frame + adaptive bitrate. Falls back
-	// to MP4 cleanly when the column is empty (worker not deployed, or
-	// challenge uploaded before the worker existed).
-	populateHLSManifestURLsScored(composed)
+	// Payload enrichment — ONE choke point shared by every feed path
+	// (see finalizeFeedItems). The cold path once skipped this and
+	// every brand-new user saw battles rendered as shorts; a shared
+	// finalizer makes that class of bug structurally impossible.
+	finalizeFeedItemsScored(composed)
 
 	// Interleave a "Suggested accounts" card into the feed. TikTok-style:
 	// one card injected at index 4 of page 1, and again every 8 items so
@@ -5594,12 +5663,34 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 	hasMore := len(items) >= limit
 	_ = followingSet
 
-	// Attach opponent video data for any challenge with responseCount > 0
-	// — same boundary call as SmartFeedHandler so the swipe-left UX works
-	// identically across For You / Following / Explore.
-	populateTopResponses(items)
-	populateChallengeCommentCounts(items)
-	populateHLSManifestURLs(items)
+	// Seen-aware ordering (the one algorithmic touch Following gets):
+	// the tab stays CHRONOLOGICAL — that's its contract, same as
+	// TikTok/IG — but within this page, items the user has already
+	// watched sink below unseen ones (both groups keep their own
+	// chronological order). Re-opening the tab leads with what's new
+	// to YOU instead of the same top video every session.
+	if len(items) > 1 {
+		seen := loadSeenSet(userID)
+		if len(seen) > 0 {
+			unseen := make([]HomeFeedItem, 0, len(items))
+			watched := make([]HomeFeedItem, 0, 4)
+			for _, it := range items {
+				key := ""
+				if it.Challenge != nil {
+					key = "challenge:" + it.Challenge.ID
+				}
+				if key != "" && seen[key] {
+					watched = append(watched, it)
+				} else {
+					unseen = append(unseen, it)
+				}
+			}
+			items = append(unseen, watched...)
+		}
+	}
+
+	// Shared enrichment choke point — same as For You / Explore.
+	finalizeFeedItems(items)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -5607,6 +5698,31 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 		"page":    page,
 		"hasMore": hasMore,
 	})
+}
+
+// finalizeFeedItems is THE payload-enrichment choke point. EVERY handler
+// that serializes feed items MUST call this (or the Scored variant)
+// exactly once, immediately before encoding:
+//
+//	topResponse* fields  → client's battle rendering + swipe-left opponent
+//	commentCount         → right-rail numbers match the comment sheet
+//	hlsManifestUrl       → adaptive playback once the worker transcodes
+//
+// History: the cold-start path skipped these calls and every brand-new
+// user saw battles rendered as plain shorts. A single named finalizer
+// exists so a new feed surface can't silently repeat that mistake —
+// grep for finalizeFeedItems when adding one.
+func finalizeFeedItems(items []HomeFeedItem) {
+	populateTopResponses(items)
+	populateChallengeCommentCounts(items)
+	populateHLSManifestURLs(items)
+}
+
+// finalizeFeedItemsScored is the ScoredItem-slice flavor.
+func finalizeFeedItemsScored(items []ScoredItem) {
+	populateTopResponsesScored(items)
+	populateChallengeCommentCountsScored(items)
+	populateHLSManifestURLsScored(items)
 }
 
 // UserProfileHandler returns the computed user profile (for debugging/analytics).

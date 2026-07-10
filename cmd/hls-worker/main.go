@@ -84,17 +84,24 @@ const (
 
 func main() {
 	pollInterval := flag.Duration("poll", 5*time.Second, "interval between empty-queue polls")
+	// -drain: process everything pending, then EXIT instead of polling
+	// forever. This is what makes free scheduled runners (GitHub
+	// Actions cron) a viable $0 transcode fleet: each run drains the
+	// backlog and terminates, so a 30-minute cron behaves like an
+	// always-on worker with ≤30min latency and zero hosting cost.
+	drain := flag.Bool("drain", false, "exit once the queue is empty instead of polling forever")
 	flag.Parse()
 
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("config error: %v", err)
 	}
-	log.Printf("hls-worker starting; backend=%s bucket=%s", cfg.BackendURL, cfg.R2Bucket)
+	log.Printf("hls-worker starting; backend=%s bucket=%s drain=%v", cfg.BackendURL, cfg.R2Bucket, *drain)
 
 	// Single-process loop. Multiple replicas can run safely because
 	// /internal/hls/next-pending uses FOR UPDATE SKIP LOCKED on the
 	// backend side — two workers will never claim the same row.
+	emptyPolls := 0
 	for {
 		job, err := claimJob(cfg)
 		if err != nil {
@@ -103,9 +110,19 @@ func main() {
 			continue
 		}
 		if job == nil {
+			if *drain {
+				// Two consecutive empty polls = genuinely drained (one
+				// could race a just-failed job being reset).
+				emptyPolls++
+				if emptyPolls >= 2 {
+					log.Println("queue drained — exiting (drain mode)")
+					return
+				}
+			}
 			time.Sleep(*pollInterval)
 			continue
 		}
+		emptyPolls = 0
 		log.Printf("claimed job kind=%s id=%s source=%s", jobKind(*job), job.ChallengeID, job.SourceURL)
 		manifestURL, err := processJob(cfg, *job)
 		if err != nil {

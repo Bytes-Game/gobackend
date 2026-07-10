@@ -2173,13 +2173,34 @@ func seedChallenges() {
 		{5, v1, "", "Who tells better", "Bedtime Story", "arena", "active", 3700, "2026-03-31T18:00:00Z"},         // ID 47
 	}
 
+	// Capture the REAL serial id of every seeded challenge. The like/
+	// response/vote literals below reference challenges by their
+	// 1-based position in `data` — the old code assumed SERIAL ids
+	// happened to equal those positions, which silently breaks the
+	// moment the sequence isn't fresh (any prior insert, partial
+	// reseed, or restored dump). Production was found with "ghost
+	// battles": counts pointing at challenges whose responses landed
+	// on other rows. Mapping through seedCID makes seeding correct on
+	// ANY database state.
+	seedCID := make([]int, 0, len(data))
 	for _, c := range data {
 		t := freshTimestamp(c.createdAt)
-		db.Exec(
+		var realID int
+		err := db.QueryRow(
 			`INSERT INTO challenges (creator_id, video_url, thumbnail_url, prefix, subject, visibility, status, views, created_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
 			c.creatorID, c.videoURL, c.thumbURL, c.prefix, c.subject, c.visibility, c.status, c.views, t,
-		)
+		).Scan(&realID)
+		if err != nil {
+			realID = 0 // keeps positions aligned; consumers skip 0
+		}
+		seedCID = append(seedCID, realID)
+	}
+	cidOf := func(pos int) int {
+		if pos >= 1 && pos <= len(seedCID) {
+			return seedCID[pos-1]
+		}
+		return 0
 	}
 
 	// Seed challenge likes — spread across all challenges.
@@ -2235,7 +2256,9 @@ func seedChallenges() {
 		{47, 2}, {47, 5}, {47, 8}, {47, 10},
 	}
 	for _, cl := range challengeLikes {
-		db.Exec(`INSERT INTO challenge_likes (challenge_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, cl[0], cl[1])
+		if realCID := cidOf(cl[0]); realCID > 0 {
+			db.Exec(`INSERT INTO challenge_likes (challenge_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, realCID, cl[1])
+		}
 	}
 
 	// Seed responses for battle challenges.
@@ -2268,13 +2291,32 @@ func seedChallenges() {
 		{46, 1, v8, "", 3500, "2026-03-31T21:00:00Z"},    // resp 17 — player1 responds to thunderbolt
 		{47, 2, v9, "", 3100, "2026-03-31T19:00:00Z"},    // resp 18 — player2 responds to blazerunner
 	}
+	// Same real-id capture for responses — the vote literals reference
+	// responses by their 1-based position in this slice.
+	seedRID := make([]int, 0, len(responses))
 	for _, r := range responses {
 		rt := freshTimestamp(r.createdAt)
-		db.Exec(
+		realCID := cidOf(r.challengeID)
+		if realCID == 0 {
+			seedRID = append(seedRID, 0)
+			continue
+		}
+		var realRID int
+		err := db.QueryRow(
 			`INSERT INTO challenge_responses (challenge_id, responder_id, video_url, thumbnail_url, views, created_at)
-			 VALUES ($1,$2,$3,$4,$5,$6)`,
-			r.challengeID, r.responderID, r.videoURL, r.thumbURL, r.views, rt,
-		)
+			 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+			realCID, r.responderID, r.videoURL, r.thumbURL, r.views, rt,
+		).Scan(&realRID)
+		if err != nil {
+			realRID = 0
+		}
+		seedRID = append(seedRID, realRID)
+	}
+	ridOf := func(pos int) int {
+		if pos >= 1 && pos <= len(seedRID) {
+			return seedRID[pos-1]
+		}
+		return 0
 	}
 
 	// Seed votes on battle challenges.
@@ -2302,9 +2344,13 @@ func seedChallenges() {
 		{47, 18, 3}, {47, 18, 6}, {47, 18, 9},
 	}
 	for _, v := range votes {
+		realCID, realRID := cidOf(v.challengeID), ridOf(v.responseID)
+		if realCID == 0 || realRID == 0 {
+			continue
+		}
 		db.Exec(
 			`INSERT INTO challenge_votes (challenge_id, response_id, voter_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
-			v.challengeID, v.responseID, v.voterID,
+			realCID, realRID, v.voterID,
 		)
 	}
 }
