@@ -9,6 +9,77 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// injectFreshUploads guarantees brand-new content (≤48h old) a slot in
+// cold-start page 1. The cold quality-ladder orders by views+likes, so
+// a 0-view upload mathematically can't surface while anything with
+// engagement exists — and since young platforms are mostly cold-start
+// viewers, new uploads would otherwise only ever be seen via Following:
+// a chicken-and-egg discovery lock. This is the cold-path counterpart
+// of the warm path's audition slot.
+//
+// Rules: page 1 only, max 2 items, never the viewer's own uploads,
+// never items already in the page, never items in the viewer's seen
+// set (so refreshes rotate through fresh uploads instead of repeating
+// one). Inserted at position 2 — early enough to actually get seen,
+// while slots 0-1 keep the proven "first impression" content.
+func injectFreshUploads(userID string, items []HomeFeedItem, page int) []HomeFeedItem {
+	if page != 1 || db == nil {
+		return items
+	}
+	present := map[string]bool{}
+	for _, it := range items {
+		if it.Challenge != nil {
+			present[it.Challenge.ID] = true
+		}
+	}
+	rows, err := db.Query(`
+		SELECT id FROM challenges
+		WHERE created_at > NOW() - INTERVAL '48 hours'
+		  AND visibility = 'arena'
+		  AND video_url <> ''
+		  AND creator_id::text <> $1
+		ORDER BY created_at DESC
+		LIMIT 6`, userID)
+	if err != nil {
+		return items
+	}
+	candidateIDs := []string{}
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil && !present[id] {
+			candidateIDs = append(candidateIDs, id)
+		}
+	}
+	rows.Close()
+
+	fresh := make([]HomeFeedItem, 0, 2)
+	for _, id := range candidateIDs {
+		if len(fresh) == 2 {
+			break
+		}
+		if rdb != nil {
+			if err := rdb.ZScore(rctx, seenKey(userID), "challenge:"+id).Err(); err == nil {
+				continue // already shown to this user
+			}
+		}
+		if item, ok := loadHomeFeedItemByID("challenge", id); ok && item.Challenge != nil {
+			fresh = append(fresh, item)
+		}
+	}
+	if len(fresh) == 0 {
+		return items
+	}
+	pos := 2
+	if pos > len(items) {
+		pos = len(items)
+	}
+	out := make([]HomeFeedItem, 0, len(items)+len(fresh))
+	out = append(out, items[:pos]...)
+	out = append(out, fresh...)
+	out = append(out, items[pos:]...)
+	return out
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // COLD-START BOOTSTRAP
 //

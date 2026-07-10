@@ -4975,6 +4975,21 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Fresh-content slot: the popularity quality-ladder necessarily
+		// buries 0-view uploads, so on a young platform (where MOST
+		// viewers are cold-start) new content had no route into any For
+		// You page — discovery only happened via Following, a
+		// chicken-and-egg lock. Guarantee the newest uploads a slot.
+		items = injectFreshUploads(userID, items, page)
+
+		// Same payload enrichment the warm path runs. Without it,
+		// battles reached cold users with no topResponse* fields and
+		// the client rendered them as plain shorts — every brand-new
+		// user saw a battle-less "shorts only" feed (and no HLS).
+		populateTopResponses(items)
+		populateChallengeCommentCounts(items)
+		populateHLSManifestURLs(items)
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"items":    items,
