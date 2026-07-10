@@ -374,6 +374,9 @@ func main() {
 	// client uploads bytes directly to object storage without ever
 	// streaming them through Render.
 	api.HandleFunc("/media/presign", authed(PresignMediaUploadHandler)).Methods("POST", "OPTIONS")
+	// Multipart uploads: init/part/complete/abort presigns for large
+	// files — per-part retry + resume instead of restart-from-zero.
+	api.HandleFunc("/media/multipart", authed(MultipartPresignHandler)).Methods("POST", "OPTIONS")
 	// HLS background worker endpoints. /next-pending claims one
 	// transcode job (atomic SKIP LOCKED), /complete records the
 	// finished manifest URL, /fail returns the row to the queue so

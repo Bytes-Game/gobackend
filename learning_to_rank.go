@@ -194,6 +194,118 @@ func ltrObserveWeighted(cohort Cohort, breakdown map[string]float64, label, weig
 	ltr.dirty[cohort] = true
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// PAIRWISE (BPR) UPDATES
+//
+// Pointwise logistic answers "was this item engaged?" — but ranking is
+// about ORDER, and the cleanest order signal a session produces is
+// "engaged with A, skipped B, both served together". BPR trains
+// directly on that: push score(A) above score(B).
+//
+// Mechanics: negative outcomes park their feature breakdown in a short
+// per-user Redis pool; the next positive outcome from the same user
+// (same cohort) pops one and takes a pairwise step alongside the usual
+// pointwise one. Killable/tunable without deploy via the experiment
+// config key "pairwiseLTRWeight" (0 = off, default 1.0).
+// ─────────────────────────────────────────────────────────────────────
+
+const (
+	ltrNegPoolKeyPrefix = "ltrneg:"
+	ltrNegPoolCap       = 5
+	ltrNegPoolTTL       = 30 * time.Minute
+	// pairwiseLTRScale keeps the pairwise step conservative relative to
+	// the battle-tested pointwise step (same decaying lr × this).
+	pairwiseLTRScale = 0.5
+)
+
+type ltrNegSample struct {
+	C string             `json:"c"`
+	B map[string]float64 `json:"b"`
+}
+
+// ltrStashNegative parks a negative outcome's features for later pairing.
+func ltrStashNegative(userID, cohort string, breakdown map[string]float64) {
+	if rdb == nil || userID == "" || breakdown == nil {
+		return
+	}
+	js, err := json.Marshal(ltrNegSample{C: cohort, B: breakdown})
+	if err != nil {
+		return
+	}
+	key := ltrNegPoolKeyPrefix + userID
+	_ = rdb.LPush(rctx, key, js).Err()
+	_ = rdb.LTrim(rctx, key, 0, ltrNegPoolCap-1).Err()
+	_ = rdb.Expire(rctx, key, ltrNegPoolTTL).Err()
+}
+
+// ltrPairwiseFromPool pairs a fresh positive with the user's most recent
+// stashed negative and applies a BPR step. Cross-cohort pairs are
+// dropped — the cohorts train separate models.
+func ltrPairwiseFromPool(userID string, cohort Cohort, posB map[string]float64, weight float64) {
+	if rdb == nil || userID == "" || posB == nil {
+		return
+	}
+	scale := experimentFloat(userID, "pairwiseLTRWeight", 1.0)
+	if scale <= 0 {
+		return
+	}
+	s, err := rdb.LPop(rctx, ltrNegPoolKeyPrefix+userID).Result()
+	if err != nil || s == "" {
+		return
+	}
+	var neg ltrNegSample
+	if json.Unmarshal([]byte(s), &neg) != nil || neg.B == nil {
+		return
+	}
+	if Cohort(neg.C) != cohort {
+		return
+	}
+	ltrObservePairwise(cohort, posB, neg.B, weight*scale)
+}
+
+// ltrObservePairwise takes one BPR step: sigmoid loss on the score
+// margin, gradient on the FEATURE DIFFERENCE (bias cancels, so it isn't
+// touched). Same L2 shrink and clamped weights as the pointwise step.
+func ltrObservePairwise(cohort Cohort, pos, neg map[string]float64, weight float64) {
+	if weight < 0.25 {
+		weight = 0.25
+	}
+	if weight > 4.0 {
+		weight = 4.0
+	}
+	ltrEnsureLoaded()
+	ltr.mu.Lock()
+	defer ltr.mu.Unlock()
+	m, ok := ltr.byCoh[cohort]
+	if !ok {
+		m = &ltrModel{Weights: make(map[string]float64)}
+		ltr.byCoh[cohort] = m
+	}
+	var sPos, sNeg float64
+	for _, k := range ltrFeatureKeys {
+		w := m.Weights[k]
+		if v, ok := pos[k]; ok {
+			sPos += w * v
+		}
+		if v, ok := neg[k]; ok {
+			sNeg += w * v
+		}
+	}
+	// Want P(pos ranked above neg) → 1.
+	p := 1.0 / (1.0 + math.Exp(-(sPos - sNeg)))
+	grad := (p - 1.0) * weight
+	lr := ltrLearningRate * pairwiseLTRScale / math.Sqrt(1.0+float64(m.Updates)/50.0)
+	for _, k := range ltrFeatureKeys {
+		d := pos[k] - neg[k]
+		if d == 0 {
+			continue
+		}
+		m.Weights[k] = m.Weights[k]*0.9995 - lr*grad*d
+	}
+	m.Updates++
+	ltr.dirty[cohort] = true
+}
+
 // positionPropensity returns the empirical probability that an item at
 // position `pos` (1-indexed) receives any engagement *regardless of quality*.
 // Shape: 1/(pos)^0.7 — a standard fit to log-scroll-depth curves. Caller
@@ -353,6 +465,14 @@ func ltrObserveEventWithLatency(userID, contentType, contentID string, label, wa
 		predictedPre = plattCalibrate(z)
 	}
 	ltrObserveWeighted(Cohort(payload.C), payload.B, label, weight)
+	// Pairwise (BPR) leg: positives pair with the user's recently
+	// skipped items for a direct ranking-order update; negatives feed
+	// the pool the next positive will draw from.
+	if label >= 0.5 {
+		ltrPairwiseFromPool(userID, Cohort(payload.C), payload.B, weight)
+	} else {
+		ltrStashNegative(userID, payload.C, payload.B)
+	}
 	// Train the watch-ratio head on the same breakdown when we have a ratio,
 	// applying the SAME inverse-propensity weight so it isn't position-confounded.
 	if watchRatio >= 0 {

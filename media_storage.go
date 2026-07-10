@@ -109,6 +109,58 @@ func (c *R2Config) endpointHost() string {
 // The returned URL is opaque to the caller — they pass it straight to
 // http.PUT with the file body.
 func (c *R2Config) PresignPutURL(objectKey string, expiry time.Duration) (string, error) {
+	return c.presignURL("PUT", objectKey, nil, expiry)
+}
+
+// Multipart presigns — same signer, different (method, query) pairs.
+// The client executes the actual S3 calls; the backend never touches
+// bytes, exactly like the single-PUT path. Part size/count policy lives
+// client-side; server-side authorization is the key-prefix ownership
+// check in the handler.
+
+// PresignMultipartInitURL → POST {key}?uploads (response XML carries UploadId).
+func (c *R2Config) PresignMultipartInitURL(objectKey string, expiry time.Duration) (string, error) {
+	q := url.Values{}
+	q.Set("uploads", "")
+	return c.presignURL("POST", objectKey, q, expiry)
+}
+
+// PresignUploadPartURL → PUT {key}?partNumber=N&uploadId=X (response ETag header).
+func (c *R2Config) PresignUploadPartURL(objectKey, uploadID string, partNumber int, expiry time.Duration) (string, error) {
+	if uploadID == "" || partNumber < 1 || partNumber > 10000 {
+		return "", errors.New("invalid multipart part params")
+	}
+	q := url.Values{}
+	q.Set("partNumber", fmt.Sprintf("%d", partNumber))
+	q.Set("uploadId", uploadID)
+	return c.presignURL("PUT", objectKey, q, expiry)
+}
+
+// PresignMultipartCompleteURL → POST {key}?uploadId=X with the parts XML body.
+func (c *R2Config) PresignMultipartCompleteURL(objectKey, uploadID string, expiry time.Duration) (string, error) {
+	if uploadID == "" {
+		return "", errors.New("uploadId required")
+	}
+	q := url.Values{}
+	q.Set("uploadId", uploadID)
+	return c.presignURL("POST", objectKey, q, expiry)
+}
+
+// PresignMultipartAbortURL → DELETE {key}?uploadId=X (frees stored parts).
+func (c *R2Config) PresignMultipartAbortURL(objectKey, uploadID string, expiry time.Duration) (string, error) {
+	if uploadID == "" {
+		return "", errors.New("uploadId required")
+	}
+	q := url.Values{}
+	q.Set("uploadId", uploadID)
+	return c.presignURL("DELETE", objectKey, q, expiry)
+}
+
+// presignURL is the shared SigV4 query signer. extraQuery entries (e.g.
+// uploads/uploadId/partNumber) participate in the canonical request —
+// url.Values.Encode() sorts keys, which is exactly the canonical order
+// SigV4 requires.
+func (c *R2Config) presignURL(method, objectKey string, extraQuery url.Values, expiry time.Duration) (string, error) {
 	if c == nil {
 		return "", errors.New("R2Config is nil")
 	}
@@ -146,6 +198,11 @@ func (c *R2Config) PresignPutURL(objectKey string, expiry time.Duration) (string
 	q.Set("X-Amz-Date", amzDate)
 	q.Set("X-Amz-Expires", fmt.Sprintf("%d", int(expiry.Seconds())))
 	q.Set("X-Amz-SignedHeaders", "host")
+	for k, vs := range extraQuery {
+		for _, v := range vs {
+			q.Set(k, v)
+		}
+	}
 	canonicalQuery := q.Encode()
 
 	// Only `host` is signed — keeping signed headers minimal means the
@@ -155,7 +212,7 @@ func (c *R2Config) PresignPutURL(objectKey string, expiry time.Duration) (string
 	signedHeaders := "host"
 
 	canonicalRequest := strings.Join([]string{
-		"PUT",
+		method,
 		canonicalURI,
 		canonicalQuery,
 		canonicalHeaders,
