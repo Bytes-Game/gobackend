@@ -391,6 +391,16 @@ func runMigrations() {
 			WHERE hls_manifest_url = '';
 	EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
+	-- Deploy-time attempt amnesty: untranscoded rows that burned all
+	-- their claim attempts get a fresh budget on every deploy. The cap
+	-- exists to stop INFINITE retry loops within a deployment (corrupt
+	-- source, dead worker); infra failures (e.g. the first Actions run
+	-- lacked ffmpeg and instantly exhausted every row's attempts) should
+	-- not permanently strand a video. Worst case for a genuinely broken
+	-- file: 5 quick failures per deploy — bounded and cheap.
+	UPDATE challenges          SET hls_attempts = 0 WHERE hls_manifest_url = '' AND hls_attempts >= 5;
+	UPDATE challenge_responses SET hls_attempts = 0 WHERE hls_manifest_url = '' AND hls_attempts >= 5;
+
 	-- Heal denormalized response_count against the actual rows. Seed
 	-- data was found in production with response_count=1 but ZERO
 	-- challenge_responses rows ("ghost battles" — counted as battles in
