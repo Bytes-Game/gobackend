@@ -420,7 +420,19 @@ func transcodeHLS(src, outDir string) error {
 		}
 	}
 
-	// Per-rendition encode settings.
+	// Per-rendition encode settings. Three hard-won details from the
+	// first production run (portrait WhatsApp-sourced upload):
+	//   * force_divisible_by=2 — aspect-preserving scale of a portrait
+	//     source produced 853x1080 and libx264 FATALS on odd dims
+	//     ("width not divisible by 2", exit 187). Every video failed.
+	//   * -filter:v:N (typed per-output-stream form) — the old -vf:N
+	//     form made ffmpeg warn "Multiple -filter options ... only the
+	//     last will be used" and collapse every rendition onto the last
+	//     scale, so the whole ladder would have been 1080p.
+	//   * fps=30 — normalizes freak sources (a real upload arrived at
+	//     0.33 fps: 5 frames in 15s, which played as "frozen video +
+	//     running audio"). Duplicating frames to a constant 30fps makes
+	//     any source play smoothly and keeps -g 60 = exact 2s keyframes.
 	for i, r := range ladder {
 		idx := fmt.Sprintf("%d", i)
 		args = append(args,
@@ -428,7 +440,7 @@ func transcodeHLS(src, outDir string) error {
 			"-b:v:"+idx, fmt.Sprintf("%dk", r.videoBps/1000),
 			"-maxrate:v:"+idx, fmt.Sprintf("%dk", r.videoBps/1000),
 			"-bufsize:v:"+idx, fmt.Sprintf("%dk", (r.videoBps/1000)*2),
-			"-vf:"+idx, fmt.Sprintf("scale=w=%d:h=%d:force_original_aspect_ratio=decrease", r.width, r.height),
+			"-filter:v:"+idx, fmt.Sprintf("scale=w=%d:h=%d:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=30", r.width, r.height),
 			"-preset", "veryfast",
 			"-g", fmt.Sprintf("%d", segmentSeconds*30), // keyframe every segment
 			"-keyint_min", fmt.Sprintf("%d", segmentSeconds*30),
