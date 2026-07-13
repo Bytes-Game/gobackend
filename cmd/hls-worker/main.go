@@ -90,19 +90,32 @@ func main() {
 	// backlog and terminates, so a 30-minute cron behaves like an
 	// always-on worker with ≤30min latency and zero hosting cost.
 	drain := flag.Bool("drain", false, "exit once the queue is empty instead of polling forever")
+	// -max-runtime: stop CLAIMING new jobs after this long, finish the
+	// current one, exit 0. Set it a few minutes under the CI job's
+	// timeout-minutes so runs end GREEN with zero jobs killed mid-
+	// transcode — before this, every long backlog run was hard-killed
+	// at the timeout ("The operation was canceled"), stranding one
+	// PENDING row per kill for the reaper to recover.
+	maxRuntime := flag.Duration("max-runtime", 0, "stop claiming new jobs after this duration (0 = unlimited)")
 	flag.Parse()
 
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("config error: %v", err)
 	}
-	log.Printf("hls-worker starting; backend=%s bucket=%s drain=%v", cfg.BackendURL, cfg.R2Bucket, *drain)
+	log.Printf("hls-worker starting; backend=%s bucket=%s drain=%v maxRuntime=%v", cfg.BackendURL, cfg.R2Bucket, *drain, *maxRuntime)
+
+	start := time.Now()
 
 	// Single-process loop. Multiple replicas can run safely because
 	// /internal/hls/next-pending uses FOR UPDATE SKIP LOCKED on the
 	// backend side — two workers will never claim the same row.
 	emptyPolls := 0
 	for {
+		if *maxRuntime > 0 && time.Since(start) > *maxRuntime {
+			log.Printf("max runtime %v reached — exiting cleanly (remaining queue picked up by the next run)", *maxRuntime)
+			return
+		}
 		job, err := claimJob(cfg)
 		if err != nil {
 			log.Printf("claim error: %v (sleeping)", err)
