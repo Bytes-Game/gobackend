@@ -342,8 +342,12 @@ func processJob(cfg *workerConfig, job pendingJob) (string, error) {
 	return manifestURL, nil
 }
 
+// downloadClient bounds source fetches — a stalled external host must
+// fail the attempt, not wedge the worker for the whole run.
+var downloadClient = &http.Client{Timeout: 5 * time.Minute}
+
 func downloadTo(srcURL, dstPath string) error {
-	res, err := http.Get(srcURL)
+	res, err := downloadClient.Get(srcURL)
 	if err != nil {
 		return err
 	}
@@ -484,6 +488,13 @@ func transcodeHLS(src, outDir string) error {
 		}
 	}
 	args = append(args,
+		// Hard output cap: reels are ≤60s by product rule (client
+		// enforces it), so nothing legitimate exceeds this — but seed/
+		// test data pointed at full-length demo movies (a 10-minute
+		// 150MB file) whose 5-rung transcode outlives ANY runner
+		// window, wedging entire runs. 90s bounds every job to ~2min
+		// worst-case regardless of what the source claims to be.
+		"-t", "90",
 		"-var_stream_map", strings.Join(varMap, " "),
 		"-master_pl_name", "master.m3u8",
 		"-f", "hls",
