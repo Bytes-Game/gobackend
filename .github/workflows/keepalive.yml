@@ -1,0 +1,36 @@
+name: keepalive
+
+# $0 anti-sleep pinger: Render's free tier suspends the web service
+# after ~15 minutes without traffic, and the next request then pays a
+# 30-60s cold boot — which looks like "the whole app is broken" (splash
+# hang, empty feed, login timeouts). A ping every ~10 minutes keeps the
+# instance hot. Render free includes 750 instance-hours/month, so one
+# service running 24/7 (~744h) stays inside the free allowance.
+#
+# NOTE: GitHub cron is best-effort — runs can be delayed or skipped
+# under load. For guaranteed 5-minute pings, ALSO add a free external
+# monitor (UptimeRobot: monitor type HTTP(s), URL below, interval 5min).
+# The two overlap harmlessly.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      # -m 90 rides out a cold boot if the instance did fall asleep
+      # (Render's proxy holds the request while it wakes), so even a
+      # late cron run leaves the service hot for the next ~15min.
+      - name: ping /health
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -m 90 https://gobackend-9nd8.onrender.com/health)
+          echo "health: $code"
+          test "$code" = "200"
