@@ -1,5 +1,15 @@
 name: keepalive
 
+# ─────────────────────────────────────────────────────────────────────
+# DELETE THIS FILE WHEN the backend moves to hosting that doesn't
+# sleep on idle (any paid Render plan, or any always-on host). Its ONLY
+# purpose is defeating the free tier's idle suspend — on a non-sleeping
+# server it burns Actions minutes for zero benefit. Nothing depends on
+# it: no code reads it, no other workflow references it, and removing
+# it cannot break the app. Also delete the matching UptimeRobot
+# monitor (if one was set up) at the same time.
+# ─────────────────────────────────────────────────────────────────────
+#
 # $0 anti-sleep pinger: Render's free tier suspends the web service
 # after ~15 minutes without traffic, and the next request then pays a
 # 30-60s cold boot — which looks like "the whole app is broken" (splash
