@@ -4424,6 +4424,63 @@ func moodDrivenPattern(mood string) []string {
 	}
 }
 
+// applyBattleShortRatio enforces the feed's battle:short composition quota.
+//
+// A "battle" is a challenge with at least one response (two creators head to
+// head — the app's core surface); a "short" is a response-less challenge.
+// The battleBoost score term already tilts ranking toward battles, but a
+// soft boost can't guarantee the mix the product wants: with few battles in
+// the corpus the feed collapses to all-shorts, and with many battles shorts
+// disappear. This pass splits the composed feed into two rank-ordered
+// streams and re-interleaves them positionally at `ratio` battles per short
+// (default 3:1), preserving each stream's internal order.
+//
+// Tunable live via the "battleShortRatio" experiment key — e.g. 4.0 for a
+// harder battle skew, 0 (or negative) to disable the quota entirely.
+// Graceful degradation: when either stream runs dry the remainder of the
+// other is appended in rank order, so a battle-poor (or short-poor) corpus
+// still fills every slot.
+func applyBattleShortRatio(userID string, composed []ScoredItem) []ScoredItem {
+	ratio := experimentFloat(userID, "battleShortRatio", 3.0)
+	if ratio <= 0 || len(composed) < 2 {
+		return composed
+	}
+	battles := make([]ScoredItem, 0, len(composed))
+	others := make([]ScoredItem, 0, len(composed))
+	for _, it := range composed {
+		cs := getContentScore(getItemID(it.Item), it.Item.Type)
+		if it.Item.Type == "challenge" && cs != nil && cs.ResponseCount > 0 {
+			battles = append(battles, it)
+		} else {
+			others = append(others, it)
+		}
+	}
+	// Nothing to interleave — one stream is empty, order already correct.
+	if len(battles) == 0 || len(others) == 0 {
+		return composed
+	}
+	// Credit-based interleave: slot i wants a battle while the battles
+	// placed so far are below the target fraction ratio/(ratio+1) of the
+	// slots filled. Handles fractional ratios (e.g. 2.5) exactly.
+	targetFrac := ratio / (ratio + 1)
+	out := make([]ScoredItem, 0, len(composed))
+	bi, oi := 0, 0
+	for len(out) < len(composed) {
+		wantBattle := float64(bi) < targetFrac*float64(len(out)+1)
+		if wantBattle && bi < len(battles) {
+			out = append(out, battles[bi])
+			bi++
+		} else if oi < len(others) {
+			out = append(out, others[oi])
+			oi++
+		} else {
+			out = append(out, battles[bi])
+			bi++
+		}
+	}
+	return out
+}
+
 // composeFeed takes scored items and arranges them into the slot pattern.
 // Each slot is filled with the best available item matching that slot type.
 func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]bool) []ScoredItem {
@@ -5313,6 +5370,16 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// Step 7: Compose feed with slot pattern
 	pattern := getFeedPattern(profile, session, limit)
 	composed := composeFeed(scored, pattern, followingSet)
+
+	// Step 7.-1: Battle:short composition quota. The battleBoost score term
+	// biases ranking toward battles, but a soft boost can't GUARANTEE the
+	// mix — when battles are scarce the feed degrades to all-shorts, and
+	// when they're plentiful shorts vanish entirely. Battles are the core
+	// product surface, so enforce a slot-level ratio (default 3 battles :
+	// 1 short) the way TikTok enforces content-mix quotas: interleave the
+	// two ranked streams positionally, preserving within-type rank order,
+	// and degrade gracefully to whatever's available when one runs dry.
+	composed = applyBattleShortRatio(userID, composed)
 
 	// Step 7.0: Cold-start bootstrap mix — sprinkle high-Wilson-score "known
 	// bangers" into the head for users with very few events. Done AFTER composeFeed
