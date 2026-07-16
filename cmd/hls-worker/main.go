@@ -192,9 +192,15 @@ func loadConfig() (*workerConfig, error) {
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing env: %s", strings.Join(missing, ","))
 	}
-	if c.R2PublicBase == "" {
-		c.R2PublicBase = fmt.Sprintf("https://pub-%s.r2.dev/%s", c.R2AccountID, c.R2Bucket)
-	}
+	// NOTE: R2PublicBase deliberately has NO fabricated default. An older
+	// build defaulted to https://pub-<ACCOUNT_ID>.r2.dev/<bucket> — a URL
+	// shape that never resolves on Cloudflare (the real pub-*.r2.dev
+	// subdomain is a random per-bucket hash, and dev URLs take the object
+	// key directly, no bucket segment) — which poisoned every stored
+	// manifest URL with a 401ing host while the uploads themselves were
+	// fine. When the env is unset we now use the backend-provided
+	// publicBaseUrl from each job (see processJob), which is authoritative
+	// because the backend builds all other media URLs from it.
 	return c, nil
 }
 
@@ -206,6 +212,11 @@ type pendingJob struct {
 	// challenge_responses leg of a battle. Echoed back verbatim on
 	// complete/fail so the backend updates the right row.
 	Kind string `json:"kind"`
+	// PublicBaseURL is the backend's authoritative media host — the same
+	// base its own upload URLs are built from. Used for the manifest URL
+	// whenever the worker's optional R2_PUBLIC_BASE_URL env is unset, so
+	// both sides always agree on where the bucket is publicly served.
+	PublicBaseURL string `json:"publicBaseUrl"`
 }
 
 type reportPayload struct {
@@ -338,7 +349,17 @@ func processJob(cfg *workerConfig, job pendingJob) (string, error) {
 		}
 	}
 
-	manifestURL := cfg.R2PublicBase + "/" + prefix + "/master.m3u8"
+	// Env override wins (custom domain / CDN in front of R2); otherwise
+	// trust the backend's base. Refusing to guess beats writing a URL
+	// that 401s for every viewer while the transcode "succeeds".
+	base := cfg.R2PublicBase
+	if base == "" {
+		base = strings.TrimRight(strings.TrimSpace(job.PublicBaseURL), "/")
+	}
+	if base == "" {
+		return "", fmt.Errorf("no public base URL: set R2_PUBLIC_BASE_URL or deploy a backend that sends publicBaseUrl")
+	}
+	manifestURL := base + "/" + prefix + "/master.m3u8"
 	return manifestURL, nil
 }
 

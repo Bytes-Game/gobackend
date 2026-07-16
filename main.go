@@ -339,6 +339,10 @@ func main() {
 	startNotificationTriggers()
 	// Reset HLS transcode jobs orphaned at 'PENDING' by crashed workers.
 	startHLSReaper()
+	// One-shot repair: rewrite manifest URLs stored with the fabricated
+	// pub-<ACCOUNT_ID>.r2.dev/<bucket> base (written by workers whose
+	// optional R2_PUBLIC_BASE_URL env was unset) to the real public base.
+	healHLSManifestURLs()
 	// DB-backed experiments: seed on fresh DB, refresh every 60s so
 	// experiment edits (incl. the active=false kill switch) apply
 	// without a redeploy.

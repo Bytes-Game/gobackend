@@ -27,6 +27,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -55,6 +56,14 @@ type pendingHLSJob struct {
 	ChallengeID string `json:"challengeId"` // row id in the kind's table (name kept for wire compat)
 	SourceURL   string `json:"sourceUrl"`   // the original mp4 in R2 the worker fetches
 	Kind        string `json:"kind"`        // "challenge" (default) | "response"
+	// PublicBaseURL is the host clients fetch media from — the backend's
+	// R2_PUBLIC_BASE_URL. Sent with every job so the worker builds
+	// manifest URLs from the SAME base the rest of the app uses. Without
+	// it, a worker whose optional R2_PUBLIC_BASE_URL env was unset used
+	// to fabricate pub-<ACCOUNT_ID>.r2.dev/<bucket> — a URL shape that
+	// never resolves (the real pub-*.r2.dev hash is random per bucket),
+	// which 401'd every HLS stream in the player.
+	PublicBaseURL string `json:"publicBaseUrl,omitempty"`
 }
 
 // hlsCompleteRequest is what the worker POSTs after a successful
@@ -148,10 +157,16 @@ func HLSNextPendingHandler(w http.ResponseWriter, r *http.Request) {
 		return idInt, srcURL, true
 	}
 
+	publicBase := ""
+	if cfg, err := loadR2Config(); err == nil {
+		publicBase = cfg.PublicBaseURL
+	}
+
 	if id, src, ok := claim("challenges"); ok {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(pendingHLSJob{
 			ChallengeID: strconv.Itoa(id), SourceURL: src, Kind: "challenge",
+			PublicBaseURL: publicBase,
 		})
 		return
 	}
@@ -159,6 +174,7 @@ func HLSNextPendingHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(pendingHLSJob{
 			ChallengeID: strconv.Itoa(id), SourceURL: src, Kind: hlsKindResponse,
+			PublicBaseURL: publicBase,
 		})
 		return
 	}
@@ -229,6 +245,46 @@ func HLSFailHandler(w http.ResponseWriter, r *http.Request) {
 		cid,
 	)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// healHLSManifestURLs rewrites manifest URLs written by workers whose
+// optional R2_PUBLIC_BASE_URL env was unset: those fabricated a base of
+// https://pub-<ACCOUNT_ID>.r2.dev/<bucket>, a URL shape that never
+// resolves on Cloudflare (the real pub-*.r2.dev subdomain is a random
+// per-bucket hash, and public dev URLs don't take a bucket path
+// segment) — so every affected row 401'd in the player while the
+// underlying HLS files sat perfectly fine in the bucket. One-shot at
+// boot: swap the fabricated prefix for the backend's authoritative
+// public base, which points at the same objects.
+func healHLSManifestURLs() {
+	if db == nil {
+		return
+	}
+	cfg, err := loadR2Config()
+	if err != nil || cfg.PublicBaseURL == "" {
+		return
+	}
+	fabricated := fmt.Sprintf("https://pub-%s.r2.dev/%s/", cfg.AccountID, cfg.Bucket)
+	right := cfg.PublicBaseURL + "/"
+	if fabricated == right {
+		// The backend's own env still points at the fabricated shape —
+		// nothing better to rewrite to.
+		return
+	}
+	for _, table := range []string{"challenges", "challenge_responses"} {
+		res, err := db.Exec(
+			`UPDATE `+table+` SET hls_manifest_url = replace(hls_manifest_url, $1, $2)
+			  WHERE hls_manifest_url LIKE $3`,
+			fabricated, right, fabricated+"%",
+		)
+		if err != nil {
+			log.Printf("hls url heal %s error: %v", table, err)
+			continue
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			log.Printf("hls url heal: fixed %d row(s) in %s", n, table)
+		}
+	}
 }
 
 // startHLSReaper resets jobs orphaned in the 'PENDING' state — a worker
