@@ -76,7 +76,13 @@ var ladder = []rendition{
 	{label: "360p", width: 640, height: 360, videoBps: 600_000, audioBps: 96_000},
 	{label: "480p", width: 854, height: 480, videoBps: 1_000_000, audioBps: 96_000},
 	{label: "720p", width: 1280, height: 720, videoBps: 2_500_000, audioBps: 128_000},
-	{label: "1080p", width: 1920, height: 1080, videoBps: 4_500_000, audioBps: 128_000},
+	// 1080p deliberately absent. These are sub-90s vertical reels viewed
+	// full-screen on phones, where nothing above 720p is distinguishable
+	// — but decoding it costs roughly double, and device logs showed
+	// 1920x1080 decoder sessions stalling for seconds on a mid-range
+	// chip. Dropping the top rung also cuts worker CPU (the most
+	// expensive rung by far) and R2 storage per upload. Re-add it if a
+	// tablet or TV surface ever needs it.
 }
 
 const (
