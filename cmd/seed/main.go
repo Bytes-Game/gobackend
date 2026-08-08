@@ -23,11 +23,20 @@
 // Nothing here runs automatically — it is a command you invoke deliberately, not
 // an endpoint left exposed on the API.
 //
+// `-dry-run` executes every statement for real and then rolls the transaction
+// back, so it reports exact before/after counts and surfaces any schema
+// mismatch without keeping a single row. Prefer it before the real thing.
+//
+// Accounts that already exist are reused, never overwritten — this will not
+// change the password on an account someone is actively using. Only newly
+// created accounts get the seed password, and the output says which is which.
+//
 // Usage:
 //
 //	export DATABASE_URL='postgres://...'
-//	go run ./cmd/seed -reset -yes-delete-existing-content
-//	go run ./cmd/seed                     # insert only, keep what's there
+//	go run ./cmd/seed -reset -dry-run                        # preview, changes nothing
+//	go run ./cmd/seed -reset -yes-delete-existing-content     # wipe + seed
+//	go run ./cmd/seed                                         # insert only
 package main
 
 import (
@@ -109,11 +118,17 @@ func main() {
 		"delete existing challenges and responses before inserting")
 	confirm := flag.Bool("yes-delete-existing-content", false,
 		"required alongside -reset; deleting content cannot be undone")
+	dryRun := flag.Bool("dry-run", false,
+		"run every statement, report what would change, then roll back")
 	flag.Parse()
 
-	if *reset && !*confirm {
+	// -dry-run rolls back, so it cannot destroy anything and does not need
+	// the delete confirmation.
+	if *reset && !*confirm && !*dryRun {
 		log.Fatal("-reset deletes every challenge and response and cannot be undone.\n" +
-			"Re-run with both flags if that is what you want:\n" +
+			"Preview it first — this changes nothing:\n" +
+			"  go run ./cmd/seed -reset -dry-run\n" +
+			"Then, if the numbers look right:\n" +
 			"  go run ./cmd/seed -reset -yes-delete-existing-content")
 	}
 
@@ -138,6 +153,24 @@ func main() {
 	}
 	defer tx.Rollback()
 
+	if *dryRun {
+		log.Print("DRY RUN — every statement below really executes, then the whole " +
+			"transaction is rolled back. Nothing is kept.")
+	}
+
+	// Report the starting state before touching anything, so the operator can
+	// see the scale of what -reset is about to remove rather than trusting it.
+	var beforeChallenges, beforeResponses, beforeUsers int
+	if err := tx.QueryRow(`SELECT
+			(SELECT count(*) FROM challenges),
+			(SELECT count(*) FROM challenge_responses),
+			(SELECT count(*) FROM users)`).
+		Scan(&beforeChallenges, &beforeResponses, &beforeUsers); err != nil {
+		log.Fatalf("read current counts (does the schema exist?): %v", err)
+	}
+	log.Printf("before: %d challenges, %d responses, %d users",
+		beforeChallenges, beforeResponses, beforeUsers)
+
 	if *reset {
 		// challenge_responses, likes, dislikes and visibility rows all cascade
 		// from challenges, so deleting the parent is enough.
@@ -150,14 +183,31 @@ func main() {
 	}
 
 	userIDs := make([]int, 0, len(users))
+	var created, existing []string
 	for _, u := range users {
-		id, err := upsertUser(tx, u)
+		id, isNew, err := upsertUser(tx, u)
 		if err != nil {
 			log.Fatalf("upsert user %s: %v", u.username, err)
 		}
 		userIDs = append(userIDs, id)
+		if isNew {
+			created = append(created, u.username)
+		} else {
+			existing = append(existing, u.username)
+		}
 	}
-	log.Printf("ensured %d demo users (password %q)", len(userIDs), seedPassword)
+	// Report these separately. Pre-existing accounts keep whatever password
+	// they already had — this tool will not lock someone out of an account
+	// they are actively using — so claiming they all share the seed password
+	// would simply be untrue.
+	if len(created) > 0 {
+		log.Printf("created %d new users (password %q): %v",
+			len(created), seedPassword, created)
+	}
+	if len(existing) > 0 {
+		log.Printf("reused %d existing users, passwords UNCHANGED: %v",
+			len(existing), existing)
+	}
 
 	// Only the short clips become challenges — a 10-minute open movie at the
 	// top of a reels feed is not a useful test of anything.
@@ -192,34 +242,65 @@ func main() {
 		}
 	}
 
+	// Read the end state from inside the transaction. On a dry run this is the
+	// only place the result is ever visible, since the rollback below discards
+	// it — but every INSERT really ran, so a column mismatch or constraint
+	// violation surfaces here rather than during the real thing.
+	var afterChallenges, afterResponses, afterUsers int
+	if err := tx.QueryRow(`SELECT
+			(SELECT count(*) FROM challenges),
+			(SELECT count(*) FROM challenge_responses),
+			(SELECT count(*) FROM users)`).
+		Scan(&afterChallenges, &afterResponses, &afterUsers); err != nil {
+		log.Fatalf("read resulting counts: %v", err)
+	}
+	log.Printf("after:  %d challenges, %d responses, %d users",
+		afterChallenges, afterResponses, afterUsers)
+
+	if *dryRun {
+		if err := tx.Rollback(); err != nil {
+			log.Fatalf("rollback: %v", err)
+		}
+		log.Printf("DRY RUN COMPLETE — rolled back, database unchanged.")
+		log.Printf("every statement executed cleanly against the real schema; "+
+			"re-run with -reset -yes-delete-existing-content to keep %d challenges",
+			inserted)
+		return
+	}
+
 	if err := tx.Commit(); err != nil {
 		log.Fatalf("commit: %v", err)
 	}
 	log.Printf("seeded %d challenges, each with one response", inserted)
-	log.Printf("log in as any of: player1 … omar / %s", seedPassword)
 }
 
 // upsertUser creates the account if missing and returns its id either way, so
 // re-running the seed does not fail on the username unique constraint or
 // clobber a password someone is already using.
-func upsertUser(tx *sql.Tx, u seedUser) (int, error) {
-	var id int
-	err := tx.QueryRow(`SELECT id FROM users WHERE username = $1`, u.username).Scan(&id)
+func upsertUser(tx *sql.Tx, u seedUser) (id int, created bool, err error) {
+	err = tx.QueryRow(`SELECT id FROM users WHERE username = $1`, u.username).Scan(&id)
 	if err == nil {
-		return id, nil
+		return id, false, nil
 	}
 	if err != sql.ErrNoRows {
-		return 0, err
+		return 0, false, err
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(seedPassword), bcrypt.DefaultCost)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
+	// The hash goes in password_hash, NOT password. IsValidUser reads
+	// password_hash first and only falls back to `password` as *plaintext*
+	// (the pre-bcrypt legacy path). Writing a hash into `password` therefore
+	// compares the literal "$2a$10$..." string against what the user types, so
+	// the account exists but can never be logged into — an earlier version of
+	// this seed did exactly that. `password` is NOT NULL, so it gets ''.
 	err = tx.QueryRow(
-		`INSERT INTO users (username, password, full_name) VALUES ($1,$2,$3) RETURNING id`,
+		`INSERT INTO users (username, password, password_hash, full_name)
+		 VALUES ($1,'',$2,$3) RETURNING id`,
 		u.username, string(hash), u.fullName,
 	).Scan(&id)
-	return id, err
+	return id, true, err
 }
 
 func insertChallenge(tx *sql.Tx, creatorID int, c clip) (int, error) {
