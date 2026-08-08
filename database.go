@@ -414,20 +414,20 @@ func runMigrations() {
 	UPDATE challenges          SET hls_attempts = 0 WHERE hls_manifest_url = '' AND hls_attempts >= 5;
 	UPDATE challenge_responses SET hls_attempts = 0 WHERE hls_manifest_url = '' AND hls_attempts >= 5;
 
-	-- Heal denormalized response_count against the actual rows. Seed
-	-- data was found in production with response_count=1 but ZERO
-	-- challenge_responses rows ("ghost battles" — counted as battles in
-	-- lists, but with no opponent video the client rightly renders them
-	-- as shorts). The triggers keep counts exact from here on; this
-	-- repairs whatever history got out of sync. Idempotent no-op when
-	-- everything already matches.
-	UPDATE challenges c SET response_count = sub.n
-	FROM (
-		SELECT c2.id, COUNT(cr.id) AS n
-		FROM challenges c2 LEFT JOIN challenge_responses cr ON cr.challenge_id = c2.id
-		GROUP BY c2.id
-	) sub
-	WHERE sub.id = c.id AND c.response_count IS DISTINCT FROM sub.n;
+	-- NOTE: the response_count heal used to sit here, and it broke every
+	-- fresh database. It reads challenges.response_count, which is not
+	-- created until the denorm block far below, so on a database that did
+	-- not already have that column the statement failed. lib/pq sends this
+	-- whole string as ONE simple query, which Postgres runs in a single
+	-- implicit transaction — so that one failure rolled back every other
+	-- statement in this block: category, emotion_tags, energy_level,
+	-- video_variants, password_hash, challenge_response_flags and the rest.
+	-- The only symptom was a "Warning: alter table issue" line, after which
+	-- boot continued happily against a half-built schema.
+	--
+	-- The denorm block already performs the identical heal, after creating
+	-- the column, so the fix is to not duplicate it here. Anything added to
+	-- this block must only reference columns that already exist by now.
 
 	-- Extended personality dimensions on user_profiles
 	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN attention_span REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
@@ -601,6 +601,13 @@ func runMigrations() {
 	-- Backfill / self-heal: only touches rows whose denormalized count drifted
 	-- from the source tables, so once converged (and with the triggers below
 	-- keeping them current) subsequent boots update nothing.
+	--
+	-- This is also where response_count drift gets repaired. Seed data was
+	-- found in production carrying response_count=1 with ZERO matching
+	-- challenge_responses rows ("ghost battles" — counted as battles in
+	-- lists, but with no opponent video the client rightly renders them as
+	-- shorts). The pair of statements below covers both directions: rows
+	-- that have responses, and rows that have none.
 	UPDATE challenges c SET likes_count = s.cnt
 	  FROM (SELECT challenge_id, COUNT(*) AS cnt FROM challenge_likes GROUP BY challenge_id) s
 	  WHERE s.challenge_id = c.id AND c.likes_count <> s.cnt;
