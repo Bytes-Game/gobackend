@@ -48,10 +48,22 @@ jobs:
       # TWO parallel workers: the backend's FOR UPDATE SKIP LOCKED claim
       # makes concurrent workers safe by construction, and the runner's
       # 4 cores comfortably fit two ffmpeg encodes — ~2x videos per run.
-      # -max-runtime 20m makes both exit CLEANLY before the job's
-      # 24-minute kill switch: runs end green, nothing is stranded
-      # mid-transcode, and the next run (cron or manual) continues the
-      # remaining queue.
+      #
+      # The two budgets must satisfy:
+      #   max-runtime + job-timeout + setup  <  timeout-minutes
+      #   12m         + 8m          + ~2m    =  22m  <  24m    ✓
+      #
+      # -max-runtime alone was NOT sufficient: it is only consulted
+      # BEFORE claiming, so a job claimed at 19m59s still ran to
+      # completion and could overshoot the 24-minute kill switch. That is
+      # what happened on 2026-08-06 04:35 — hard-killed at exactly 24m,
+      # the run reported failed, and the in-flight row left PENDING for
+      # the reaper. -job-timeout adds the missing per-job ceiling, so the
+      # worst case is bounded instead of depending on how slow one source
+      # download or encode happens to be.
+      #
+      # Dropping max-runtime 20m→12m costs no throughput on a real
+      # backlog: whatever is left is claimed by the next run.
       - name: drain transcode queue
         env:
           BACKEND_URL: https://gobackend-9nd8.onrender.com
@@ -63,6 +75,6 @@ jobs:
           R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
         run: |
           go build -o /tmp/hls-worker ./cmd/hls-worker
-          /tmp/hls-worker -drain -max-runtime 20m &
-          /tmp/hls-worker -drain -max-runtime 20m &
+          /tmp/hls-worker -drain -max-runtime 12m -job-timeout 8m &
+          /tmp/hls-worker -drain -max-runtime 12m -job-timeout 8m &
           wait

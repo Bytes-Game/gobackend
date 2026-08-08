@@ -35,6 +35,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -97,6 +98,21 @@ func main() {
 	// at the timeout ("The operation was canceled"), stranding one
 	// PENDING row per kill for the reaper to recover.
 	maxRuntime := flag.Duration("max-runtime", 0, "stop claiming new jobs after this duration (0 = unlimited)")
+	// -job-timeout: HARD ceiling on a single claimed job. -max-runtime
+	// alone cannot bound a run, because it is only consulted BEFORE a
+	// claim: a job claimed one second under the cutoff still runs to
+	// completion, and one job can legitimately take minutes (a 5-minute
+	// source download, then ffmpeg, then the R2 upload of every
+	// segment). That overshoot is what pushed the 2026-08-06 04:35 run
+	// past the workflow's timeout-minutes and got it hard-killed, which
+	// strands the claimed row PENDING for the reaper.
+	//
+	// With this deadline the worst case is bounded and predictable:
+	//   max-runtime + job-timeout + runner setup < timeout-minutes
+	// A job that trips the deadline is reported failed like any other
+	// error, so it returns to the queue — and hls_attempts (incremented
+	// at claim) caps how often a pathological source can be retried.
+	jobTimeout := flag.Duration("job-timeout", 8*time.Minute, "hard ceiling on one job's download+transcode+upload (0 = unlimited)")
 	flag.Parse()
 
 	cfg, err := loadConfig()
@@ -137,7 +153,7 @@ func main() {
 		}
 		emptyPolls = 0
 		log.Printf("claimed job kind=%s id=%s source=%s", jobKind(*job), job.ChallengeID, job.SourceURL)
-		manifestURL, err := processJob(cfg, *job)
+		manifestURL, err := runJob(cfg, *job, *jobTimeout)
 		if err != nil {
 			log.Printf("process error for %s=%s: %v", jobKind(*job), job.ChallengeID, err)
 			_ = reportFail(cfg, *job, err.Error())
@@ -290,7 +306,25 @@ func reportFail(cfg *workerConfig, job pendingJob, reason string) error {
 
 // ─── Core processing pipeline ────────────────────────────────────────
 
-func processJob(cfg *workerConfig, job pendingJob) (string, error) {
+// runJob wraps processJob in a hard deadline so no single job can outlive
+// the runner window (see the -job-timeout flag). timeout <= 0 disables the
+// bound, preserving the previous unlimited behaviour for local runs.
+func runJob(cfg *workerConfig, job pendingJob, timeout time.Duration) (string, error) {
+	if timeout <= 0 {
+		return processJob(context.Background(), cfg, job)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	url, err := processJob(ctx, cfg, job)
+	// Surface the deadline explicitly — "context deadline exceeded" alone
+	// in the failure reason doesn't say which budget was blown.
+	if err != nil && ctx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("job exceeded -job-timeout %v: %w", timeout, err)
+	}
+	return url, err
+}
+
+func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (string, error) {
 	work, err := os.MkdirTemp("", "hls-"+job.ChallengeID+"-")
 	if err != nil {
 		return "", err
@@ -299,7 +333,7 @@ func processJob(cfg *workerConfig, job pendingJob) (string, error) {
 
 	// 1. Download source.
 	srcPath := filepath.Join(work, "source.mp4")
-	if err := downloadTo(job.SourceURL, srcPath); err != nil {
+	if err := downloadTo(ctx, job.SourceURL, srcPath); err != nil {
 		return "", fmt.Errorf("download: %w", err)
 	}
 
@@ -309,7 +343,7 @@ func processJob(cfg *workerConfig, job pendingJob) (string, error) {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return "", err
 	}
-	if err := transcodeHLS(srcPath, outDir); err != nil {
+	if err := transcodeHLS(ctx, srcPath, outDir); err != nil {
 		return "", fmt.Errorf("transcode: %w", err)
 	}
 
@@ -336,7 +370,7 @@ func processJob(cfg *workerConfig, job pendingJob) (string, error) {
 				}
 				local := filepath.Join(outDir, f.Name(), g.Name())
 				key := prefix + "/" + f.Name() + "/" + g.Name()
-				if err := uploadFile(cfg, local, key); err != nil {
+				if err := uploadFile(ctx, cfg, local, key); err != nil {
 					return "", fmt.Errorf("upload %s: %w", key, err)
 				}
 			}
@@ -344,7 +378,7 @@ func processJob(cfg *workerConfig, job pendingJob) (string, error) {
 		}
 		local := filepath.Join(outDir, f.Name())
 		key := prefix + "/" + f.Name()
-		if err := uploadFile(cfg, local, key); err != nil {
+		if err := uploadFile(ctx, cfg, local, key); err != nil {
 			return "", fmt.Errorf("upload %s: %w", key, err)
 		}
 	}
@@ -367,8 +401,15 @@ func processJob(cfg *workerConfig, job pendingJob) (string, error) {
 // fail the attempt, not wedge the worker for the whole run.
 var downloadClient = &http.Client{Timeout: 5 * time.Minute}
 
-func downloadTo(srcURL, dstPath string) error {
-	res, err := downloadClient.Get(srcURL)
+func downloadTo(ctx context.Context, srcURL, dstPath string) error {
+	// Request-scoped context on top of downloadClient's own 5-minute cap:
+	// whichever budget expires first aborts the transfer, so a slow-but-
+	// not-stalled source can't eat the whole job deadline.
+	req, err := http.NewRequestWithContext(ctx, "GET", srcURL, nil)
+	if err != nil {
+		return err
+	}
+	res, err := downloadClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -438,7 +479,7 @@ func probeHasAudio(src string) bool {
 // Audio handling: we probe `src` first and only declare audio renditions
 // if the source actually has audio. This avoids the silent-playback
 // loop bug described on probeHasAudio above.
-func transcodeHLS(src, outDir string) error {
+func transcodeHLS(ctx context.Context, src, outDir string) error {
 	hasAudio := probeHasAudio(src)
 
 	args := []string{
@@ -525,7 +566,10 @@ func transcodeHLS(src, outDir string) error {
 		filepath.Join(outDir, "%v", "index.m3u8"),
 	)
 
-	cmd := exec.Command("ffmpeg", args...)
+	// CommandContext kills ffmpeg when the job deadline expires — without
+	// it a runaway encode keeps the CPU busy until the runner is hard-
+	// killed, which is exactly the overshoot -job-timeout exists to stop.
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -538,7 +582,7 @@ func transcodeHLS(src, outDir string) error {
 // the parent module and Go won't let us import a main package from a
 // sibling binary. Future cleanup: extract to internal/r2/. For now,
 // keep this in sync with media_storage.go's PresignPutURL.
-func uploadFile(cfg *workerConfig, localPath, objectKey string) error {
+func uploadFile(ctx context.Context, cfg *workerConfig, localPath, objectKey string) error {
 	host := cfg.R2AccountID + ".r2.cloudflarestorage.com"
 	encodedKey := encodeS3Path(objectKey)
 	canonicalURI := "/" + cfg.R2Bucket + encodedKey
@@ -588,7 +632,7 @@ func uploadFile(cfg *workerConfig, localPath, objectKey string) error {
 		return err
 	}
 
-	req, err := http.NewRequest("PUT", uploadURL, f)
+	req, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, f)
 	if err != nil {
 		return err
 	}
