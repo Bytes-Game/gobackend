@@ -130,6 +130,19 @@ func runMigrations() {
 		PRIMARY KEY  (challenge_id, user_id)
 	);
 
+	-- Explicit negative engagement on a challenge. Kept in its own table
+	-- (rather than a signed column on challenge_likes) so a dislike stays a
+	-- first-class, queryable fact — creator insights can report it and the
+	-- ranker can join on it without interpreting a magnitude. Mutually
+	-- exclusive with a like: ToggleChallengeDislike clears the like row in
+	-- the same transaction.
+	CREATE TABLE IF NOT EXISTS challenge_dislikes (
+		challenge_id  INT NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+		user_id       INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		created_at    TIMESTAMPTZ DEFAULT NOW(),
+		PRIMARY KEY  (challenge_id, user_id)
+	);
+
 	CREATE TABLE IF NOT EXISTS challenge_response_likes (
 		response_id   INT NOT NULL REFERENCES challenge_responses(id) ON DELETE CASCADE,
 		user_id       INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1896,6 +1909,54 @@ func ToggleChallengeLike(challengeID, userID string) (bool, int) {
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM challenge_likes WHERE challenge_id=$1`, cid).Scan(&count)
 	return !exists, count
+}
+
+// ToggleChallengeDislike toggles an explicit dislike on a challenge and
+// returns (disliked, dislikeCount, likeCount).
+//
+// A dislike and a like are mutually exclusive: turning a dislike ON drops
+// any existing like row, which is why the like count comes back too — the
+// client needs it to re-render the heart without a second round-trip.
+// Turning a dislike OFF does NOT restore the like; the user has to press
+// the heart again, matching the like/dislike semantics everywhere else.
+//
+// Runs inside a transaction so the "insert dislike + delete like" pair can
+// never half-apply and leave a row in both tables (which would double-count
+// the same user as both a positive and negative signal for one challenge).
+func ToggleChallengeDislike(challengeID, userID string) (bool, int, int) {
+	cid, e1 := strconv.Atoi(challengeID)
+	uid, e2 := strconv.Atoi(userID)
+	if e1 != nil || e2 != nil {
+		return false, 0, 0
+	}
+
+	var exists bool
+	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM challenge_dislikes WHERE challenge_id=$1 AND user_id=$2)`, cid, uid).Scan(&exists)
+
+	tx, err := db.Begin()
+	if err != nil {
+		return false, 0, 0
+	}
+	if exists {
+		_, err = tx.Exec(`DELETE FROM challenge_dislikes WHERE challenge_id=$1 AND user_id=$2`, cid, uid)
+	} else {
+		if _, err = tx.Exec(`INSERT INTO challenge_dislikes (challenge_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, cid, uid); err == nil {
+			// Disliking clears the like — they can't both be true.
+			_, err = tx.Exec(`DELETE FROM challenge_likes WHERE challenge_id=$1 AND user_id=$2`, cid, uid)
+		}
+	}
+	if err != nil {
+		tx.Rollback()
+		return false, 0, 0
+	}
+	if err := tx.Commit(); err != nil {
+		return false, 0, 0
+	}
+
+	var dislikes, likes int
+	db.QueryRow(`SELECT COUNT(*) FROM challenge_dislikes WHERE challenge_id=$1`, cid).Scan(&dislikes)
+	db.QueryRow(`SELECT COUNT(*) FROM challenge_likes WHERE challenge_id=$1`, cid).Scan(&likes)
+	return !exists, dislikes, likes
 }
 
 // IncrementChallengeViews bumps the view count for a challenge.

@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -378,6 +380,82 @@ func LikeChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"liked":       liked,
 		"likes":       count,
+		"challengeId": payload.ChallengeID,
+	})
+}
+
+// DislikeChallengeHandler toggles an explicit dislike on a challenge.
+// POST /api/v1/challenges/dislike body:{ challengeId, userId }
+//
+// Two things happen here, and both matter:
+//
+//  1. PERSISTENCE — the dislike is written to challenge_dislikes, so it
+//     survives as a queryable fact (creator insights, moderation review)
+//     rather than only existing as a transient event row.
+//
+//  2. RANKING — we synthesize a "not_interested" FeedEvent and fan it out
+//     through the same path TrackEventHandler uses. That's what actually
+//     teaches the recommender: recordFeedEvent lands the row the nightly
+//     analytics job reads (analytics_job.go handles "not_interested" when
+//     it rebuilds CategoryAffinity / AvoidedCategories),
+//     updateSessionFromEvent adjusts the live session, and
+//     applyEmbeddingFromEvent pushes the user's two-tower vector AWAY from
+//     this content. Without this second step the button would persist a
+//     row nobody reads and the feed would keep serving the same thing.
+//
+// Un-disliking only removes the row; it deliberately does NOT emit a
+// counter-event, because "I changed my mind" is not evidence the content
+// was good — and a reversible event would let a user pump the ranker by
+// toggling.
+func DislikeChallengeHandler(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		ChallengeID string `json:"challengeId"`
+		UserID      string `json:"userId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	// The disliker is the authenticated user, never a body-supplied id.
+	payload.UserID = authUserID(r)
+	if payload.ChallengeID == "" || payload.UserID == "" {
+		http.Error(w, "challengeId and userId are required", http.StatusBadRequest)
+		return
+	}
+
+	// Same budget as "like" — a dislike is the same class of cheap,
+	// high-volume engagement tap, and the feed is scrolled at the same rate.
+	if !allowAction(payload.UserID, "dislike") {
+		writeRateLimited(w, "dislike")
+		return
+	}
+
+	disliked, dislikes, likes := ToggleChallengeDislike(payload.ChallengeID, payload.UserID)
+
+	// Only a NEW dislike teaches the ranker (see docstring).
+	if disliked {
+		event := FeedEvent{
+			UserID:      payload.UserID,
+			ContentID:   payload.ChallengeID,
+			ContentType: "challenge",
+			EventType:   "not_interested",
+			SessionID:   fmt.Sprintf("%s_%d", payload.UserID, time.Now().Unix()/1800),
+			CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		}
+		go func() {
+			if err := recordFeedEvent(event); err != nil {
+				log.Printf("dislike: failed to record feed event: %v", err)
+			}
+		}()
+		go updateSessionFromEvent(event)
+		go applyEmbeddingFromEvent(event)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"disliked":    disliked,
+		"dislikes":    dislikes,
+		"likes":       likes,
 		"challengeId": payload.ChallengeID,
 	})
 }

@@ -43,6 +43,7 @@ type actionLimitConfig struct {
 var actionLimitTable = map[string]actionLimitConfig{
 	// Engagement actions — high volume, low individual cost.
 	"like":             {tokensPerSecond: 1.0, burst: 20},  // 60/min, burst 20
+	"dislike":          {tokensPerSecond: 1.0, burst: 20},  // 60/min, burst 20
 	"comment":          {tokensPerSecond: 0.33, burst: 8},  // ~20/min, burst 8
 	"vote":             {tokensPerSecond: 0.5, burst: 10},  // 30/min, burst 10
 	"save":             {tokensPerSecond: 1.0, burst: 20},  // 60/min, burst 20

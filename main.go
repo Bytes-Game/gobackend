@@ -395,6 +395,10 @@ func main() {
 	api.HandleFunc("/challenges/friends", authed(GetFriendsChallengesHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/accept", authed(AcceptChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/like", authed(LikeChallengeHandler)).Methods("POST", "OPTIONS")
+	// Explicit negative engagement. Persists to challenge_dislikes AND
+	// emits a not_interested feed event so the ranker learns from it —
+	// the client had been calling this path since before it existed.
+	api.HandleFunc("/challenges/dislike", authed(DislikeChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/delete", authed(DeleteChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/vote", authed(VoteChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/comments", authed(AddChallengeCommentHandler)).Methods("POST", "OPTIONS")
