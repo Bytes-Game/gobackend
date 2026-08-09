@@ -1,6 +1,6 @@
 -- Standalone equivalent of `go run ./cmd/seed -reset -yes-delete-existing-content`,
 -- for running the seed with no Go toolchain installed. Paste it into any
--- Postgres client: Render's dashboard PSQL, pgAdmin, DBeaver, or psql itself.
+-- Postgres client: DBeaver, pgAdmin, Render's dashboard PSQL, or psql itself.
 --
 -- WHAT THIS DOES
 --   * DELETES every row in `challenges`. Responses, likes, dislikes and
@@ -8,19 +8,54 @@
 --     be undone.
 --   * Creates six demo accounts if they are missing. Accounts that ALREADY
 --     exist are left completely alone — an account someone is actively using
---     will not have its password changed.
---   * Inserts nine challenges, each with one response, pointing at Google's
---     public ExoPlayer sample clips. Those were chosen because that bucket
---     does not rate-limit the way pub-*.r2.dev does, it honours HTTP range
---     requests (which the loopback media proxy depends on), and the
---     ForBigger* clips are 1280x720 — the ceiling the reels feed targets.
+--     will not have its password changed. The password for newly created
+--     accounts is: password123
+--   * Inserts 28 challenges, 18 of which have a response (a "battle"); the
+--     other 10 have none (a "short").
 --
 -- SAFETY
 --   Everything runs inside one transaction. To preview instead of commit,
 --   change the final COMMIT to ROLLBACK: every statement still executes, the
 --   counts still print, and nothing is kept.
 --
--- The password hash below is bcrypt for "password123". It is written to
+-- ─── WHY THE DATA LOOKS THE WAY IT DOES ────────────────────────────────────
+--
+-- 1. EVERY CLIP IS SMALL. Nothing below exceeds 5.3 MB or 720p. The feed this
+--    replaces carried a 58 MB clip, a 73 MB clip and a 249 MB feature film.
+--    No amount of caching makes a 249 MB file open quickly on a phone; it was
+--    the single biggest reason the feed felt slow. A reel is seconds long and
+--    should weigh single-digit megabytes.
+--
+-- 2. EVERY URL ANSWERS HTTP 206 TO A RANGE REQUEST, verified at the time of
+--    writing. The loopback media proxy pre-loads only the first ~768 KB of
+--    each video; an origin that ignores Range defeats that entirely.
+--
+--    The previous version of this file pointed at Google's gtv-videos-bucket.
+--    That bucket is now PRIVATE — every url in it answers 403 "Anonymous
+--    caller does not have storage.objects.get access". Running the old seed
+--    would have filled the feed with videos that could never play.
+--
+-- 3. AGE AND KIND ARE DECORRELATED. This is the important one. The seed this
+--    replaces stamped every response-less challenge with the NEWEST timestamp
+--    and every battle with an older one. Feeds weigh freshness, so the result
+--    was that every short sorted above every battle: the app served eight
+--    single videos in a row and looked like it had no battles in it at all.
+--    Here, ages descend smoothly across all 28 rows while "does it have a
+--    response" follows an independent 3-in-5 cycle, so the two are mixed
+--    throughout — which is what real usage produces.
+--
+-- 4. AGES STAY INSIDE 12 DAYS. The Following tab only shows content from the
+--    last 14 days. A seed whose back half is older than that cannot be used
+--    to test that tab.
+--
+-- 5. VIEWS AND LIKES ARE NON-ZERO. The ranker orders by (views + likes*3) and
+--    its strict quality tier requires views >= 10 and likes >= 1. Seeded flat
+--    at zero, every query falls through all four quality tiers to the "no
+--    minimum" last resort and the ranking has no signal at all — the feed
+--    degrades to plain reverse-chronological. The spreads below are
+--    arbitrary but deterministic, and uncorrelated with both age and kind.
+--
+-- The bcrypt hash below is for "password123". It is written to
 -- password_hash, NOT password — IsValidUser reads password_hash first and
 -- treats `password` as PLAINTEXT legacy, so a hash placed there would compare
 -- the literal "$2a$..." string against what the user types and never match.
@@ -46,88 +81,120 @@ INSERT INTO users (username, password, password_hash, full_name) VALUES
   ('omar',    '', '$2a$10$Zq/VRC5JcBvrMflQDwqac.xWxeLe3GCcenheoj9J/exx1Dypzb78i', 'Omar Haddad')
 ON CONFLICT (username) DO NOTHING;
 
--- Challenges. Creators are assigned round-robin across the six accounts by
--- position, matching what the Go seeder does.
-WITH base AS (
-  SELECT 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample' AS v,
-         'https://storage.googleapis.com/gtv-videos-bucket/sample/images'    AS t
+-- The plan table drives everything below: one row per challenge, carrying
+-- its clip, prompt, creator, age, view count and whether it gets a response.
+-- Building it once and reusing it is what keeps the challenge insert, the
+-- likes and the responses consistent with each other.
+CREATE TEMP TABLE seed_plan ON COMMIT DROP AS
+WITH clips(pos, url, category, energy, emotions, title, alt_title) AS (VALUES
+  (0,  'https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4', 'comedy',    'high',   '["funny","surprise"]', 'Can you top this entrance?',     'Who can hold a straight face longest'),
+  (1,  'https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_1MB.mp4',         'sports',    'high',   '["excited"]',          'Best escape move wins',          'Best 3-second intro wins'),
+  (2,  'https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_1MB.mp4',               'lifestyle', 'medium', '["happy"]',            'Show me your happy place',       'Recreate this shot with what you own'),
+  (3,  'https://flutter.github.io/assets-for-api-docs/assets/videos/bee.mp4',                     'lifestyle', 'high',   '["excited","happy"]',  'Dream ride challenge',           'Funniest caption for this clip'),
+  (4,  'https://mdn.github.io/shared-assets/videos/flower.mp4',                                   'comedy',    'high',   '["funny"]',            'Funniest reaction wins',         'Who has the steadier hand'),
+  (5,  'https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_2MB.mp4', 'tech',      'medium', '["curious"]',          'Review your setup in 30s',       'Explain this in ten seconds'),
+  (6,  'https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_2MB.mp4',         'sports',    'high',   '["excited"]',          'Street or studio — pick a side', 'Best transition wins'),
+  (7,  'https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_2MB.mp4',               'story',     'medium', '["happy"]',            'Story time challenge',           'Guess the ending challenge'),
+  (8,  'https://flutter.github.io/assets-for-api-docs/assets/videos/butterfly.mp4',               'art',       'low',    '["calm"]',             'Best slow-motion shot',          'Most creative use of one prop'),
+  (9,  'https://media.w3.org/2010/05/video/movie_300.mp4',                                        'education', 'low',    '["curious"]',          'Best budget find challenge',     'Who can do it slower'),
+  (10, 'https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_5MB.mp4', 'comedy',    'medium', '["funny"]',            'Funniest animation dub',         'Best sound-effect dub'),
+  (11, 'https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_5MB.mp4',         'art',       'low',    '["calm"]',             'Calmest scene wins',             'Calmest take wins'),
+  (12, 'https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_5MB.mp4',               'art',       'medium', '["curious"]',          'Most cinematic 10 seconds',      'Most cinematic angle'),
+  (13, 'https://media.w3.org/2010/05/sintel/trailer.mp4',                                         'story',     'medium', '["excited"]',          'Sci-fi one-shot challenge',      'Best plot twist in 10s')
 ),
-seed_users AS (
-  SELECT id, row_number() OVER (ORDER BY pos) - 1 AS idx
-  FROM (
-    SELECT u.id, x.pos
-    FROM users u
-    JOIN (VALUES ('player1',0),('player2',1),('maya',2),
-                 ('deven',3),('nina',4),('omar',5)) AS x(uname, pos)
-      ON x.uname = u.username
-  ) s
+seed_users(pos, uname) AS (VALUES
+  (0,'player1'), (1,'player2'), (2,'maya'), (3,'deven'), (4,'nina'), (5,'omar')
 ),
-clips(pos, file, subject, category, energy, emotions) AS (VALUES
-  (0, 'ForBiggerBlazes',              'Can you top this entrance?',   'comedy',    'high',   '["funny","surprise"]'),
-  (1, 'ForBiggerEscapes',             'Best escape move wins',        'sports',    'high',   '["excited"]'),
-  (2, 'ForBiggerFun',                 'Show me your happy place',     'lifestyle', 'medium', '["happy"]'),
-  (3, 'ForBiggerJoyrides',            'Dream ride challenge',         'lifestyle', 'high',   '["excited","happy"]'),
-  (4, 'ForBiggerMeltdowns',           'Funniest meltdown reaction',   'comedy',    'high',   '["funny"]'),
-  (5, 'VolkswagenGTIReview',          'Review your first car in 30s', 'tech',      'medium', '["curious"]'),
-  (6, 'SubaruOutbackOnStreetAndDirt', 'Street or dirt — pick a side', 'sports',    'high',   '["excited"]'),
-  (7, 'WeAreGoingOnBullrun',          'Road trip story time',         'story',     'medium', '["happy"]'),
-  (8, 'WhatCarCanYouGetForAGrand',    'Best budget find challenge',   'education', 'low',    '["curious"]')
-)
-INSERT INTO challenges
-  (creator_id, video_url, thumbnail_url, prefix, subject,
-   visibility, status, category, emotion_tags, energy_level)
-SELECT su.id,
-       b.v || '/' || c.file || '.mp4',
-       b.t || '/' || c.file || '.jpg',
-       'I challenge you to',
-       c.subject, 'arena', 'open', c.category, c.emotions::jsonb, c.energy
-FROM clips c
-CROSS JOIN base b
-JOIN seed_users su ON su.idx = c.pos % 6
-ORDER BY c.pos;
+n AS (SELECT generate_series(0, 27) AS i)
+SELECT
+  n.i,
+  cu.id                                    AS creator_id,
+  c.url                                    AS video_url,
+  -- Deterministic abstract poster. These sources publish no matching
+  -- stills, and a poster that does not match its video looks broken;
+  -- seeding by clip position keeps a given clip's poster stable.
+  'https://picsum.photos/seed/reel' || c.pos || '/540/960' AS thumbnail_url,
+  c.category,
+  c.energy,
+  c.emotions,
+  -- First pass over the 14 clips uses the primary prompt, second pass the
+  -- alternate, so all 28 subjects are distinct.
+  CASE WHEN n.i < 14 THEN c.title ELSE c.alt_title END AS subject,
+  -- Newest first, ~10h apart with hour-level jitter so no two rows share a
+  -- timestamp. 27 * 10h + jitter stays inside the Following tab's 14 days.
+  (now() - make_interval(hours => n.i * 10 + (n.i % 7)))  AS created_at,
+  400 + (n.i * 137) % 4200                 AS views,
+  (n.i * 3) % 6                            AS like_count,
+  (n.i % 5) < 3                            AS gets_response,
+  ru.id                                    AS responder_id,
+  rc.url                                   AS response_video_url,
+  'https://picsum.photos/seed/reel' || rc.pos || '/540/960' AS response_thumbnail_url
+FROM n
+JOIN clips c        ON c.pos  = n.i % 14
+JOIN clips rc       ON rc.pos = (n.i + 3) % 14
+JOIN seed_users scu ON scu.pos = n.i % 6
+JOIN users cu       ON cu.username = scu.uname
+JOIN seed_users sru ON sru.pos = (n.i + 1) % 6
+JOIN users ru       ON ru.username = sru.uname;
 
--- One response per challenge, using the next clip in the rotation. The battle
--- view swipes between challenger and responder, so a challenge with no
--- response exercises half the UI and none of the 3D cube.
-WITH base AS (
-  SELECT 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample' AS v,
-         'https://storage.googleapis.com/gtv-videos-bucket/sample/images'    AS t
-),
-ordered AS (
-  SELECT c.id,
-         row_number() OVER (ORDER BY c.id) - 1 AS pos,
-         count(*)    OVER ()                   AS total
-  FROM challenges c
-),
-files(pos, file) AS (VALUES
-  (0,'ForBiggerBlazes'), (1,'ForBiggerEscapes'), (2,'ForBiggerFun'),
-  (3,'ForBiggerJoyrides'), (4,'ForBiggerMeltdowns'), (5,'VolkswagenGTIReview'),
-  (6,'SubaruOutbackOnStreetAndDirt'), (7,'WeAreGoingOnBullrun'),
-  (8,'WhatCarCanYouGetForAGrand')
-),
-responders AS (
-  SELECT u.id, x.pos
-  FROM users u
-  JOIN (VALUES ('player1',0),('player2',1),('maya',2),
-               ('deven',3),('nina',4),('omar',5)) AS x(uname, pos)
-    ON x.uname = u.username
+-- Challenges. RETURNING carries the new serial id back out so the likes and
+-- responses below can be attached to the right row — subjects are unique
+-- within this seed, which is what makes the join back to seed_plan safe.
+CREATE TEMP TABLE seed_created ON COMMIT DROP AS
+WITH ins AS (
+  INSERT INTO challenges
+    (creator_id, video_url, thumbnail_url, prefix, subject,
+     visibility, status, category, emotion_tags, energy_level,
+     created_at, views)
+  SELECT creator_id, video_url, thumbnail_url, 'I challenge you to', subject,
+         'arena', 'open', category, emotions::jsonb, energy,
+         created_at, views
+  FROM seed_plan
+  RETURNING id, subject
 )
+SELECT p.i, ins.id AS challenge_id
+FROM ins
+JOIN seed_plan p ON p.subject = ins.subject;
+
+-- Likes. like_count per challenge, from distinct users, offset so the same
+-- accounts do not like everything.
+INSERT INTO challenge_likes (challenge_id, user_id)
+SELECT sc.challenge_id, lu.id
+FROM seed_created sc
+JOIN seed_plan p ON p.i = sc.i
+CROSS JOIN LATERAL generate_series(0, p.like_count - 1) AS k
+JOIN (VALUES (0,'player1'),(1,'player2'),(2,'maya'),
+             (3,'deven'),(4,'nina'),(5,'omar')) AS su(pos, uname)
+  ON su.pos = (p.i + k + 1) % 6
+JOIN users lu ON lu.username = su.uname
+ON CONFLICT DO NOTHING;
+
+-- Responses — only for the 3-in-5 that get one. A response always lands
+-- AFTER the challenge it answers, never before it.
 INSERT INTO challenge_responses
-  (challenge_id, responder_id, video_url, thumbnail_url)
-SELECT o.id,
-       r.id,
-       b.v || '/' || f.file || '.mp4',
-       b.t || '/' || f.file || '.jpg'
-FROM ordered o
-CROSS JOIN base b
-JOIN files f      ON f.pos = (o.pos + 1) % o.total
-JOIN responders r ON r.pos = (o.pos + 1) % 6;
+  (challenge_id, responder_id, video_url, thumbnail_url, created_at)
+SELECT sc.challenge_id, p.responder_id,
+       p.response_video_url, p.response_thumbnail_url,
+       now() - (now() - p.created_at) / 2
+FROM seed_created sc
+JOIN seed_plan p ON p.i = sc.i
+WHERE p.gets_response;
 
--- After state. Expect 9 challenges and 9 responses.
+-- After state. Expect 28 challenges and 18 responses.
 SELECT 'AFTER' AS stage,
        (SELECT count(*) FROM challenges)          AS challenges,
        (SELECT count(*) FROM challenge_responses) AS responses,
+       (SELECT count(*) FROM challenge_likes)     AS likes,
        (SELECT count(*) FROM users)               AS users;
+
+-- The property the whole seed exists for: reading the feed newest-first,
+-- battles (B) and shorts (S) must be MIXED, not clumped. Expect something
+-- like BBBSSBBBSS..., never SSSSSSSSSSBBBB...
+SELECT string_agg(CASE WHEN r.n > 0 THEN 'B' ELSE 'S' END, ''
+                  ORDER BY c.created_at DESC) AS newest_first_layout
+FROM challenges c
+LEFT JOIN (SELECT challenge_id, count(*) AS n
+           FROM challenge_responses GROUP BY 1) r ON r.challenge_id = c.id;
 
 -- Change to ROLLBACK to preview without keeping anything.
 COMMIT;

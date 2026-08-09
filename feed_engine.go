@@ -5124,6 +5124,12 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		// brand-new user saw a battle-less "shorts only" feed.
 		finalizeFeedItems(items)
 
+		// Positional spacing, after enrichment so battle/short is read
+		// off the same field the client renders from. See
+		// feed_kind_spacing.go — a brand-new user is exactly the cohort
+		// that was being shown eight shorts before their first battle.
+		items = spaceOutFeedKinds(items)
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"items":    items,
@@ -5547,6 +5553,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// every brand-new user saw battles rendered as shorts; a shared
 	// finalizer makes that class of bug structurally impossible.
 	finalizeFeedItemsScored(composed)
+	composed = spaceOutFeedKindsScored(composed)
 
 	// Interleave a "Suggested accounts" card into the feed. TikTok-style:
 	// one card injected at index 4 of page 1, and again every 8 items so
@@ -5773,6 +5780,11 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 
 	// Shared enrichment choke point — same as For You / Explore.
 	finalizeFeedItems(items)
+
+	// Chronological stays the contract: this only stops a run of one
+	// kind, and both kinds keep their own newest-first order inside the
+	// page — the same shape as the seen-aware pass just above.
+	items = spaceOutFeedKinds(items)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
