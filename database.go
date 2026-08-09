@@ -49,6 +49,190 @@ func InitDatabase() {
 }
 
 // runMigrations creates all required tables idempotently.
+
+// alterStmts adds columns to existing tables safely. Package-level and
+// not a local so its contents can be asserted without standing up a
+// database — see hls_amnesty_test.go, which pins the HLS attempt-amnesty
+// statements that were silently defeating the transcode retry cap.
+const alterStmts = `
+	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN status VARCHAR(20) DEFAULT 'sent'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN reply_to_id INT REFERENCES chat_messages(id) ON DELETE SET NULL; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN is_edited BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN edited_at TIMESTAMPTZ; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE users ADD COLUMN last_seen TIMESTAMPTZ DEFAULT NOW(); EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN category VARCHAR(30) DEFAULT 'other'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN emotion_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN energy_level VARCHAR(10) DEFAULT 'medium'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE posts ADD COLUMN category VARCHAR(30) DEFAULT 'other'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE posts ADD COLUMN emotion_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE posts ADD COLUMN energy_level VARCHAR(10) DEFAULT 'medium'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN custom_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE posts ADD COLUMN custom_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+
+	-- Multi-bitrate video variants. Maps quality label → CDN URL.
+	-- video_url stays as the canonical/default URL so legacy readers keep
+	-- working; video_variants is the new path for adaptive playback.
+	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN video_variants JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN video_variants JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+
+	-- HLS master manifest URL produced by the background transcode worker.
+	-- State machine: '' = untranscoded, 'PENDING' = claimed by a worker,
+	-- anything else = the public master.m3u8 URL. Clients fall back to
+	-- video_url / video_variants until the worker reports completion via
+	-- POST /api/v1/internal/hls/complete.
+	--
+	-- Stored as TEXT (not VARCHAR(N)) because R2 + custom-domain URLs can
+	-- be long once query params for cache-busting land. Default '' keeps
+	-- the column safe to NOT NULL filter on without a separate IS NULL leg.
+	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN hls_manifest_url TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN hls_manifest_url TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	-- HLS queue bookkeeping: hls_attempts caps how many times a broken
+	-- source gets claimed (incremented at claim in HLSNextPendingHandler),
+	-- hls_claimed_at lets startHLSReaper reset rows a crashed worker left
+	-- stuck at 'PENDING'.
+	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN hls_attempts INT DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN hls_attempts INT DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN hls_claimed_at TIMESTAMPTZ; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN hls_claimed_at TIMESTAMPTZ; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	-- Partial index so the transcode worker's "find next untranscoded
+	-- challenge" query is a fast index scan instead of a sequential one.
+	-- Filtering on the empty string is functionally the same as IS NULL
+	-- for our purposes and matches the DEFAULT above.
+	DO $$ BEGIN
+		CREATE INDEX IF NOT EXISTS challenges_pending_hls_idx
+			ON challenges (created_at)
+			WHERE hls_manifest_url = '';
+	EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+	-- Same queue index for the battle-response leg of the pipeline
+	-- (responses joined the transcode queue when kind-aware claiming
+	-- shipped).
+	DO $$ BEGIN
+		CREATE INDEX IF NOT EXISTS responses_pending_hls_idx
+			ON challenge_responses (created_at)
+			WHERE hls_manifest_url = '';
+	EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+	-- Attempt amnesty: untranscoded rows that burned all their claim
+	-- attempts eventually get a fresh budget. The cap exists to stop
+	-- INFINITE retry loops (corrupt source, dead worker); infra failures
+	-- (e.g. the first Actions run lacked ffmpeg and instantly exhausted
+	-- every row's attempts) should not permanently strand a video.
+	--
+	-- THE 24-HOUR GATE IS THE WHOLE POINT. This block used to be
+	-- unconditional, on the reasoning that it runs once per DEPLOY, so
+	-- the worst case was "5 quick failures per deploy — bounded and
+	-- cheap". It does not run once per deploy. It runs once per BOOT,
+	-- and on Render's free tier the service sleeps after inactivity and
+	-- cold-starts many times a day. The cap was therefore being cleared
+	-- continuously and never actually capped anything.
+	--
+	-- Observed in production: the transcode worker re-claimed the same
+	-- six permanently-broken rows (all pointing at a hotlink-blocked
+	-- source that answers 403) on run after run, burning its whole
+	-- allocation on jobs that can never succeed and hammering this
+	-- backend hard enough to be 429ed by its own rate limiter.
+	--
+	-- Gating on hls_claimed_at turns "5 failures per cold start" into
+	-- "5 failures per day", which keeps the recovery property that
+	-- motivated the amnesty: a row stranded by an infra blip still frees
+	-- itself automatically, just within a day rather than within minutes.
+	UPDATE challenges          SET hls_attempts = 0
+	 WHERE hls_manifest_url = '' AND hls_attempts >= 5
+	   AND (hls_claimed_at IS NULL OR hls_claimed_at < NOW() - INTERVAL '24 hours');
+	UPDATE challenge_responses SET hls_attempts = 0
+	 WHERE hls_manifest_url = '' AND hls_attempts >= 5
+	   AND (hls_claimed_at IS NULL OR hls_claimed_at < NOW() - INTERVAL '24 hours');
+
+	-- NOTE: the response_count heal used to sit here, and it broke every
+	-- fresh database. It reads challenges.response_count, which is not
+	-- created until the denorm block far below, so on a database that did
+	-- not already have that column the statement failed. lib/pq sends this
+	-- whole string as ONE simple query, which Postgres runs in a single
+	-- implicit transaction — so that one failure rolled back every other
+	-- statement in this block: category, emotion_tags, energy_level,
+	-- video_variants, password_hash, challenge_response_flags and the rest.
+	-- The only symptom was a "Warning: alter table issue" line, after which
+	-- boot continued happily against a half-built schema.
+	--
+	-- The denorm block already performs the identical heal, after creating
+	-- the column, so the fix is to not duplicate it here. Anything added to
+	-- this block must only reference columns that already exist by now.
+
+	-- Extended personality dimensions on user_profiles
+	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN attention_span REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN binge_intensity REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN creator_loyalty REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN competitiveness_index REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN mood_volatility REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN strategy_success_history JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+
+	-- Challenge response validation + community-moderation columns
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN duration_ms INT DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN caption TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN relevance_score REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN off_topic_flags INT DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN is_hidden BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+
+	-- Challenge response off-topic flagging table (community moderation)
+	CREATE TABLE IF NOT EXISTS challenge_response_flags (
+		response_id INT NOT NULL REFERENCES challenge_responses(id) ON DELETE CASCADE,
+		user_id     INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		reason      VARCHAR(40) NOT NULL DEFAULT 'off_topic',
+		created_at  TIMESTAMPTZ DEFAULT NOW(),
+		PRIMARY KEY (response_id, user_id)
+	);
+
+	-- Profile bio + user-level settings (theme, language, etc.).
+	-- bio gets a dedicated column because it's shown on every profile
+	-- view; settings is JSONB so we can ship new toggles without a
+	-- migration per feature. Keep auth/security state OUT of settings —
+	-- TOTP secrets live in their own table for least-privilege access.
+	DO $$ BEGIN ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE users ADD COLUMN settings JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	-- Account visibility: 'public' (default, anyone can see) | 'friends'
+	-- (only followers see your posts and profile detail). Stored as a
+	-- column so the feed-time WHERE clause can filter by index lookup
+	-- without parsing JSON.
+	DO $$ BEGIN ALTER TABLE users ADD COLUMN visibility VARCHAR(20) DEFAULT 'public'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+
+	-- user_blocks: A blocks B → A never sees B's content, B can't DM A.
+	-- Bidirectional enforcement happens at query-time (filter both
+	-- legs). Keeping this as a thin table (just blocker_id, blocked_id)
+	-- means add/remove is O(1) and lookup joins against the user table
+	-- stay cheap.
+	CREATE TABLE IF NOT EXISTS user_blocks (
+		blocker_id  INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		blocked_id  INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		created_at  TIMESTAMPTZ DEFAULT NOW(),
+		PRIMARY KEY (blocker_id, blocked_id),
+		CHECK (blocker_id <> blocked_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks(blocked_id);
+
+	-- TOTP-based 2FA. One row per user once they've enrolled. Kept in a
+	-- separate table from users so the SELECT * lookups elsewhere never
+	-- accidentally leak the secret, and so we can add column-level
+	-- revoke later if we move to a hosted secrets manager.
+	--
+	-- secret: base32-encoded shared secret (the QR-code payload).
+	-- recovery_codes: 10 single-use backup codes, stored SHA-256-hashed
+	--   so a DB read can't bypass 2FA. (Codes are 80-bit random base32
+	--   themselves, so the entropy is in the code, not the hash —
+	--   bcrypt would be overkill and adds a dep.)
+	-- last_used_at: prevents replaying a freshly-used 6-digit code
+	--   within the same 30s window.
+	CREATE TABLE IF NOT EXISTS user_totp (
+		user_id        INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+		secret         TEXT NOT NULL,
+		recovery_codes JSONB NOT NULL DEFAULT '[]',
+		enrolled_at    TIMESTAMPTZ DEFAULT NOW(),
+		last_used_at   TIMESTAMPTZ,
+		is_active      BOOLEAN DEFAULT FALSE
+	);
+	`
+
 func runMigrations() {
 	schema := `
 	CREATE TABLE IF NOT EXISTS users (
@@ -343,164 +527,8 @@ func runMigrations() {
 		log.Fatalf("Migration failed: %v", err)
 	}
 
-	// Add new columns to existing tables safely
-	alterStmts := `
-	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN status VARCHAR(20) DEFAULT 'sent'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN reply_to_id INT REFERENCES chat_messages(id) ON DELETE SET NULL; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN is_edited BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN edited_at TIMESTAMPTZ; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE users ADD COLUMN last_seen TIMESTAMPTZ DEFAULT NOW(); EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN category VARCHAR(30) DEFAULT 'other'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN emotion_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN energy_level VARCHAR(10) DEFAULT 'medium'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE posts ADD COLUMN category VARCHAR(30) DEFAULT 'other'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE posts ADD COLUMN emotion_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE posts ADD COLUMN energy_level VARCHAR(10) DEFAULT 'medium'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN custom_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE posts ADD COLUMN custom_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	// Column additions live in the package-level alterStmts.
 
-	-- Multi-bitrate video variants. Maps quality label → CDN URL.
-	-- video_url stays as the canonical/default URL so legacy readers keep
-	-- working; video_variants is the new path for adaptive playback.
-	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN video_variants JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN video_variants JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-
-	-- HLS master manifest URL produced by the background transcode worker.
-	-- State machine: '' = untranscoded, 'PENDING' = claimed by a worker,
-	-- anything else = the public master.m3u8 URL. Clients fall back to
-	-- video_url / video_variants until the worker reports completion via
-	-- POST /api/v1/internal/hls/complete.
-	--
-	-- Stored as TEXT (not VARCHAR(N)) because R2 + custom-domain URLs can
-	-- be long once query params for cache-busting land. Default '' keeps
-	-- the column safe to NOT NULL filter on without a separate IS NULL leg.
-	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN hls_manifest_url TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN hls_manifest_url TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	-- HLS queue bookkeeping: hls_attempts caps how many times a broken
-	-- source gets claimed (incremented at claim in HLSNextPendingHandler),
-	-- hls_claimed_at lets startHLSReaper reset rows a crashed worker left
-	-- stuck at 'PENDING'.
-	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN hls_attempts INT DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN hls_attempts INT DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN hls_claimed_at TIMESTAMPTZ; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN hls_claimed_at TIMESTAMPTZ; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	-- Partial index so the transcode worker's "find next untranscoded
-	-- challenge" query is a fast index scan instead of a sequential one.
-	-- Filtering on the empty string is functionally the same as IS NULL
-	-- for our purposes and matches the DEFAULT above.
-	DO $$ BEGIN
-		CREATE INDEX IF NOT EXISTS challenges_pending_hls_idx
-			ON challenges (created_at)
-			WHERE hls_manifest_url = '';
-	EXCEPTION WHEN duplicate_table THEN NULL; END $$;
-	-- Same queue index for the battle-response leg of the pipeline
-	-- (responses joined the transcode queue when kind-aware claiming
-	-- shipped).
-	DO $$ BEGIN
-		CREATE INDEX IF NOT EXISTS responses_pending_hls_idx
-			ON challenge_responses (created_at)
-			WHERE hls_manifest_url = '';
-	EXCEPTION WHEN duplicate_table THEN NULL; END $$;
-
-	-- Deploy-time attempt amnesty: untranscoded rows that burned all
-	-- their claim attempts get a fresh budget on every deploy. The cap
-	-- exists to stop INFINITE retry loops within a deployment (corrupt
-	-- source, dead worker); infra failures (e.g. the first Actions run
-	-- lacked ffmpeg and instantly exhausted every row's attempts) should
-	-- not permanently strand a video. Worst case for a genuinely broken
-	-- file: 5 quick failures per deploy — bounded and cheap.
-	UPDATE challenges          SET hls_attempts = 0 WHERE hls_manifest_url = '' AND hls_attempts >= 5;
-	UPDATE challenge_responses SET hls_attempts = 0 WHERE hls_manifest_url = '' AND hls_attempts >= 5;
-
-	-- NOTE: the response_count heal used to sit here, and it broke every
-	-- fresh database. It reads challenges.response_count, which is not
-	-- created until the denorm block far below, so on a database that did
-	-- not already have that column the statement failed. lib/pq sends this
-	-- whole string as ONE simple query, which Postgres runs in a single
-	-- implicit transaction — so that one failure rolled back every other
-	-- statement in this block: category, emotion_tags, energy_level,
-	-- video_variants, password_hash, challenge_response_flags and the rest.
-	-- The only symptom was a "Warning: alter table issue" line, after which
-	-- boot continued happily against a half-built schema.
-	--
-	-- The denorm block already performs the identical heal, after creating
-	-- the column, so the fix is to not duplicate it here. Anything added to
-	-- this block must only reference columns that already exist by now.
-
-	-- Extended personality dimensions on user_profiles
-	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN attention_span REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN binge_intensity REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN creator_loyalty REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN competitiveness_index REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN mood_volatility REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE user_profiles ADD COLUMN strategy_success_history JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-
-	-- Challenge response validation + community-moderation columns
-	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN duration_ms INT DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN caption TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN relevance_score REAL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN off_topic_flags INT DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN is_hidden BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-
-	-- Challenge response off-topic flagging table (community moderation)
-	CREATE TABLE IF NOT EXISTS challenge_response_flags (
-		response_id INT NOT NULL REFERENCES challenge_responses(id) ON DELETE CASCADE,
-		user_id     INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-		reason      VARCHAR(40) NOT NULL DEFAULT 'off_topic',
-		created_at  TIMESTAMPTZ DEFAULT NOW(),
-		PRIMARY KEY (response_id, user_id)
-	);
-
-	-- Profile bio + user-level settings (theme, language, etc.).
-	-- bio gets a dedicated column because it's shown on every profile
-	-- view; settings is JSONB so we can ship new toggles without a
-	-- migration per feature. Keep auth/security state OUT of settings —
-	-- TOTP secrets live in their own table for least-privilege access.
-	DO $$ BEGIN ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	DO $$ BEGIN ALTER TABLE users ADD COLUMN settings JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-	-- Account visibility: 'public' (default, anyone can see) | 'friends'
-	-- (only followers see your posts and profile detail). Stored as a
-	-- column so the feed-time WHERE clause can filter by index lookup
-	-- without parsing JSON.
-	DO $$ BEGIN ALTER TABLE users ADD COLUMN visibility VARCHAR(20) DEFAULT 'public'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-
-	-- user_blocks: A blocks B → A never sees B's content, B can't DM A.
-	-- Bidirectional enforcement happens at query-time (filter both
-	-- legs). Keeping this as a thin table (just blocker_id, blocked_id)
-	-- means add/remove is O(1) and lookup joins against the user table
-	-- stay cheap.
-	CREATE TABLE IF NOT EXISTS user_blocks (
-		blocker_id  INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-		blocked_id  INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-		created_at  TIMESTAMPTZ DEFAULT NOW(),
-		PRIMARY KEY (blocker_id, blocked_id),
-		CHECK (blocker_id <> blocked_id)
-	);
-	CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks(blocked_id);
-
-	-- TOTP-based 2FA. One row per user once they've enrolled. Kept in a
-	-- separate table from users so the SELECT * lookups elsewhere never
-	-- accidentally leak the secret, and so we can add column-level
-	-- revoke later if we move to a hosted secrets manager.
-	--
-	-- secret: base32-encoded shared secret (the QR-code payload).
-	-- recovery_codes: 10 single-use backup codes, stored SHA-256-hashed
-	--   so a DB read can't bypass 2FA. (Codes are 80-bit random base32
-	--   themselves, so the entropy is in the code, not the hash —
-	--   bcrypt would be overkill and adds a dep.)
-	-- last_used_at: prevents replaying a freshly-used 6-digit code
-	--   within the same 30s window.
-	CREATE TABLE IF NOT EXISTS user_totp (
-		user_id        INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-		secret         TEXT NOT NULL,
-		recovery_codes JSONB NOT NULL DEFAULT '[]',
-		enrolled_at    TIMESTAMPTZ DEFAULT NOW(),
-		last_used_at   TIMESTAMPTZ,
-		is_active      BOOLEAN DEFAULT FALSE
-	);
-	`
 	if _, err := db.Exec(alterStmts); err != nil {
 		log.Printf("Warning: alter table issue: %v", err)
 	}
@@ -2224,28 +2252,28 @@ func seedChallenges() {
 		// IDs 29-35: original 7 arena battles. Added 10 more (IDs 38-47) below
 		// the friends block so the 70/30 battle/short candidate split has
 		// enough inventory to actually surface battles in the For You feed.
-		{4, v14, "", "Who has better", "Strategy", "arena", "active", 4500, "2026-03-27T16:00:00Z"},      // ID 29
-		{6, v15, "", "Who dances better", "Salsa", "arena", "active", 7200, "2026-03-28T10:00:00Z"},      // ID 30
-		{10, v1, "", "Who sings better", "Pop Song", "arena", "active", 3100, "2026-03-26T19:00:00Z"},    // ID 31
-		{1, v5, "", "Who flips better", "Pancake Flip", "arena", "active", 2900, "2026-03-30T08:00:00Z"}, // ID 32
-		{9, v11, "", "Who plays better", "Drum Solo", "arena", "active", 5100, "2026-03-31T14:00:00Z"},   // ID 33
-		{5, v3, "", "Who skates better", "Kickflip", "arena", "active", 6300, "2026-03-29T17:00:00Z"},    // ID 34
-		{7, v9, "", "Who styles better", "Outfit Check", "arena", "active", 4700, "2026-03-30T19:00:00Z"},// ID 35
+		{4, v14, "", "Who has better", "Strategy", "arena", "active", 4500, "2026-03-27T16:00:00Z"},       // ID 29
+		{6, v15, "", "Who dances better", "Salsa", "arena", "active", 7200, "2026-03-28T10:00:00Z"},       // ID 30
+		{10, v1, "", "Who sings better", "Pop Song", "arena", "active", 3100, "2026-03-26T19:00:00Z"},     // ID 31
+		{1, v5, "", "Who flips better", "Pancake Flip", "arena", "active", 2900, "2026-03-30T08:00:00Z"},  // ID 32
+		{9, v11, "", "Who plays better", "Drum Solo", "arena", "active", 5100, "2026-03-31T14:00:00Z"},    // ID 33
+		{5, v3, "", "Who skates better", "Kickflip", "arena", "active", 6300, "2026-03-29T17:00:00Z"},     // ID 34
+		{7, v9, "", "Who styles better", "Outfit Check", "arena", "active", 4700, "2026-03-30T19:00:00Z"}, // ID 35
 
 		// === FRIENDS-ONLY (some open, some battles) ===
-		{2, v5, "", "Who is better", "Sniper", "friends", "open", 400, "2026-03-27T18:00:00Z"},           // ID 36
-		{8, v8, "", "Who cooks better", "Pasta", "friends", "active", 560, "2026-03-28T07:00:00Z"},       // ID 37 — battle
+		{2, v5, "", "Who is better", "Sniper", "friends", "open", 400, "2026-03-27T18:00:00Z"},     // ID 36
+		{8, v8, "", "Who cooks better", "Pasta", "friends", "active", 560, "2026-03-28T07:00:00Z"}, // ID 37 — battle
 
 		// === MORE ARENA BATTLES — added to give the 70/30 battle/short
 		// candidate-pool split enough inventory to actually surface battles
 		// in the For You feed. IDs 38-47.
-		{2, v3, "", "Who's faster at", "Skateboarding", "arena", "active", 5400, "2026-04-01T08:00:00Z"},      // ID 38
-		{4, v6, "", "Who has the better", "Comedy Skit", "arena", "active", 8100, "2026-04-01T10:00:00Z"},     // ID 39
-		{7, v8, "", "Who plays better", "Piano Solo", "arena", "active", 4900, "2026-04-01T12:00:00Z"},        // ID 40
-		{1, v12, "", "Who can do a better", "Magic Trick", "arena", "active", 6700, "2026-04-01T14:00:00Z"},   // ID 41
-		{6, v9, "", "Who has the cleanest", "Free Throw", "arena", "active", 3300, "2026-04-01T16:00:00Z"},    // ID 42
-		{10, v14, "", "Who reviews better", "New Phone", "arena", "active", 7800, "2026-04-01T18:00:00Z"},     // ID 43
-		{3, v5, "", "Who paints better", "Sunset Scene", "arena", "active", 2400, "2026-04-01T20:00:00Z"},     // ID 44
+		{2, v3, "", "Who's faster at", "Skateboarding", "arena", "active", 5400, "2026-04-01T08:00:00Z"},          // ID 38
+		{4, v6, "", "Who has the better", "Comedy Skit", "arena", "active", 8100, "2026-04-01T10:00:00Z"},         // ID 39
+		{7, v8, "", "Who plays better", "Piano Solo", "arena", "active", 4900, "2026-04-01T12:00:00Z"},            // ID 40
+		{1, v12, "", "Who can do a better", "Magic Trick", "arena", "active", 6700, "2026-04-01T14:00:00Z"},       // ID 41
+		{6, v9, "", "Who has the cleanest", "Free Throw", "arena", "active", 3300, "2026-04-01T16:00:00Z"},        // ID 42
+		{10, v14, "", "Who reviews better", "New Phone", "arena", "active", 7800, "2026-04-01T18:00:00Z"},         // ID 43
+		{3, v5, "", "Who paints better", "Sunset Scene", "arena", "active", 2400, "2026-04-01T20:00:00Z"},         // ID 44
 		{8, v7, "", "Who has the spookier", "Halloween Costume", "arena", "active", 5500, "2026-03-31T22:00:00Z"}, // ID 45
 		{9, v15, "", "Who has the better", "Workout Routine", "arena", "active", 4200, "2026-03-31T20:00:00Z"},    // ID 46
 		{5, v1, "", "Who tells better", "Bedtime Story", "arena", "active", 3700, "2026-03-31T18:00:00Z"},         // ID 47
@@ -2349,25 +2377,25 @@ func seedChallenges() {
 	}
 	responses := []sr{
 		// Original 8 responses → response IDs 1-8 (in this insertion order).
-		{29, 2, v2, "", 3100, "2026-03-27T17:30:00Z"},    // resp 1 — player2 responds to shadowstrike
-		{30, 9, v7, "", 5800, "2026-03-28T11:30:00Z"},    // resp 2 — thunderbolt responds to stormchaser
-		{31, 3, v10, "", 2200, "2026-03-26T21:00:00Z"},   // resp 3 — player3 responds to cyberking
-		{32, 7, v12, "", 2700, "2026-03-30T10:00:00Z"},   // resp 4 — frostbyte responds to player1
-		{33, 4, v6, "", 4200, "2026-03-31T16:00:00Z"},    // resp 5 — shadowstrike responds to thunderbolt
-		{34, 10, v15, "", 5100, "2026-03-29T19:00:00Z"},  // resp 6 — cyberking responds to blazerunner
-		{35, 2, v4, "", 3900, "2026-03-30T21:00:00Z"},    // resp 7 — player2 responds to frostbyte
-		{37, 1, v3, "", 340, "2026-03-28T08:00:00Z"},     // resp 8 — player1 responds to nightowl (friends battle)
+		{29, 2, v2, "", 3100, "2026-03-27T17:30:00Z"},   // resp 1 — player2 responds to shadowstrike
+		{30, 9, v7, "", 5800, "2026-03-28T11:30:00Z"},   // resp 2 — thunderbolt responds to stormchaser
+		{31, 3, v10, "", 2200, "2026-03-26T21:00:00Z"},  // resp 3 — player3 responds to cyberking
+		{32, 7, v12, "", 2700, "2026-03-30T10:00:00Z"},  // resp 4 — frostbyte responds to player1
+		{33, 4, v6, "", 4200, "2026-03-31T16:00:00Z"},   // resp 5 — shadowstrike responds to thunderbolt
+		{34, 10, v15, "", 5100, "2026-03-29T19:00:00Z"}, // resp 6 — cyberking responds to blazerunner
+		{35, 2, v4, "", 3900, "2026-03-30T21:00:00Z"},   // resp 7 — player2 responds to frostbyte
+		{37, 1, v3, "", 340, "2026-03-28T08:00:00Z"},    // resp 8 — player1 responds to nightowl (friends battle)
 		// New responses for the 10 added battles → response IDs 9-18.
-		{38, 5, v4, "", 4200, "2026-04-01T09:00:00Z"},    // resp 9  — blazerunner responds to player2
-		{39, 9, v11, "", 6300, "2026-04-01T11:00:00Z"},   // resp 10 — thunderbolt responds to shadowstrike
-		{40, 3, v2, "", 3800, "2026-04-01T13:00:00Z"},    // resp 11 — player3 responds to frostbyte
-		{41, 8, v10, "", 5100, "2026-04-01T15:00:00Z"},   // resp 12 — nightowl responds to player1
-		{42, 4, v15, "", 2900, "2026-04-01T17:00:00Z"},   // resp 13 — shadowstrike responds to stormchaser
-		{43, 6, v13, "", 6200, "2026-04-01T19:00:00Z"},   // resp 14 — stormchaser responds to cyberking
-		{44, 7, v6, "", 1900, "2026-04-01T21:00:00Z"},    // resp 15 — frostbyte responds to player3
-		{45, 10, v3, "", 4600, "2026-03-31T23:00:00Z"},   // resp 16 — cyberking responds to nightowl
-		{46, 1, v8, "", 3500, "2026-03-31T21:00:00Z"},    // resp 17 — player1 responds to thunderbolt
-		{47, 2, v9, "", 3100, "2026-03-31T19:00:00Z"},    // resp 18 — player2 responds to blazerunner
+		{38, 5, v4, "", 4200, "2026-04-01T09:00:00Z"},  // resp 9  — blazerunner responds to player2
+		{39, 9, v11, "", 6300, "2026-04-01T11:00:00Z"}, // resp 10 — thunderbolt responds to shadowstrike
+		{40, 3, v2, "", 3800, "2026-04-01T13:00:00Z"},  // resp 11 — player3 responds to frostbyte
+		{41, 8, v10, "", 5100, "2026-04-01T15:00:00Z"}, // resp 12 — nightowl responds to player1
+		{42, 4, v15, "", 2900, "2026-04-01T17:00:00Z"}, // resp 13 — shadowstrike responds to stormchaser
+		{43, 6, v13, "", 6200, "2026-04-01T19:00:00Z"}, // resp 14 — stormchaser responds to cyberking
+		{44, 7, v6, "", 1900, "2026-04-01T21:00:00Z"},  // resp 15 — frostbyte responds to player3
+		{45, 10, v3, "", 4600, "2026-03-31T23:00:00Z"}, // resp 16 — cyberking responds to nightowl
+		{46, 1, v8, "", 3500, "2026-03-31T21:00:00Z"},  // resp 17 — player1 responds to thunderbolt
+		{47, 2, v9, "", 3100, "2026-03-31T19:00:00Z"},  // resp 18 — player2 responds to blazerunner
 	}
 	// Same real-id capture for responses — the vote literals reference
 	// responses by their 1-based position in this slice.
@@ -2484,17 +2512,17 @@ func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 		if rows.Scan(&id, &sID, &sName, &rID, &rName, &msg, &isRead,
 			&status, &isEdited, &isDeleted, &replyToID, &replyToText, &createdAt) == nil {
 			cm := ChatMessage{
-				ID:              strconv.Itoa(id),
-				SenderID:        strconv.Itoa(sID),
+				ID:               strconv.Itoa(id),
+				SenderID:         strconv.Itoa(sID),
 				SenderUsername:   sName,
-				ReceiverID:      strconv.Itoa(rID),
+				ReceiverID:       strconv.Itoa(rID),
 				ReceiverUsername: rName,
-				Message:         msg,
-				IsRead:          isRead,
-				Status:          status,
-				IsEdited:        isEdited,
-				IsDeleted:       isDeleted,
-				CreatedAt:       createdAt.UTC().Format(time.RFC3339),
+				Message:          msg,
+				IsRead:           isRead,
+				Status:           status,
+				IsEdited:         isEdited,
+				IsDeleted:        isDeleted,
+				CreatedAt:        createdAt.UTC().Format(time.RFC3339),
 			}
 			if replyToID != nil {
 				cm.ReplyToID = strconv.Itoa(*replyToID)
@@ -2577,8 +2605,8 @@ func GetConversations(userID int) []Conversation {
 			UserID:      strconv.Itoa(pid),
 			Username:    username,
 			League:      league,
-			LastMessage:  lastMsg,
-			LastTime:     lastTime.UTC().Format(time.RFC3339),
+			LastMessage: lastMsg,
+			LastTime:    lastTime.UTC().Format(time.RFC3339),
 			UnreadCount: unread,
 		})
 	}
