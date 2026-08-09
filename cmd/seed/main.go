@@ -40,59 +40,107 @@
 package main
 
 import (
+	"crypto/sha1"
 	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	_ "github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// sampleBase is Google's long-standing public test bucket. Range-request
-// capable and not rate-limited the way r2.dev is.
-const sampleBase = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample"
-
-// clip is one sample video. `short` marks the ~15-60s clips; the open movies
-// run ~10 minutes, which is wrong for a reels feed, so they are used sparingly
-// and only as challenge *responses* where length matters less.
+// The sample clips.
+//
+// EVERY url here was verified to answer HTTP 206 to a Range request at the
+// time of writing — the loopback media proxy depends on ranges, and an
+// origin that ignores them silently falls back to whole-file downloads.
+//
+// History, and the reason for the paranoia: this file used to point at
+// Google's gtv-videos-bucket. That bucket is now PRIVATE — every url in it
+// answers 403 "Anonymous caller does not have storage.objects.get access".
+// Running the old seed would have filled the feed with videos that could
+// never play.
+//
+// Size is the other selection criterion, and the more important one. A
+// reel is a few seconds long; the feed this replaces carried a 58 MB clip,
+// a 73 MB clip and one 249 MB feature film, which is why playback felt
+// slow no matter what the caching layer did. Nothing here exceeds 5.3 MB
+// and nothing exceeds 720p, which is the ceiling the player targets.
 type clip struct {
-	file     string
+	url      string
+	bytes    int // measured, so the "is this reel-sized?" check is not a guess
 	title    string
 	category string
 	energy   string
 	emotions []string
-	short    bool
 }
 
-// The ForBigger* clips are 1280x720 and ~15s — the closest thing in this set to
-// a real reel, so they carry the feed. The vehicle clips are ~1 minute and add
-// variety without dragging. Sintel/TearsOfSteel are 1080p+ and minutes long;
-// they are deliberately excluded from challenge slots so the feed is not
-// dominated by content that decodes above the 720p ceiling.
+const (
+	tvBunny = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_"
+	tvJelly = "https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_"
+	tvSint  = "https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_"
+	flutter = "https://flutter.github.io/assets-for-api-docs/assets/videos/"
+)
+
 var clips = []clip{
-	{"ForBiggerBlazes.mp4", "Can you top this entrance?", "comedy", "high", []string{"funny", "surprise"}, true},
-	{"ForBiggerEscapes.mp4", "Best escape move wins", "sports", "high", []string{"excited"}, true},
-	{"ForBiggerFun.mp4", "Show me your happy place", "lifestyle", "medium", []string{"happy"}, true},
-	{"ForBiggerJoyrides.mp4", "Dream ride challenge", "lifestyle", "high", []string{"excited", "happy"}, true},
-	{"ForBiggerMeltdowns.mp4", "Funniest meltdown reaction", "comedy", "high", []string{"funny"}, true},
-	{"VolkswagenGTIReview.mp4", "Review your first car in 30s", "tech", "medium", []string{"curious"}, true},
-	{"SubaruOutbackOnStreetAndDirt.mp4", "Street or dirt — pick a side", "sports", "high", []string{"excited"}, true},
-	{"WeAreGoingOnBullrun.mp4", "Road trip story time", "story", "medium", []string{"happy"}, true},
-	{"WhatCarCanYouGetForAGrand.mp4", "Best budget find challenge", "education", "low", []string{"curious"}, true},
-	{"BigBuckBunny.mp4", "Animation appreciation", "art", "low", []string{"calm"}, false},
-	{"ElephantsDream.mp4", "Surreal scene remake", "art", "medium", []string{"curious"}, false},
-	{"TearsOfSteel.mp4", "Sci-fi one-shot challenge", "story", "medium", []string{"excited"}, false},
+	{tvBunny + "1MB.mp4", 969201, "Can you top this entrance?", "comedy", "high", []string{"funny", "surprise"}},
+	{tvJelly + "1MB.mp4", 1047967, "Best escape move wins", "sports", "high", []string{"excited"}},
+	{tvSint + "1MB.mp4", 1047954, "Show me your happy place", "lifestyle", "medium", []string{"happy"}},
+	{flutter + "bee.mp4", 1293015, "Dream ride challenge", "lifestyle", "high", []string{"excited", "happy"}},
+	{"https://mdn.github.io/shared-assets/videos/flower.mp4", 1128375, "Funniest reaction wins", "comedy", "high", []string{"funny"}},
+	{tvBunny + "2MB.mp4", 1978137, "Review your setup in 30s", "tech", "medium", []string{"curious"}},
+	{tvJelly + "2MB.mp4", 2096842, "Street or studio — pick a side", "sports", "high", []string{"excited"}},
+	{tvSint + "2MB.mp4", 2094185, "Story time challenge", "story", "medium", []string{"happy"}},
+	{flutter + "butterfly.mp4", 2429896, "Best slow-motion shot", "art", "low", []string{"calm"}},
+	{"https://media.w3.org/2010/05/video/movie_300.mp4", 2757913, "Best budget find challenge", "education", "low", []string{"curious"}},
+	{tvBunny + "5MB.mp4", 4999379, "Funniest animation dub", "comedy", "medium", []string{"funny"}},
+	{tvJelly + "5MB.mp4", 5241877, "Calmest scene wins", "art", "low", []string{"calm"}},
+	{tvSint + "5MB.mp4", 5242780, "Most cinematic 10 seconds", "art", "medium", []string{"curious"}},
+	{"https://media.w3.org/2010/05/sintel/trailer.mp4", 4372373, "Sci-fi one-shot challenge", "story", "medium", []string{"excited"}},
 }
 
-func (c clip) videoURL() string { return fmt.Sprintf("%s/%s", sampleBase, c.file) }
+// maxReelBytes is the size a sample clip must stay under to belong in a
+// reels feed at all. Enforced in main() so a future edit that pastes in
+// another full-length movie fails loudly instead of quietly making the
+// feed slow again.
+const maxReelBytes = 6 * 1024 * 1024
 
-// thumbURL points at the matching still Google publishes alongside each clip.
+// seedChallenges is how many challenges to create. A feed page is 20, so
+// one page-worth plus enough behind it to prove pagination works.
+const seedChallenges = 28
+
+// altTitles supplies the prompt for the second pass over the clip pool.
+var altTitles = []string{
+	"Who can hold a straight face longest",
+	"Best 3-second intro wins",
+	"Recreate this shot with what you own",
+	"Funniest caption for this clip",
+	"Who has the steadier hand",
+	"Explain this in ten seconds",
+	"Best transition wins",
+	"Guess the ending challenge",
+	"Most creative use of one prop",
+	"Who can do it slower",
+	"Best sound-effect dub",
+	"Calmest take wins",
+	"Most cinematic angle",
+	"Best plot twist in 10s",
+}
+
+func (c clip) videoURL() string { return c.url }
+
+// thumbURL is a stable, seeded placeholder. The sources above publish no
+// matching stills, and a poster that does not match its video is worse
+// than a deterministic abstract one: it makes the feed look broken rather
+// than merely generic. Seeded by url, so a given clip always gets the
+// same poster.
 func (c clip) thumbURL() string {
-	name := c.file[:len(c.file)-len(".mp4")]
-	return fmt.Sprintf("https://storage.googleapis.com/gtv-videos-bucket/sample/images/%s.jpg", name)
+	sum := sha1.Sum([]byte(c.url))
+	return fmt.Sprintf("https://picsum.photos/seed/%x/540/960", sum[:6])
 }
 
 // seedUser is a demo account. Passwords are bcrypt-hashed exactly as the
@@ -209,37 +257,82 @@ func main() {
 			len(existing), existing)
 	}
 
-	// Only the short clips become challenges — a 10-minute open movie at the
-	// top of a reels feed is not a useful test of anything.
-	var challengeClips, responseClips []clip
+	// Guard the one property that actually decides whether the feed feels
+	// fast. Cheap to check, and the failure it prevents is the exact one
+	// this seed exists to undo.
 	for _, c := range clips {
-		if c.short {
-			challengeClips = append(challengeClips, c)
-		} else {
-			responseClips = append(responseClips, c)
+		if c.bytes > maxReelBytes {
+			log.Fatalf("clip %s is %.1f MB — a reel is seconds long; the feed "+
+				"this seed replaces was slow precisely because it carried "+
+				"files this size", c.url, float64(c.bytes)/(1024*1024))
 		}
 	}
 
-	inserted := 0
-	for i, c := range challengeClips {
+	// AGE AND KIND ARE DELIBERATELY DECORRELATED.
+	//
+	// The seed this replaces stamped every response-less challenge with the
+	// newest timestamp and every battle with an older one. Any feed that
+	// weighs freshness — all of them do — then served every short before
+	// every battle, and the app looked like it had no battles in it at all.
+	//
+	// So: ages descend smoothly across the whole run, and whether a
+	// challenge gets a response is decided by an independent 3-of-5 cycle.
+	// Battles and shorts end up evenly mixed through the timeline, which is
+	// what real usage looks like and what the ranker is entitled to assume.
+	inserted, battles := 0, 0
+	for i := 0; i < seedChallenges; i++ {
+		c := clips[i%len(clips)]
+		if i >= len(clips) {
+			// Second pass over the pool: same video, different prompt, so a
+			// feed page is comfortably filled without hunting for another
+			// dozen public clips that are all still reel-sized.
+			c.title = altTitles[i%len(altTitles)]
+		}
 		creator := userIDs[i%len(userIDs)]
-		chID, err := insertChallenge(tx, creator, c)
+		// Spread over ~12 days, newest first, with hour-level jitter so no
+		// two challenges share a timestamp. The span is kept inside the
+		// Following tab's 14-day window on purpose — content older than
+		// that is invisible there, and a seed whose back half cannot
+		// appear in a tab is a seed that cannot test it.
+		age := time.Duration(i)*10*time.Hour + time.Duration(i%7)*time.Hour
+		// Views and likes are what the ranker actually reads: it orders by
+		// (views + likes*3) and its strict quality tier needs views >= 10
+		// and likes >= 1. Seeded flat at zero, every candidate query falls
+		// through all four tiers to the "no minimum" last resort and the
+		// ranking has no signal to work with — the feed degrades to plain
+		// reverse-chronological and nothing about the algorithm is being
+		// exercised. These spreads are arbitrary but deterministic, and
+		// deliberately uncorrelated with age and with kind.
+		views := 400 + (i*137)%4200
+		chID, err := insertChallenge(tx, creator, c, age, views)
 		if err != nil {
-			log.Fatalf("insert challenge %s: %v", c.file, err)
+			log.Fatalf("insert challenge %s: %v", c.url, err)
 		}
 		inserted++
 
-		// Every challenge gets exactly one response. The battle view swipes
-		// between challenger and responder, so a challenge with no response
-		// exercises only half the UI — and the 3D cube not at all.
-		respClip := challengeClips[(i+1)%len(challengeClips)]
-		if i%4 == 3 && len(responseClips) > 0 {
-			respClip = responseClips[i%len(responseClips)]
+		likes := (i * 3) % 6
+		for k := 0; k < likes && k < len(userIDs); k++ {
+			liker := userIDs[(i+k+1)%len(userIDs)]
+			if _, err := tx.Exec(`
+				INSERT INTO challenge_likes (challenge_id, user_id)
+				VALUES ($1,$2) ON CONFLICT DO NOTHING`, chID, liker); err != nil {
+				log.Fatalf("insert like for challenge %d: %v", chID, err)
+			}
 		}
+
+		// 3 in every 5 get a response. A feed of nothing but battles is as
+		// unrealistic as a feed of nothing but shorts, and the spacing pass
+		// on the server needs both kinds present to have anything to do.
+		if i%5 >= 3 {
+			continue
+		}
+		respClip := clips[(i+3)%len(clips)]
 		responder := userIDs[(i+1)%len(userIDs)]
-		if err := insertResponse(tx, chID, responder, respClip); err != nil {
+		// Responses land after their challenge, never before it.
+		if err := insertResponse(tx, chID, responder, respClip, age/2); err != nil {
 			log.Fatalf("insert response for challenge %d: %v", chID, err)
 		}
+		battles++
 	}
 
 	// Read the end state from inside the transaction. On a dry run this is the
@@ -271,7 +364,8 @@ func main() {
 	if err := tx.Commit(); err != nil {
 		log.Fatalf("commit: %v", err)
 	}
-	log.Printf("seeded %d challenges, each with one response", inserted)
+	log.Printf("seeded %d challenges (%d battles, %d shorts)",
+		inserted, battles, inserted-battles)
 }
 
 // upsertUser creates the account if missing and returns its id either way, so
@@ -303,30 +397,31 @@ func upsertUser(tx *sql.Tx, u seedUser) (id int, created bool, err error) {
 	return id, true, err
 }
 
-func insertChallenge(tx *sql.Tx, creatorID int, c clip) (int, error) {
+func insertChallenge(tx *sql.Tx, creatorID int, c clip, age time.Duration, views int) (int, error) {
 	emotions, _ := json.Marshal(c.emotions)
 	var id int
 	// video_variants is left empty on purpose: these clips have no transcoded
-	// ladder, so the client falls back to video_url. The ForBigger* clips are
-	// already 720p, which is the ceiling the feed wants anyway.
+	// ladder, so the client falls back to video_url. Every clip is already
+	// 720p or smaller, which is the ceiling the feed wants anyway.
 	err := tx.QueryRow(`
 		INSERT INTO challenges
 			(creator_id, video_url, thumbnail_url, prefix, subject,
-			 visibility, status, category, emotion_tags, energy_level)
-		VALUES ($1,$2,$3,$4,$5,'arena','open',$6,$7,$8)
+			 visibility, status, category, emotion_tags, energy_level,
+			 created_at, views)
+		VALUES ($1,$2,$3,$4,$5,'arena','open',$6,$7,$8,$9,$10)
 		RETURNING id`,
 		creatorID, c.videoURL(), c.thumbURL(), "I challenge you to", c.title,
-		c.category, string(emotions), c.energy,
+		c.category, string(emotions), c.energy, time.Now().Add(-age), views,
 	).Scan(&id)
 	return id, err
 }
 
-func insertResponse(tx *sql.Tx, challengeID, responderID int, c clip) error {
+func insertResponse(tx *sql.Tx, challengeID, responderID int, c clip, age time.Duration) error {
 	_, err := tx.Exec(`
 		INSERT INTO challenge_responses
-			(challenge_id, responder_id, video_url, thumbnail_url)
-		VALUES ($1,$2,$3,$4)`,
-		challengeID, responderID, c.videoURL(), c.thumbURL(),
+			(challenge_id, responder_id, video_url, thumbnail_url, created_at)
+		VALUES ($1,$2,$3,$4,$5)`,
+		challengeID, responderID, c.videoURL(), c.thumbURL(), time.Now().Add(-age),
 	)
 	return err
 }

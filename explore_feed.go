@@ -233,6 +233,7 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Shared enrichment choke point — same as For You / Following.
 	finalizeFeedItemsScored(composed)
+	composed = spaceOutFeedKindsScored(composed)
 
 	// Response shape matches SmartFeedHandler so the Flutter widget reuses
 	// the same parsing path.
