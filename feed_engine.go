@@ -5665,7 +5665,19 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 
 	followingSet, _ := buildSocialSets(userID)
 
-	// Fetch only from followed creators, chronological
+	// Fetch only from followed creators, chronological.
+	//
+	// The SQL LIMIT must cover everything the in-memory pagination below
+	// will slice through, not just one page's worth. It used to be `limit`
+	// flat, so page 2 sliced from offset==limit into a slice that was at
+	// most limit long and ALWAYS came back empty: the Following tab served
+	// exactly one page and then dead-ended, no matter how much a user's
+	// followed creators had posted. Fetch offset+limit, plus one probe row
+	// so hasMore is answered by evidence rather than by the "a full page
+	// probably means more" guess it was before.
+	offset := (page - 1) * limit
+	fetch := offset + limit + 1
+
 	var items []HomeFeedItem
 
 	// Challenges from followed creators
@@ -5683,7 +5695,7 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 		AND c.creator_id IN (SELECT following_id FROM follows WHERE follower_id = CAST($1 AS INT))
 		AND c.created_at > NOW() - INTERVAL '14 days'
 		ORDER BY c.created_at DESC
-		LIMIT $2`, userID, limit)
+		LIMIT $2`, userID, fetch)
 	if err == nil {
 		defer cRows.Close()
 		for cRows.Next() {
@@ -5715,8 +5727,12 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 		return ti.After(tj)
 	})
 
-	// Paginate
-	offset := (page - 1) * limit
+	// Paginate. hasMore is read off the probe row BEFORE trimming: we asked
+	// for one more than this page can hold, so anything beyond offset+limit
+	// is proof there is a next page. Deriving it from len(items) >= limit
+	// instead claimed a next page whenever the last page happened to fill
+	// exactly, sending the client after a page that does not exist.
+	hasMore := len(items) > offset+limit
 	if offset >= len(items) {
 		items = nil
 	} else {
@@ -5727,7 +5743,6 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 		items = items[offset:end]
 	}
 
-	hasMore := len(items) >= limit
 	_ = followingSet
 
 	// Seen-aware ordering (the one algorithmic touch Following gets):
