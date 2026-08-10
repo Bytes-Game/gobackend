@@ -87,20 +87,20 @@ ON CONFLICT (username) DO NOTHING;
 -- likes and the responses consistent with each other.
 CREATE TEMP TABLE seed_plan ON COMMIT DROP AS
 WITH clips(pos, url, category, energy, emotions, title, alt_title) AS (VALUES
-  (0,  'https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4', 'comedy',    'high',   '["funny","surprise"]', 'Can you top this entrance?',     'Who can hold a straight face longest'),
-  (1,  'https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_1MB.mp4',         'sports',    'high',   '["excited"]',          'Best escape move wins',          'Best 3-second intro wins'),
-  (2,  'https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_1MB.mp4',               'lifestyle', 'medium', '["happy"]',            'Show me your happy place',       'Recreate this shot with what you own'),
-  (3,  'https://flutter.github.io/assets-for-api-docs/assets/videos/bee.mp4',                     'lifestyle', 'high',   '["excited","happy"]',  'Dream ride challenge',           'Funniest caption for this clip'),
-  (4,  'https://mdn.github.io/shared-assets/videos/flower.mp4',                                   'comedy',    'high',   '["funny"]',            'Funniest reaction wins',         'Who has the steadier hand'),
-  (5,  'https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_2MB.mp4', 'tech',      'medium', '["curious"]',          'Review your setup in 30s',       'Explain this in ten seconds'),
-  (6,  'https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_2MB.mp4',         'sports',    'high',   '["excited"]',          'Street or studio — pick a side', 'Best transition wins'),
-  (7,  'https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_2MB.mp4',               'story',     'medium', '["happy"]',            'Story time challenge',           'Guess the ending challenge'),
-  (8,  'https://flutter.github.io/assets-for-api-docs/assets/videos/butterfly.mp4',               'art',       'low',    '["calm"]',             'Best slow-motion shot',          'Most creative use of one prop'),
-  (9,  'https://media.w3.org/2010/05/video/movie_300.mp4',                                        'education', 'low',    '["curious"]',          'Best budget find challenge',     'Who can do it slower'),
-  (10, 'https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_5MB.mp4', 'comedy',    'medium', '["funny"]',            'Funniest animation dub',         'Best sound-effect dub'),
-  (11, 'https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_5MB.mp4',         'art',       'low',    '["calm"]',             'Calmest scene wins',             'Calmest take wins'),
-  (12, 'https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_5MB.mp4',               'art',       'medium', '["curious"]',          'Most cinematic 10 seconds',      'Most cinematic angle'),
-  (13, 'https://media.w3.org/2010/05/sintel/trailer.mp4',                                         'story',     'medium', '["excited"]',          'Sci-fi one-shot challenge',      'Best plot twist in 10s')
+  (0,  'https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/7fa7093550751f14.mp4', 'comedy',    'high',   '["funny","surprise"]', 'Can you top this entrance?',     'Who can hold a straight face longest'),
+  (1,  'https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/c1d850ec1287e543.mp4',         'sports',    'high',   '["excited"]',          'Best escape move wins',          'Best 3-second intro wins'),
+  (2,  'https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/82dc123d418f65ca.mp4',               'lifestyle', 'medium', '["happy"]',            'Show me your happy place',       'Recreate this shot with what you own'),
+  (3,  'https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/d06ec0b6febc2404.mp4',                     'lifestyle', 'high',   '["excited","happy"]',  'Dream ride challenge',           'Funniest caption for this clip'),
+  (4,  'https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/d5eb607f4c8e108b.mp4',                                   'comedy',    'high',   '["funny"]',            'Funniest reaction wins',         'Who has the steadier hand'),
+  (5,  'https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/234c279a4913634d.mp4', 'tech',      'medium', '["curious"]',          'Review your setup in 30s',       'Explain this in ten seconds'),
+  (6,  'https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/8ad67e2519c0f584.mp4',         'sports',    'high',   '["excited"]',          'Street or studio — pick a side', 'Best transition wins'),
+  (7,  'https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/610809b029a7eda9.mp4',               'story',     'medium', '["happy"]',            'Story time challenge',           'Guess the ending challenge'),
+  (8,  'https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/3227f04eab6e624f.mp4',               'art',       'low',    '["calm"]',             'Best slow-motion shot',          'Most creative use of one prop'),
+  (9,  'https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/7de928f9e4f43afa.mp4',                                        'education', 'low',    '["curious"]',          'Best budget find challenge',     'Who can do it slower'),
+  (10, 'https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/90b1846cf73325ed.mp4', 'comedy',    'medium', '["funny"]',            'Funniest animation dub',         'Best sound-effect dub'),
+  (11, 'https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/399605c61cdd4cb7.mp4',         'art',       'low',    '["calm"]',             'Calmest scene wins',             'Calmest take wins'),
+  (12, 'https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/763b99b2e83fd647.mp4',               'art',       'medium', '["curious"]',          'Most cinematic 10 seconds',      'Most cinematic angle'),
+  (13, 'https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/4e1dee73db81e09b.mp4',                                         'story',     'medium', '["excited"]',          'Sci-fi one-shot challenge',      'Best plot twist in 10s')
 ),
 seed_users(pos, uname) AS (VALUES
   (0,'player1'), (1,'player2'), (2,'maya'), (3,'deven'), (4,'nina'), (5,'omar')
@@ -110,10 +110,15 @@ SELECT
   n.i,
   cu.id                                    AS creator_id,
   c.url                                    AS video_url,
-  -- Deterministic abstract poster. These sources publish no matching
-  -- stills, and a poster that does not match its video looks broken;
-  -- seeding by clip position keeps a given clip's poster stable.
-  'https://picsum.photos/seed/reel' || c.pos || '/540/960' AS thumbnail_url,
+  -- Poster frame cut from the clip's own first second, uploaded next to
+  -- the video by cmd/mediaimport under the same key. Derived from the
+  -- video URL rather than stored separately so the two cannot drift, and
+  -- so a clip without a matching poster 404s visibly instead of quietly
+  -- showing an unrelated picture. This used to be a random photograph
+  -- from picsum.photos, which in practice served stars and landscapes --
+  -- on top of a jellyfish video that reads as the wrong video, not as a
+  -- placeholder.
+  regexp_replace(c.url, '\.mp4$', '.jpg')  AS thumbnail_url,
   c.category,
   c.energy,
   c.emotions,
@@ -128,7 +133,7 @@ SELECT
   (n.i % 5) < 3                            AS gets_response,
   ru.id                                    AS responder_id,
   rc.url                                   AS response_video_url,
-  'https://picsum.photos/seed/reel' || rc.pos || '/540/960' AS response_thumbnail_url
+  regexp_replace(rc.url, '\.mp4$', '.jpg') AS response_thumbnail_url
 FROM n
 JOIN clips c        ON c.pos  = n.i % 14
 JOIN clips rc       ON rc.pos = (n.i + 3) % 14

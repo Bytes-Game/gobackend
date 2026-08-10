@@ -40,13 +40,12 @@
 package main
 
 import (
-	"crypto/sha1"
 	"database/sql"
 	"encoding/json"
 	"flag"
-	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -79,28 +78,38 @@ type clip struct {
 	emotions []string
 }
 
-const (
-	tvBunny = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_"
-	tvJelly = "https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_"
-	tvSint  = "https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_"
-	flutter = "https://flutter.github.io/assets-for-api-docs/assets/videos/"
-)
+// r2Base is the public host our own bucket is served from. Everything the
+// seeder references lives here now.
+//
+// These clips used to be hotlinked from the sites they were sourced from,
+// and nine of the fourteen came from one host measured at ~1.0s to first
+// byte. A reels player issues many range requests per video, so that
+// second was paid over and over: the decoder got a burst, played it, and
+// starved. On a device that was "the video freezes until I pause and
+// play". Measured the same way afterwards, this host answers in ~0.5s and
+// sits on Cloudflare's edge rather than one origin box.
+//
+// Objects are written by cmd/mediaimport, which keys them off a hash of
+// the original source URL. Re-running it overwrites in place, so these
+// URLs are stable. Do not hand-edit them: change the source list there
+// and re-run the media-import workflow.
+const r2Base = "https://pub-72947583733d4d108b6495e932ae4f04.r2.dev/seed/"
 
 var clips = []clip{
-	{tvBunny + "1MB.mp4", 969201, "Can you top this entrance?", "comedy", "high", []string{"funny", "surprise"}},
-	{tvJelly + "1MB.mp4", 1047967, "Best escape move wins", "sports", "high", []string{"excited"}},
-	{tvSint + "1MB.mp4", 1047954, "Show me your happy place", "lifestyle", "medium", []string{"happy"}},
-	{flutter + "bee.mp4", 1293015, "Dream ride challenge", "lifestyle", "high", []string{"excited", "happy"}},
-	{"https://mdn.github.io/shared-assets/videos/flower.mp4", 1128375, "Funniest reaction wins", "comedy", "high", []string{"funny"}},
-	{tvBunny + "2MB.mp4", 1978137, "Review your setup in 30s", "tech", "medium", []string{"curious"}},
-	{tvJelly + "2MB.mp4", 2096842, "Street or studio — pick a side", "sports", "high", []string{"excited"}},
-	{tvSint + "2MB.mp4", 2094185, "Story time challenge", "story", "medium", []string{"happy"}},
-	{flutter + "butterfly.mp4", 2429896, "Best slow-motion shot", "art", "low", []string{"calm"}},
-	{"https://media.w3.org/2010/05/video/movie_300.mp4", 2757913, "Best budget find challenge", "education", "low", []string{"curious"}},
-	{tvBunny + "5MB.mp4", 4999379, "Funniest animation dub", "comedy", "medium", []string{"funny"}},
-	{tvJelly + "5MB.mp4", 5241877, "Calmest scene wins", "art", "low", []string{"calm"}},
-	{tvSint + "5MB.mp4", 5242780, "Most cinematic 10 seconds", "art", "medium", []string{"curious"}},
-	{"https://media.w3.org/2010/05/sintel/trailer.mp4", 4372373, "Sci-fi one-shot challenge", "story", "medium", []string{"excited"}},
+	{r2Base + "7fa7093550751f14.mp4", 969201, "Can you top this entrance?", "comedy", "high", []string{"funny", "surprise"}},
+	{r2Base + "c1d850ec1287e543.mp4", 1047967, "Best escape move wins", "sports", "high", []string{"excited"}},
+	{r2Base + "82dc123d418f65ca.mp4", 1047954, "Show me your happy place", "lifestyle", "medium", []string{"happy"}},
+	{r2Base + "d06ec0b6febc2404.mp4", 1293015, "Dream ride challenge", "lifestyle", "high", []string{"excited", "happy"}},
+	{r2Base + "d5eb607f4c8e108b.mp4", 1128375, "Funniest reaction wins", "comedy", "high", []string{"funny"}},
+	{r2Base + "234c279a4913634d.mp4", 1978137, "Review your setup in 30s", "tech", "medium", []string{"curious"}},
+	{r2Base + "8ad67e2519c0f584.mp4", 2096842, "Street or studio — pick a side", "sports", "high", []string{"excited"}},
+	{r2Base + "610809b029a7eda9.mp4", 2094185, "Story time challenge", "story", "medium", []string{"happy"}},
+	{r2Base + "3227f04eab6e624f.mp4", 2429896, "Best slow-motion shot", "art", "low", []string{"calm"}},
+	{r2Base + "7de928f9e4f43afa.mp4", 2757913, "Best budget find challenge", "education", "low", []string{"curious"}},
+	{r2Base + "90b1846cf73325ed.mp4", 4999379, "Funniest animation dub", "comedy", "medium", []string{"funny"}},
+	{r2Base + "399605c61cdd4cb7.mp4", 5241877, "Calmest scene wins", "art", "low", []string{"calm"}},
+	{r2Base + "763b99b2e83fd647.mp4", 5242780, "Most cinematic 10 seconds", "art", "medium", []string{"curious"}},
+	{r2Base + "4e1dee73db81e09b.mp4", 4372373, "Sci-fi one-shot challenge", "story", "medium", []string{"excited"}},
 }
 
 // maxReelBytes is the size a sample clip must stay under to belong in a
@@ -133,14 +142,22 @@ var altTitles = []string{
 
 func (c clip) videoURL() string { return c.url }
 
-// thumbURL is a stable, seeded placeholder. The sources above publish no
-// matching stills, and a poster that does not match its video is worse
-// than a deterministic abstract one: it makes the feed look broken rather
-// than merely generic. Seeded by url, so a given clip always gets the
-// same poster.
+// thumbURL is the poster frame cut from this clip's own first second,
+// uploaded next to the video by cmd/mediaimport under the same key.
+//
+// It used to be a random photo from picsum.photos, on the theory that a
+// deterministic abstract placeholder beat a mismatched still. That was
+// wrong in practice: what the service actually returns is photographs of
+// stars and landscapes, and a landscape sitting on top of a jellyfish
+// video does not read as a placeholder to anyone. It reads as the wrong
+// video.
+//
+// Deriving the poster from the video URL rather than storing it as a
+// second field is deliberate — the two cannot drift apart, and a clip
+// added without a matching poster upload fails visibly (404) instead of
+// silently showing someone else's picture.
 func (c clip) thumbURL() string {
-	sum := sha1.Sum([]byte(c.url))
-	return fmt.Sprintf("https://picsum.photos/seed/%x/540/960", sum[:6])
+	return strings.TrimSuffix(c.url, ".mp4") + ".jpg"
 }
 
 // seedUser is a demo account. Passwords are bcrypt-hashed exactly as the
