@@ -5670,6 +5670,30 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 		limit = defaultPageSize
 	}
 
+	// Same pull-to-refresh signal the other two feed surfaces honour.
+	// Following needs it for one specific reason: the seen-aware pass
+	// further down sinks everything in loadSeenSet below the unseen
+	// items, so once a user had watched what their follows posted, every
+	// pull rebuilt the identical order and the tab looked frozen.
+	// applyRefreshSignal drops that seen set, which is the whole lever
+	// here — chronological order is otherwise the point of this feed and
+	// is deliberately left alone.
+	//
+	// Session id is synthesized when absent exactly as ExploreFeedHandler
+	// does it, so a client that omits it still gets its session dedup
+	// counters reset instead of silently skipping half the signal.
+	//
+	// Page 1 only: refreshing on a later page would reshuffle under the
+	// user mid-scroll.
+	refresh := r.URL.Query().Get("refresh") == "true"
+	sessionID := r.URL.Query().Get("sessionId")
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("%s_%d", userID, time.Now().Unix()/1800)
+	}
+	if refresh && page == 1 {
+		applyRefreshSignal(userID, sessionID)
+	}
+
 	followingSet, _ := buildSocialSets(userID)
 
 	// Fetch only from followed creators, chronological.
