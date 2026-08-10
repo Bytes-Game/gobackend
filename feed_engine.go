@@ -6334,17 +6334,16 @@ func buildInteractedSet(userID string) map[string]bool {
 	return interacted
 }
 
-// fetchCandidates is the recency-source backing query. Uses a widening
-// fallback ladder so a sparse-data window (stale seed, quiet weekend, new
-// region) never produces an empty feed.
+// fetchCandidates is the recency-source backing query. Walks the widening
+// ladder until the pool is full, so a sparse window (stale seed, quiet
+// weekend, new region, young catalog) tops up from older content instead of
+// capping the whole feed at whatever the strictest window happened to hold.
+// See widenUntilFull.
 func fetchCandidates(userID string, limit int) []HomeFeedItem {
-	for _, window := range candidateSourceWindows["recency"] {
-		items := fetchCandidatesWindowed(userID, limit, window)
-		if len(items) > 0 {
-			return items
-		}
-	}
-	return nil
+	return widenUntilFull(candidateSourceWindows["recency"], limit,
+		func(window string) []HomeFeedItem {
+			return fetchCandidatesWindowed(userID, limit, window)
+		})
 }
 
 func fetchCandidatesWindowed(userID string, limit int, window string) []HomeFeedItem {

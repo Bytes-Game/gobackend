@@ -140,11 +140,16 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	scored := make([]ScoredItem, 0, len(candidates))
 	for _, item := range candidates {
 		id := getItemID(item)
-		if interactedIDs[id] {
-			continue
-		}
 		cs := getContentScore(id, item.Type)
-		score, breakdown := exploreScore(cs, ns)
+		// Prior interaction is a RANKING signal, not a delete. It used to be
+		// `if interactedIDs[id] { continue }`, which was doubly wrong:
+		// buildInteractedSet keys on "type:id" while this looked up a bare
+		// id, so the branch never fired — and had it fired, every video the
+		// user had ever touched would have been removed from explore outright,
+		// with no tier able to re-admit it. Feed content is ranked down, never
+		// deleted; the seen filter is the one place repeats are held back, and
+		// it hands them back when there is nothing newer to show.
+		score, breakdown := exploreScore(cs, ns, interactedIDs[item.Type+":"+id])
 		scored = append(scored, ScoredItem{
 			Item:           item,
 			Score:          score,
@@ -270,6 +275,10 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// exploreUnseenBonus matches scoreForUser's unseenBonus so the two surfaces
+// agree on what a never-engaged-with item is worth.
+const exploreUnseenBonus = 0.15
+
 // exploreScore is a non-personalized version of scoreForUser. Only uses
 // signals that are properties of the CONTENT, not the USER:
 //   - QualityScore  (creator's track record)
@@ -281,7 +290,10 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 //
 // No: cohort weights, LTR delta, two-tower cosine, bandit, mood-routing,
 // session continuity, sequence penalties, creator-affinity, emotion match.
-func exploreScore(cs *ContentScore, ns *negativeSignals) (float64, map[string]float64) {
+// [interacted] reports whether the user has already engaged with this item
+// (liked, commented, watched to completion — anything in feed_events). It
+// only withholds a small freshness bonus; it never removes anything.
+func exploreScore(cs *ContentScore, ns *negativeSignals, interacted bool) (float64, map[string]float64) {
 	breakdown := make(map[string]float64)
 	if cs == nil {
 		return 0, breakdown
@@ -336,7 +348,16 @@ func exploreScore(cs *ContentScore, ns *negativeSignals) (float64, map[string]fl
 	}
 	breakdown["battleBoost"] = battleBoost
 
-	score := 0.4*quality + popularity + recency + battleBoost
+	// Freshness-to-this-user nudge, mirroring scoreForUser's unseenBonus and
+	// sized the same. Added before the floor + negative multiplier below so a
+	// blocked or bounced item cannot be lifted back over zero by it.
+	unseenBonus := 0.0
+	if !interacted {
+		unseenBonus = exploreUnseenBonus
+	}
+	breakdown["unseenBonus"] = unseenBonus
+
+	score := 0.4*quality + popularity + recency + battleBoost + unseenBonus
 
 	// Negative signals — hard multipliers. Block on creator → 0 score; user
 	// reported the item → 0 score. Same as For You.
