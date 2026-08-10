@@ -228,12 +228,11 @@ func sourceRecency(userID string, limit int) []HomeFeedItem {
 // SOURCE 2: Trending — engagement-weighted within the last 48h.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// candidateSourceWindows holds the strict-then-widening fallback ladder
-// each source tries when the prior window returned nothing. This is the
-// architectural defense against any kind of sparse-data bug — seed data
-// going stale, a quiet weekend, a brand-new region, etc. The strict
-// window stays first for the typical case; wider windows kick in only
-// when the strict one has zero results.
+// candidateSourceWindows holds the strict-then-widening ladder each source
+// walks to build its candidate pool. This is the architectural defense
+// against any kind of sparse-data bug — seed data going stale, a quiet
+// weekend, a brand-new region, etc. The strict window stays first so the
+// freshest content enters the pool first; wider windows top it up.
 var candidateSourceWindows = map[string][]string{
 	"trending": {"48 hours", "7 days", "30 days", "365 days"},
 	"follow":   {"7 days", "30 days", "180 days", "365 days"},
@@ -241,17 +240,68 @@ var candidateSourceWindows = map[string][]string{
 	"recency":  {"14 days", "60 days", "180 days", "365 days"},
 }
 
+// widenUntilFull walks a window ladder accumulating candidates until it has
+// `limit` of them, or the ladder runs out.
+//
+// WHY THIS IS NOT "STOP AT THE FIRST NON-EMPTY WINDOW"
+//
+// Every source used to widen only when the previous window returned NOTHING:
+//
+//	for _, w := range windows {
+//	    if items := fetch(w); len(items) > 0 { return items }
+//	}
+//
+// which stops as soon as it finds ANY content rather than as soon as it finds
+// ENOUGH. Ask for 150 candidates, get 3 back from the last 14 days, and the
+// 60-day window is never tried — everything older is not ranked low, it is
+// never fetched. It does not exist as far as the ranker is concerned, so no
+// amount of scrolling reaches it and no downstream tier can rescue it. On a
+// young catalog, where nearly all content sits outside the strictest window,
+// that is the difference between a feed and three videos.
+//
+// Widening is cheap here precisely because it only happens when the pool is
+// short: a full strict window returns immediately, exactly as before.
+//
+// Each windowed query is a superset of the narrower one restricted to its own
+// LIMIT, so the ladder re-returns rows already collected. Dedup by type:id
+// makes that harmless; order is preserved, so the freshest content still leads
+// the pool the ranker sorts.
+func widenUntilFull(windows []string, limit int, fetch func(window string) []HomeFeedItem) []HomeFeedItem {
+	if limit <= 0 {
+		return nil
+	}
+	out := make([]HomeFeedItem, 0, limit)
+	seen := make(map[string]bool, limit)
+	for _, window := range windows {
+		for _, it := range fetch(window) {
+			id := getItemID(it)
+			if id != "" {
+				key := it.Type + ":" + id
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+			}
+			out = append(out, it)
+			if len(out) >= limit {
+				return out
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func sourceTrending(userID string, limit int) []HomeFeedItem {
 	if db == nil {
 		return nil
 	}
-	for _, window := range candidateSourceWindows["trending"] {
-		items := sourceTrendingWindowed(userID, limit, window)
-		if len(items) > 0 {
-			return items
-		}
-	}
-	return nil
+	return widenUntilFull(candidateSourceWindows["trending"], limit,
+		func(window string) []HomeFeedItem {
+			return sourceTrendingWindowed(userID, limit, window)
+		})
 }
 
 // sourceTrendingWindowed parametrizes the recency cutoff so the wrapper
@@ -306,13 +356,10 @@ func sourceFollowGraph(userID string, limit int) []HomeFeedItem {
 	if db == nil {
 		return nil
 	}
-	for _, window := range candidateSourceWindows["follow"] {
-		items := sourceFollowGraphWindowed(userID, limit, window)
-		if len(items) > 0 {
-			return items
-		}
-	}
-	return nil
+	return widenUntilFull(candidateSourceWindows["follow"], limit,
+		func(window string) []HomeFeedItem {
+			return sourceFollowGraphWindowed(userID, limit, window)
+		})
 }
 
 func sourceFollowGraphWindowed(userID string, limit int, window string) []HomeFeedItem {
@@ -364,13 +411,10 @@ func sourceCollaborative(userID string, limit int) []HomeFeedItem {
 	if db == nil {
 		return nil
 	}
-	for _, window := range candidateSourceWindows["collab"] {
-		items := sourceCollaborativeWindowed(userID, limit, window)
-		if len(items) > 0 {
-			return items
-		}
-	}
-	return nil
+	return widenUntilFull(candidateSourceWindows["collab"], limit,
+		func(window string) []HomeFeedItem {
+			return sourceCollaborativeWindowed(userID, limit, window)
+		})
 }
 
 func sourceCollaborativeWindowed(userID string, limit int, window string) []HomeFeedItem {
