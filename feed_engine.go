@@ -25,18 +25,18 @@ import (
 // more honest than explicit signals (likes). A user might not "like" a video
 // but watching it 3 times tells us everything. We capture both.
 type FeedEvent struct {
-	ID             string  `json:"id"`
-	UserID         string  `json:"userId"`
-	ContentID      string  `json:"contentId"`
-	ContentType    string  `json:"contentType"`    // "post", "challenge", "response"
-	EventType      string  `json:"eventType"`      // "view","like","skip","impression","scroll_back","complete","loop","unmute","seek_back","seek_forward","profile_visit","hashtag_tap","follow_from_content","report","block","comment_panel_open","long_press","app_background","app_foreground","video_pause","video_play","battle_switch",etc.
-	WatchDurationMs int    `json:"watchDurationMs"` // How long they actually watched (or dwell ms for impressions)
-	TotalDurationMs int    `json:"totalDurationMs"` // Total content length
-	CompletionRate float64 `json:"completionRate"`  // 0.0 to 1.0
-	SessionID      string  `json:"sessionId"`       // Groups events into sessions
-	SessionPosition int    `json:"sessionPosition"` // Nth item in this session (fatigue signal)
-	Metadata       map[string]interface{} `json:"metadata,omitempty"` // Event-specific extra data
-	CreatedAt      string  `json:"createdAt"`
+	ID              string                 `json:"id"`
+	UserID          string                 `json:"userId"`
+	ContentID       string                 `json:"contentId"`
+	ContentType     string                 `json:"contentType"`        // "post", "challenge", "response"
+	EventType       string                 `json:"eventType"`          // "view","like","skip","impression","scroll_back","complete","loop","unmute","seek_back","seek_forward","profile_visit","hashtag_tap","follow_from_content","report","block","comment_panel_open","long_press","app_background","app_foreground","video_pause","video_play","battle_switch",etc.
+	WatchDurationMs int                    `json:"watchDurationMs"`    // How long they actually watched (or dwell ms for impressions)
+	TotalDurationMs int                    `json:"totalDurationMs"`    // Total content length
+	CompletionRate  float64                `json:"completionRate"`     // 0.0 to 1.0
+	SessionID       string                 `json:"sessionId"`          // Groups events into sessions
+	SessionPosition int                    `json:"sessionPosition"`    // Nth item in this session (fatigue signal)
+	Metadata        map[string]interface{} `json:"metadata,omitempty"` // Event-specific extra data
+	CreatedAt       string                 `json:"createdAt"`
 }
 
 // SessionState is the real-time psychological state of a user during a session.
@@ -47,42 +47,42 @@ type FeedEvent struct {
 // scrolling for 20 minutes needs different content than someone who just opened
 // the app. Without this, you serve intense content to exhausted users and they leave.
 type SessionState struct {
-	UserID          string             `json:"userId"`
-	SessionID       string             `json:"sessionId"`
-	StartedAt       time.Time          `json:"startedAt"`
-	ItemsSeen       int                `json:"itemsSeen"`
-	TotalWatchMs    int                `json:"totalWatchMs"`
-	SkipCount       int                `json:"skipCount"`
-	SkipStreak      int                `json:"skipStreak"`      // Consecutive skips — resistance signal
-	LikeCount       int                `json:"likeCount"`
-	ShareCount      int                `json:"shareCount"`
-	CompleteCount   int                `json:"completeCount"`   // full watches — strong positive engagement
-	CommentCount    int                `json:"commentCount"`
-	SaveCount       int                `json:"saveCount"`
-	LastCreditedItems int              `json:"lastCreditedItems"` // ItemsSeen at last mood/strategy crediting — avoids re-crediting the same window on repeated app_background
-	CategoriesSeen  map[string]int     `json:"categoriesSeen"`  // category -> count (saturation tracking)
-	CreatorsSeen    map[string]int     `json:"creatorsSeen"`    // creatorId -> count (diversity)
-	LastEmotions    []string           `json:"lastEmotions"`    // Last ~10 items, ONE negative-priority emotion each (wellbeing spiral detection)
-	LastMoodEmotions []string          `json:"lastMoodEmotions"` // Last ~10 items, FIRST/dominant emotion each (mood-transition learner — must match the serve-time "to" key)
-	DopamineBudget  float64            `json:"dopamineBudget"`  // 1.0=fresh, depletes to 0
-	ResistanceLevel int                `json:"resistanceLevel"` // 0-3, triggers strategy switches
-	CurrentStrategy string             `json:"currentStrategy"` // see strategy constants below
+	UserID            string         `json:"userId"`
+	SessionID         string         `json:"sessionId"`
+	StartedAt         time.Time      `json:"startedAt"`
+	ItemsSeen         int            `json:"itemsSeen"`
+	TotalWatchMs      int            `json:"totalWatchMs"`
+	SkipCount         int            `json:"skipCount"`
+	SkipStreak        int            `json:"skipStreak"` // Consecutive skips — resistance signal
+	LikeCount         int            `json:"likeCount"`
+	ShareCount        int            `json:"shareCount"`
+	CompleteCount     int            `json:"completeCount"` // full watches — strong positive engagement
+	CommentCount      int            `json:"commentCount"`
+	SaveCount         int            `json:"saveCount"`
+	LastCreditedItems int            `json:"lastCreditedItems"` // ItemsSeen at last mood/strategy crediting — avoids re-crediting the same window on repeated app_background
+	CategoriesSeen    map[string]int `json:"categoriesSeen"`    // category -> count (saturation tracking)
+	CreatorsSeen      map[string]int `json:"creatorsSeen"`      // creatorId -> count (diversity)
+	LastEmotions      []string       `json:"lastEmotions"`      // Last ~10 items, ONE negative-priority emotion each (wellbeing spiral detection)
+	LastMoodEmotions  []string       `json:"lastMoodEmotions"`  // Last ~10 items, FIRST/dominant emotion each (mood-transition learner — must match the serve-time "to" key)
+	DopamineBudget    float64        `json:"dopamineBudget"`    // 1.0=fresh, depletes to 0
+	ResistanceLevel   int            `json:"resistanceLevel"`   // 0-3, triggers strategy switches
+	CurrentStrategy   string         `json:"currentStrategy"`   // see strategy constants below
 	// === Impression resistance (new) ===
-	ImpressionCount int               `json:"impressionCount"` // Impressions collected this session
-	BounceCount     int               `json:"bounceCount"`     // Impressions with dwell < 500ms
-	BounceStreak    int               `json:"bounceStreak"`    // Consecutive bounces — early skip signal
+	ImpressionCount int `json:"impressionCount"` // Impressions collected this session
+	BounceCount     int `json:"bounceCount"`     // Impressions with dwell < 500ms
+	BounceStreak    int `json:"bounceStreak"`    // Consecutive bounces — early skip signal
 	// === Mood & strategy memory (new) ===
-	DetectedMood           string    `json:"detectedMood"`           // "energetic","chill","frustrated","bored","engaged","curious"
-	TriedStrategies        []string  `json:"triedStrategies"`        // Strategies already used this session — don't repeat failed ones
-	StrategyStartItems     int       `json:"strategyStartItems"`     // ItemsSeen when current strategy began — COOLDOWN anchor only (advances only on a real switch / session start; the engagement counters moved to StrategyWindowStart* below)
+	DetectedMood       string   `json:"detectedMood"`       // "energetic","chill","frustrated","bored","engaged","curious"
+	TriedStrategies    []string `json:"triedStrategies"`    // Strategies already used this session — don't repeat failed ones
+	StrategyStartItems int      `json:"strategyStartItems"` // ItemsSeen when current strategy began — COOLDOWN anchor only (advances only on a real switch / session start; the engagement counters moved to StrategyWindowStart* below)
 	// Separate window baseline for recordStrategyOutcome — advances at EACH credit
 	// (session-end/background) so re-crediting measures only the new delta, WITHOUT
 	// resetting the StrategyStartItems cooldown anchor above.
-	StrategyWindowStartItems  int `json:"strategyWindowStartItems"`
-	StrategyWindowStartLikes  int `json:"strategyWindowStartLikes"`
-	StrategyWindowStartShares int `json:"strategyWindowStartShares"`
-	StrategyWindowStartSkips  int `json:"strategyWindowStartSkips"`
-	LastStrategySwitchAt   time.Time `json:"lastStrategySwitchAt"`   // Prevent thrashing (min 6 items between switches)
+	StrategyWindowStartItems  int       `json:"strategyWindowStartItems"`
+	StrategyWindowStartLikes  int       `json:"strategyWindowStartLikes"`
+	StrategyWindowStartShares int       `json:"strategyWindowStartShares"`
+	StrategyWindowStartSkips  int       `json:"strategyWindowStartSkips"`
+	LastStrategySwitchAt      time.Time `json:"lastStrategySwitchAt"` // Prevent thrashing (min 6 items between switches)
 	// === Lifecycle tracking ===
 	LastActivityAt    time.Time `json:"lastActivityAt"`    // Updated on every event — used to compute true session length
 	BackgroundedAt    time.Time `json:"backgroundedAt"`    // Last time user backgrounded the app — zero when foreground
@@ -90,19 +90,19 @@ type SessionState struct {
 	// === Cross-surface counters (built from non-feed events) ===
 	// These count interactions OUTSIDE the feed so the recommendation engine
 	// has visibility into the whole user, not just their video-watching.
-	PageViewCount         int            `json:"pageViewCount"`
-	TabSwitchCount        int            `json:"tabSwitchCount"`
-	ProfileViewCount      int            `json:"profileViewCount"`
-	SearchCount           int            `json:"searchCount"`
-	ChatOpenCount         int            `json:"chatOpenCount"`
-	MessagesSentCount     int            `json:"messagesSentCount"`
-	FollowsCount          int            `json:"followsCount"`
-	UnfollowsCount        int            `json:"unfollowsCount"`
-	NotificationOpenCount int            `json:"notificationOpenCount"`
-	SettingChangeCount    int            `json:"settingChangeCount"`
-	UploadStartCount      int            `json:"uploadStartCount"`
-	UploadCompleteCount   int            `json:"uploadCompleteCount"`
-	ErrorCount            int            `json:"errorCount"`
+	PageViewCount         int `json:"pageViewCount"`
+	TabSwitchCount        int `json:"tabSwitchCount"`
+	ProfileViewCount      int `json:"profileViewCount"`
+	SearchCount           int `json:"searchCount"`
+	ChatOpenCount         int `json:"chatOpenCount"`
+	MessagesSentCount     int `json:"messagesSentCount"`
+	FollowsCount          int `json:"followsCount"`
+	UnfollowsCount        int `json:"unfollowsCount"`
+	NotificationOpenCount int `json:"notificationOpenCount"`
+	SettingChangeCount    int `json:"settingChangeCount"`
+	UploadStartCount      int `json:"uploadStartCount"`
+	UploadCompleteCount   int `json:"uploadCompleteCount"`
+	ErrorCount            int `json:"errorCount"`
 	// Per-page dwell totals (ms) — accumulated from page_exit events
 	PageDwellMs map[string]int `json:"pageDwellMs"`
 	// === Sequence awareness (new) ===
@@ -139,36 +139,36 @@ type SessionState struct {
 //  4. EgoSensitivity    — How much do wins/losses affect their engagement?
 //  5. CategoryAffinity  — What topics do they consistently engage with?
 type UserProfile struct {
-	UserID            string             `json:"userId"`
+	UserID string `json:"userId"`
 	// === Long-term personality (updated every session) ===
-	CategoryAffinity  map[string]float64 `json:"categoryAffinity"`  // "comedy":0.4, "skill":0.3
-	EnergyPreference  float64            `json:"energyPreference"`  // 0=chill, 1=intense
-	SocialDrive       float64            `json:"socialDrive"`       // 0=solo, 1=social
-	NoveltyTolerance  float64            `json:"noveltyTolerance"`  // 0=loyalist, 1=explorer
-	EgoSensitivity    float64            `json:"egoSensitivity"`    // 0=unbothered, 1=highly reactive
+	CategoryAffinity map[string]float64 `json:"categoryAffinity"` // "comedy":0.4, "skill":0.3
+	EnergyPreference float64            `json:"energyPreference"` // 0=chill, 1=intense
+	SocialDrive      float64            `json:"socialDrive"`      // 0=solo, 1=social
+	NoveltyTolerance float64            `json:"noveltyTolerance"` // 0=loyalist, 1=explorer
+	EgoSensitivity   float64            `json:"egoSensitivity"`   // 0=unbothered, 1=highly reactive
 	// === Extended personality (new dimensions) ===
-	AttentionSpan        float64 `json:"attentionSpan"`        // 0=scanner/skimmer, 1=deep watcher
-	BingeIntensity       float64 `json:"bingeIntensity"`       // 0=casual dipper, 1=binger (long tail sessions)
-	CreatorLoyalty       float64 `json:"creatorLoyalty"`       // 0=promiscuous viewer, 1=fan (top creator concentration)
-	CompetitivenessIndex float64 `json:"competitivenessIndex"` // 0=spectator, 1=competitor (posts/responds in battles)
-	MoodVolatility       float64 `json:"moodVolatility"`       // 0=steady, 1=moody (engagement variance across sessions)
-	AvgSessionSec     int                `json:"avgSessionSec"`
-	ActiveHours       []int              `json:"activeHours"`       // Peak engagement hours [19,20,21]
-	PreferredCreators []string           `json:"preferredCreators"` // Top 10 creator IDs
-	AvoidedCategories []string           `json:"avoidedCategories"` // Categories they skip/not-interested
+	AttentionSpan        float64  `json:"attentionSpan"`        // 0=scanner/skimmer, 1=deep watcher
+	BingeIntensity       float64  `json:"bingeIntensity"`       // 0=casual dipper, 1=binger (long tail sessions)
+	CreatorLoyalty       float64  `json:"creatorLoyalty"`       // 0=promiscuous viewer, 1=fan (top creator concentration)
+	CompetitivenessIndex float64  `json:"competitivenessIndex"` // 0=spectator, 1=competitor (posts/responds in battles)
+	MoodVolatility       float64  `json:"moodVolatility"`       // 0=steady, 1=moody (engagement variance across sessions)
+	AvgSessionSec        int      `json:"avgSessionSec"`
+	ActiveHours          []int    `json:"activeHours"`       // Peak engagement hours [19,20,21]
+	PreferredCreators    []string `json:"preferredCreators"` // Top 10 creator IDs
+	AvoidedCategories    []string `json:"avoidedCategories"` // Categories they skip/not-interested
 	// === Behavioral metrics ===
-	AvgCompletionRate float64            `json:"avgCompletionRate"`
-	AvgSkipRate       float64            `json:"avgSkipRate"`
-	TotalSessions     int                `json:"totalSessions"`
-	TotalWatchTimeMs  int64              `json:"totalWatchTimeMs"`
+	AvgCompletionRate float64 `json:"avgCompletionRate"`
+	AvgSkipRate       float64 `json:"avgSkipRate"`
+	TotalSessions     int     `json:"totalSessions"`
+	TotalWatchTimeMs  int64   `json:"totalWatchTimeMs"`
 	// === Ego state (from battle results) ===
-	RecentWins        int                `json:"recentWins"`   // Last 7 days
-	RecentLosses      int                `json:"recentLosses"` // Last 7 days
+	RecentWins   int `json:"recentWins"`   // Last 7 days
+	RecentLosses int `json:"recentLosses"` // Last 7 days
 	// === Context-aware personality ===
-	CategoryByHour    map[int]string              `json:"categoryByHour"`    // hour→top category at that hour
-	CategoryByEgo     map[string]map[string]float64 `json:"categoryByEgo"`   // "winning"/"losing"→{category:score}
-	EmotionPreference map[string]float64          `json:"emotionPreference"` // "happy":0.6, "intense":0.3
-	EnergyByHour      map[int]float64             `json:"energyByHour"`      // hour→avg energy preference
+	CategoryByHour    map[int]string                `json:"categoryByHour"`    // hour→top category at that hour
+	CategoryByEgo     map[string]map[string]float64 `json:"categoryByEgo"`     // "winning"/"losing"→{category:score}
+	EmotionPreference map[string]float64            `json:"emotionPreference"` // "happy":0.6, "intense":0.3
+	EnergyByHour      map[int]float64               `json:"energyByHour"`      // hour→avg energy preference
 	// === Strategy success memory (new) ===
 	// Per-user track record of how well each strategy worked when deployed.
 	// Updated at strategy-switch time based on engagement delta (likes/shares/completes
@@ -176,8 +176,8 @@ type UserProfile struct {
 	// This is how we avoid retrying a strategy that never works for THIS user.
 	StrategySuccessHistory map[string]float64 `json:"strategySuccessHistory"`
 	// === Metadata ===
-	LastComputedAt    time.Time          `json:"lastComputedAt"`
-	EventCount        int                `json:"eventCount"` // Total events used to compute
+	LastComputedAt time.Time `json:"lastComputedAt"`
+	EventCount     int       `json:"eventCount"` // Total events used to compute
 }
 
 // ContentScore is the computed understanding of a piece of content.
@@ -187,42 +187,42 @@ type UserProfile struct {
 // is a comedy video regardless of who's watching. We compute this once and
 // cache it, then the scoring engine combines it with the user profile.
 type ContentScore struct {
-	ContentID         string             `json:"contentId"`
-	ContentType       string             `json:"contentType"`
+	ContentID   string `json:"contentId"`
+	ContentType string `json:"contentType"`
 	// === Engagement metrics (from all users) ===
-	AvgCompletionRate float64            `json:"avgCompletionRate"`
-	AvgWatchTimeMs    int                `json:"avgWatchTimeMs"`
-	SkipRate          float64            `json:"skipRate"`
-	RewatchRate       float64            `json:"rewatchRate"`
-	ShareCount        int                `json:"shareCount"`
-	NotInterestedCount int               `json:"notInterestedCount"`
+	AvgCompletionRate  float64 `json:"avgCompletionRate"`
+	AvgWatchTimeMs     int     `json:"avgWatchTimeMs"`
+	SkipRate           float64 `json:"skipRate"`
+	RewatchRate        float64 `json:"rewatchRate"`
+	ShareCount         int     `json:"shareCount"`
+	NotInterestedCount int     `json:"notInterestedCount"`
 	// === Derived scores ===
-	EngagementVelocity float64           `json:"engagementVelocity"` // Engagement in first 2 hours
-	TrendingScore      float64           `json:"trendingScore"`
-	QualityScore       float64           `json:"qualityScore"`
+	EngagementVelocity float64 `json:"engagementVelocity"` // Engagement in first 2 hours
+	TrendingScore      float64 `json:"trendingScore"`
+	QualityScore       float64 `json:"qualityScore"`
 	// === Content understanding ===
-	EnergyLevel        float64           `json:"energyLevel"`   // 0=chill, 1=intense (may be inferred for medium/unset; used by energyFit)
-	EnergyLevelLabel   float64           `json:"energyLevelLabel"` // discrete label energy (energyStringToFloat); used by energyHourMatch to match EnergyByHour's train scale
-	Category           string            `json:"category"`      // Primary category
-	EmotionVector      map[string]float64 `json:"emotionVector"` // "happy":0.5, "competitive":0.3
+	EnergyLevel      float64            `json:"energyLevel"`      // 0=chill, 1=intense (may be inferred for medium/unset; used by energyFit)
+	EnergyLevelLabel float64            `json:"energyLevelLabel"` // discrete label energy (energyStringToFloat); used by energyHourMatch to match EnergyByHour's train scale
+	Category         string             `json:"category"`         // Primary category
+	EmotionVector    map[string]float64 `json:"emotionVector"`    // "happy":0.5, "competitive":0.3
 	// === Creator info (denormalized for speed) ===
-	CreatorID          string            `json:"creatorId"`
-	CreatorLeague      string            `json:"creatorLeague"`
-	CreatorFollowers   int               `json:"creatorFollowers"`
-	CreatorWinRate     float64           `json:"creatorWinRate"`
+	CreatorID        string  `json:"creatorId"`
+	CreatorLeague    string  `json:"creatorLeague"`
+	CreatorFollowers int     `json:"creatorFollowers"`
+	CreatorWinRate   float64 `json:"creatorWinRate"`
 	// === Metadata ===
-	CreatedAt          time.Time         `json:"createdAt"`
-	ViewCount          int               `json:"viewCount"`
-	LikeCount          int               `json:"likeCount"`
-	CommentCount       int               `json:"commentCount"`
-	LastComputedAt     time.Time         `json:"lastComputedAt"`
+	CreatedAt      time.Time `json:"createdAt"`
+	ViewCount      int       `json:"viewCount"`
+	LikeCount      int       `json:"likeCount"`
+	CommentCount   int       `json:"commentCount"`
+	LastComputedAt time.Time `json:"lastComputedAt"`
 	// === Battle vs Short ===
 	// ResponseCount mirrors challenges.responseCount — > 0 means at least one
 	// person accepted the duel (this is a "battle"); 0 means a "short" that
 	// nobody responded to yet. The For You ranker uses this to bias the feed
 	// toward battles, which is the app's core engagement surface. Always 0
 	// for non-challenge content types.
-	ResponseCount      int               `json:"responseCount"`
+	ResponseCount int `json:"responseCount"`
 }
 
 // ScoredItem wraps a feed item with its computed score and assigned slot.
@@ -250,17 +250,17 @@ type ScoredItem struct {
 
 const (
 	// === Base score weights (sum = 1.0) ===
-	wSocial     = 0.25  // Friends/following boost
-	wFreshness  = 0.20  // Time decay — new content gets a chance
-	wEnergyFit  = 0.20  // Does content intensity match user's current state?
-	wRelevance  = 0.15  // Category/subject match
-	wQuality    = 0.10  // Creator reputation
-	wNovelty    = 0.10  // New category/creator bonus
+	wSocial    = 0.25 // Friends/following boost
+	wFreshness = 0.20 // Time decay — new content gets a chance
+	wEnergyFit = 0.20 // Does content intensity match user's current state?
+	wRelevance = 0.15 // Category/subject match
+	wQuality   = 0.10 // Creator reputation
+	wNovelty   = 0.10 // New category/creator bonus
 
 	// === Freshness decay ===
-	freshnessHalfLifeHours = 18.0  // Content loses half its freshness every 18h
-	                                // WHY 18 not 12: our content is challenges, not memes.
-	                                // Challenges take longer to discover and respond to.
+	freshnessHalfLifeHours = 18.0 // Content loses half its freshness every 18h
+	// WHY 18 not 12: our content is challenges, not memes.
+	// Challenges take longer to discover and respond to.
 
 	// === Session dynamics ===
 	// View dopamine is now PROPORTIONAL to completion (see updateSessionFromEvent):
@@ -272,58 +272,58 @@ const (
 	// tuning left most views (>0.6) refilling, so a normal session never reached
 	// the fatigue gates — this restores "fatigue by ~30 partial-watch items".
 	dopamineNeutralCompletion = 0.8  // completion at which a view is dopamine-neutral
-	dopamineViewSlope      = 0.10  // proportional view refill/drain per unit completion-from-neutral
-	dopamineSkipDrain      = 0.05  // A skip/not_interested drains more — the feed missed
-	                                // WHY: At ~30 items, budget ≈ 0.1 (fatigued). Average TikTok
-	                                // session is 10-15 minutes ≈ 30-50 items. We want to detect
-	                                // fatigue around the same threshold.
+	dopamineViewSlope         = 0.10 // proportional view refill/drain per unit completion-from-neutral
+	dopamineSkipDrain         = 0.05 // A skip/not_interested drains more — the feed missed
+	// WHY: At ~30 items, budget ≈ 0.1 (fatigued). Average TikTok
+	// session is 10-15 minutes ≈ 30-50 items. We want to detect
+	// fatigue around the same threshold.
 
-	maxItemsPerCreator     = 3     // Diversity: max 3 items from same creator in one feed page
-	coldStartThreshold     = 15    // Users with <15 events are "cold start"
-	contentColdThreshold   = 5     // Content with <5 views is "cold start"
-	auditionViewTarget     = 300   // Until a video has this many views it is "under audition": it gets exploration impressions so its true performance can be measured before merit-ranking judges it. 5 views can't measure quality; ~hundreds can.
-	profileStalenessMin    = 5     // Recompute profile if older than 5 minutes — fast cohort transitions during onboarding (TikTok-style)
-	sessionTTLMin          = 30    // Redis session expires after 30 min inactivity
+	maxItemsPerCreator   = 3   // Diversity: max 3 items from same creator in one feed page
+	coldStartThreshold   = 15  // Users with <15 events are "cold start"
+	contentColdThreshold = 5   // Content with <5 views is "cold start"
+	auditionViewTarget   = 300 // Until a video has this many views it is "under audition": it gets exploration impressions so its true performance can be measured before merit-ranking judges it. 5 views can't measure quality; ~hundreds can.
+	profileStalenessMin  = 5   // Recompute profile if older than 5 minutes — fast cohort transitions during onboarding (TikTok-style)
+	sessionTTLMin        = 30  // Redis session expires after 30 min inactivity
 
 	// === Resistance thresholds ===
-	resistL1SkipRate = 0.30  // 30% skips = drifting
-	resistL2SkipRate = 0.50  // 50% skips = resisting
-	resistL3SkipRate = 0.70  // 70% skips = leaving
-	resistL2SkipStreak = 5   // 5 consecutive skips = definitely resisting
+	resistL1SkipRate   = 0.30 // 30% skips = drifting
+	resistL2SkipRate   = 0.50 // 50% skips = resisting
+	resistL3SkipRate   = 0.70 // 70% skips = leaving
+	resistL2SkipStreak = 5    // 5 consecutive skips = definitely resisting
 
 	// === Impression-based resistance (earlier signal than skips) ===
 	// Bounces are sub-500ms impressions — user zipped past without committing.
 	// These fire before the user bothers to issue a "skip" event, catching
 	// disengagement ~10s earlier.
-	resistBounceRateL1    = 0.50  // 50% bounce rate = drifting
-	resistBounceRateL2    = 0.70  // 70% bounce rate = resisting
-	resistBounceRateL3    = 0.85  // 85% bounce rate = leaving
-	resistBounceStreakL2  = 6     // 6 consecutive bounces = resisting
-	resistBounceMinSample = 8     // Need at least 8 impressions before trusting bounce rate
+	resistBounceRateL1    = 0.50 // 50% bounce rate = drifting
+	resistBounceRateL2    = 0.70 // 70% bounce rate = resisting
+	resistBounceRateL3    = 0.85 // 85% bounce rate = leaving
+	resistBounceStreakL2  = 6    // 6 consecutive bounces = resisting
+	resistBounceMinSample = 8    // Need at least 8 impressions before trusting bounce rate
 
 	// === Strategy switching governance ===
-	minItemsBetweenSwitches = 6    // Don't thrash strategies — give each a fair shot
+	minItemsBetweenSwitches = 6 // Don't thrash strategies — give each a fair shot
 
 	// === Feed page size ===
-	defaultPageSize = 20
-	maxPageSize     = 50
+	defaultPageSize     = 20
+	maxPageSize         = 50
 	candidateMultiplier = 5 // Fetch 5x page size as candidates, then score & filter
 )
 
 // Feed slot types — define what KIND of content goes in each position.
 // Each slot serves a psychological purpose in the session arc.
 const (
-	slotHook      = "hook"       // High-confidence content user will engage with
-	slotSocial    = "social"     // Content from friends/following
-	slotDiscovery = "discovery"  // New category or creator — expand taste
-	slotTrending  = "trending"   // Popular right now — social proof
-	slotChallenge = "challenge"  // Battle/competition content
-	slotCooldown  = "cooldown"   // Lower energy — palette cleanser
-	slotEgoBoost  = "ego_boost"  // Content that validates the user
-	slotCliffhang = "cliffhang"  // Content with suspense/sequel potential — "what happens next?"
-	slotSurprise  = "surprise"   // Wildcard — random highly-engaging content from any category
-	slotRival     = "rival"      // Content from someone they lost to or competed with — drives re-engagement
-	slotNostalgic = "nostalgic"  // Content user previously loved — replay their own greatest hits
+	slotHook       = "hook"        // High-confidence content user will engage with
+	slotSocial     = "social"      // Content from friends/following
+	slotDiscovery  = "discovery"   // New category or creator — expand taste
+	slotTrending   = "trending"    // Popular right now — social proof
+	slotChallenge  = "challenge"   // Battle/competition content
+	slotCooldown   = "cooldown"    // Lower energy — palette cleanser
+	slotEgoBoost   = "ego_boost"   // Content that validates the user
+	slotCliffhang  = "cliffhang"   // Content with suspense/sequel potential — "what happens next?"
+	slotSurprise   = "surprise"    // Wildcard — random highly-engaging content from any category
+	slotRival      = "rival"       // Content from someone they lost to or competed with — drives re-engagement
+	slotNostalgic  = "nostalgic"   // Content user previously loved — replay their own greatest hits
 	slotFavCreator = "fav_creator" // Top preferred creators' content
 	slotFreshBlood = "fresh_blood" // Brand-new content user has never seen in any feed
 )
@@ -595,32 +595,32 @@ func getSessionState(userID, sessionID string) *SessionState {
 	if err != nil {
 		// New session — start fresh with full dopamine budget
 		return &SessionState{
-			UserID:          userID,
-			SessionID:       sessionID,
-			StartedAt:       time.Now(),
-			DopamineBudget:  1.0,
-			CategoriesSeen:  make(map[string]int),
-			CreatorsSeen:    make(map[string]int),
-			LastEmotions:    []string{},
+			UserID:           userID,
+			SessionID:        sessionID,
+			StartedAt:        time.Now(),
+			DopamineBudget:   1.0,
+			CategoriesSeen:   make(map[string]int),
+			CreatorsSeen:     make(map[string]int),
+			LastEmotions:     []string{},
 			LastMoodEmotions: []string{},
-			CurrentStrategy: strategyStandard,
-			TriedStrategies: []string{strategyStandard},
+			CurrentStrategy:  strategyStandard,
+			TriedStrategies:  []string{strategyStandard},
 		}
 	}
 
 	var state SessionState
 	if json.Unmarshal([]byte(data), &state) != nil {
 		return &SessionState{
-			UserID:         userID,
-			SessionID:      sessionID,
-			StartedAt:      time.Now(),
-			DopamineBudget: 1.0,
-			CategoriesSeen: make(map[string]int),
-			CreatorsSeen:   make(map[string]int),
-			LastEmotions:   []string{},
+			UserID:           userID,
+			SessionID:        sessionID,
+			StartedAt:        time.Now(),
+			DopamineBudget:   1.0,
+			CategoriesSeen:   make(map[string]int),
+			CreatorsSeen:     make(map[string]int),
+			LastEmotions:     []string{},
 			LastMoodEmotions: []string{},
-			CurrentStrategy: strategyStandard,
-			TriedStrategies: []string{strategyStandard},
+			CurrentStrategy:  strategyStandard,
+			TriedStrategies:  []string{strategyStandard},
 		}
 	}
 	return &state
@@ -646,7 +646,7 @@ func saveSessionState(state *SessionState) {
 // counters) are intentionally preserved — those represent the user's genuine
 // state and should survive a refresh, just like in TikTok/IG.
 //
-// WHAT THIS DELIBERATELY NO LONGER DOES
+// # WHAT THIS DELIBERATELY NO LONGER DOES
 //
 // It used to also DELETE the per-user seen ZSET, on the reasoning that the
 // seen filter was what made a refresh feel static. That cure was worse than
@@ -657,12 +657,11 @@ func saveSessionState(state *SessionState) {
 //
 // The two mechanisms that actually deliver a fresh page are still here and are
 // applied by the handlers around this call: ±0.10 score jitter plus a -0.30 /
-// -0.20 / -0.10 demotion of the previous refresh's top three, which rotate the
-// unseen pool. What the wipe was really compensating for was the seen filter's
-// old all-or-nothing cut, which returned a stub page once the unseen pool ran
-// dry. That is fixed where it belongs, in seen_filter.go: unseen content leads,
-// and already-watched content backfills the tail ordered by longest-ago-watched
-// — so an exhausted catalog still fills a page, still leads with anything new,
+// -0.20 / -0.10 demotion of the previous refresh's top three. What the wipe was
+// really compensating for was the seen filter's old all-or-nothing cut, which
+// returned a stub page once the unseen pool ran dry. That is fixed where it
+// belongs, in seen_filter.go: prior impressions are a decaying score handicap,
+// so an exhausted catalog still fills a page, still leads with anything new,
 // and still reorders between pulls, without lying about what the user has seen.
 func applyRefreshSignal(userID, sessionID string) {
 	unlock := sessionKeyLocks.lock(userID + ":" + sessionID)
@@ -1463,12 +1462,13 @@ func detectResistance(state *SessionState) int {
 // patterns. Drives the mood_match strategy and the mood-tinted slot tweaks.
 //
 // Six moods mapped from observable behavior (no introspection required):
-//   energetic  — fast positive engagement, many likes/shares on intense content
-//   chill      — slow dwells on calm content, low skip rate
-//   frustrated — high skip + bounce, minimal positive engagement
-//   bored      — medium dwell, no engagement, no skips either (just scrolling)
-//   engaged    — completions + likes, strong consistent engagement
-//   curious    — long impression dwells but few watches (scanning thumbnails)
+//
+//	energetic  — fast positive engagement, many likes/shares on intense content
+//	chill      — slow dwells on calm content, low skip rate
+//	frustrated — high skip + bounce, minimal positive engagement
+//	bored      — medium dwell, no engagement, no skips either (just scrolling)
+//	engaged    — completions + likes, strong consistent engagement
+//	curious    — long impression dwells but few watches (scanning thumbnails)
 func detectMood(state *SessionState) string {
 	if state.ItemsSeen+state.ImpressionCount < 3 {
 		return "" // Too early
@@ -1527,11 +1527,11 @@ func detectMood(state *SessionState) string {
 
 // pickAlternateStrategy chooses a new feed strategy when the current one fails.
 // Considers (in priority order):
-//   1. Strategies NOT yet tried this session
-//   2. The user's StrategySuccessHistory (prefer what worked before for THIS user)
-//   3. Personality fit (competitive user → competitive, loyalist → creator_focus)
-//   4. Detected mood (frustrated → calming, bored → fresh_blood, etc.)
-//   5. Fallback tier — standard category-shift strategies
+//  1. Strategies NOT yet tried this session
+//  2. The user's StrategySuccessHistory (prefer what worked before for THIS user)
+//  3. Personality fit (competitive user → competitive, loyalist → creator_focus)
+//  4. Detected mood (frustrated → calming, bored → fresh_blood, etc.)
+//  5. Fallback tier — standard category-shift strategies
 func pickAlternateStrategy(state *SessionState, profile *UserProfile) string {
 	tried := make(map[string]bool, len(state.TriedStrategies))
 	for _, s := range state.TriedStrategies {
@@ -1793,20 +1793,25 @@ func loadUserProfile(userID string) (*UserProfile, error) {
 // HOW each dimension is computed:
 //
 // CategoryAffinity: Count engagement events per category, normalize to 0-1 range.
-//   A like in "comedy" = +1, a skip = -0.5, a rewatch = +2, a share = +3.
-//   Higher weight for higher-effort actions.
+//
+//	A like in "comedy" = +1, a skip = -0.5, a rewatch = +2, a share = +3.
+//	Higher weight for higher-effort actions.
 //
 // EnergyPreference: Average energy level of content they COMPLETED (>70% watched).
-//   If they mostly finish high-energy content → energyPreference is high.
+//
+//	If they mostly finish high-energy content → energyPreference is high.
 //
 // SocialDrive: (events on friends' content) / (total events).
-//   High ratio = social person. Low ratio = solo explorer.
+//
+//	High ratio = social person. Low ratio = solo explorer.
 //
 // NoveltyTolerance: (unique categories engaged) / (total categories available).
-//   Many categories = explorer. Few categories = loyalist.
+//
+//	Many categories = explorer. Few categories = loyalist.
 //
 // EgoSensitivity: Measures engagement change after wins vs losses.
-//   If engagement drops sharply after a loss → high ego sensitivity.
+//
+//	If engagement drops sharply after a loss → high ego sensitivity.
 func computeUserProfile(userID string) (*UserProfile, error) {
 	// Serialize against the other profile writers so the rebuilt row merges with
 	// (rather than clobbers) concurrent affinity / strategy / negative updates.
@@ -1844,19 +1849,19 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	}
 
 	p := &UserProfile{
-		UserID:           userID,
-		CategoryAffinity: make(map[string]float64),
-		EnergyPreference: 0.5, // default neutral
-		SocialDrive:      0.5,
-		NoveltyTolerance: 0.5,
-		EgoSensitivity:   0.5,
-		AttentionSpan:    0.5,
-		BingeIntensity:   0.5,
-		CreatorLoyalty:   0.5,
-		CompetitivenessIndex: 0.5,
-		MoodVolatility:       0.5,
+		UserID:                 userID,
+		CategoryAffinity:       make(map[string]float64),
+		EnergyPreference:       0.5, // default neutral
+		SocialDrive:            0.5,
+		NoveltyTolerance:       0.5,
+		EgoSensitivity:         0.5,
+		AttentionSpan:          0.5,
+		BingeIntensity:         0.5,
+		CreatorLoyalty:         0.5,
+		CompetitivenessIndex:   0.5,
+		MoodVolatility:         0.5,
 		StrategySuccessHistory: preservedStrategyHistory,
-		LastComputedAt:   time.Now(),
+		LastComputedAt:         time.Now(),
 	}
 	if p.StrategySuccessHistory == nil {
 		p.StrategySuccessHistory = make(map[string]float64)
@@ -2253,8 +2258,8 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		// raw row count let a one-energy category outrank a higher-total category
 		// that happened to be split across energies. Sum per (h,cat) first.
 		hourCatCount := make(map[int]map[string]int) // hour → cat → total count
-		hourEnergySum := make(map[int]float64)        // hour → sum of energy scores
-		hourEnergyCount := make(map[int]int)          // hour → count
+		hourEnergySum := make(map[int]float64)       // hour → sum of energy scores
+		hourEnergyCount := make(map[int]int)         // hour → count
 		for hourCatRows.Next() {
 			var h, cnt int
 			var cat, energy string
@@ -2753,8 +2758,8 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		// 0.55 (not 0.0 = extreme chill) for any content type that hits neither the
 		// challenge nor post branch below; both branches overwrite this.
 		EnergyLevelLabel: 0.55,
-		Category:    "general",
-		EmotionVector: make(map[string]float64),
+		Category:         "general",
+		EmotionVector:    make(map[string]float64),
 	}
 
 	// Get aggregate engagement metrics — batch-warmed cache first
@@ -4617,7 +4622,7 @@ func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]
 	}
 
 	// Fill slots from pattern
-	used := make(map[string]bool)   // Track used content IDs
+	used := make(map[string]bool)        // Track used content IDs
 	creatorCount := make(map[string]int) // Diversity: max items per creator
 	result := make([]ScoredItem, 0, len(pattern))
 	bucketIdx := make(map[string]int) // Current index in each bucket
@@ -5143,11 +5148,11 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"items":    items,
-			"page":     page,
-			"hasMore":  hasMore,
+			"items":     items,
+			"page":      page,
+			"hasMore":   hasMore,
 			"coldStart": true,
-			"profile":  nil,
+			"profile":   nil,
 		})
 		return
 	}
@@ -5339,9 +5344,10 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		return scored[i].Score > scored[j].Score
 	})
 
-	// Step 6.5: Drop items the user has already been shown in the last TTL
-	// window (impression dedup — stronger than interactedIDs, which only
-	// covered active engagement).
+	// Step 6.5: Handicap items the user has already been shown, rather than
+	// removing them (impression evidence — stronger than interactedIDs, which
+	// only covered active engagement). Nothing leaves the pool here, so this
+	// step cannot shorten a page or end a feed; see applySeenPenalty.
 	//
 	// Load the seen set ONCE here and share the snapshot with the cold-start
 	// bootstrap mix below (applyBootstrapMixIfCold), so the For You path does a
@@ -5349,7 +5355,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// this request runs between here and the mix (it happens after composition),
 	// so the shared snapshot stays consistent.
 	seenSet := loadSeenSet(userID)
-	scored = filterUnseenScoredWith(scored, seenSet, limit)
+	scored = applySeenPenalty(scored, seenSet)
 
 	// Step 6.6: Diversity re-rank (MMR) on the top-K so near-duplicates
 	// don't stack next to each other in the feed.
@@ -6499,4 +6505,3 @@ func getContentEmotions(contentID, contentType string) []string {
 // query per call and were called per event/impression. Callers now read
 // cs.Category / cs.CreatorID off the cached getContentScore, which also applies
 // inferCategory so the category key matches what the ranker reads.)
-

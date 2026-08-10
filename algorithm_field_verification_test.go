@@ -103,16 +103,16 @@ func TestAlgorithm_AllFields_CollectExpectedData(t *testing.T) {
 		}
 	})
 
-	// ── 2. SEEN FILTER — strict-drop path ────────────────────────────────────
-	// When unseen content alone can fill the requested page, every seen item
-	// is dropped. (The backfill path — appending re-watches when the catalog
-	// is exhausted — has dedicated coverage in seen_filter_test.go.)
+	// ── 2. SEEN SIGNAL — handicap, never drop ────────────────────────────────
+	// A just-watched item sinks below fresh content of similar merit, but it
+	// stays in the pool. (Score-vs-staleness behaviour has dedicated coverage
+	// in seen_filter_test.go.)
 	t.Run("seenFilter", func(t *testing.T) {
 		markShownBatch(userID, []HomeFeedItem{
 			{Type: "post", Post: &Post{ID: "p-seen-1", AuthorID: creatorA}},
 		})
-		// Build a candidate set with the seen one + plenty of fresh items so
-		// the unseen pool can fill the page on its own.
+		// The seen item is scored ABOVE every fresh one, so only the penalty
+		// can move it — and it starts inside the cooldown, so it must go last.
 		const freshCount = 10
 		scored := []ScoredItem{
 			{Item: HomeFeedItem{Type: "post", Post: &Post{ID: "p-seen-1", AuthorID: creatorA}}, Score: 0.9},
@@ -125,20 +125,18 @@ func TestAlgorithm_AllFields_CollectExpectedData(t *testing.T) {
 				Score: 0.8 - float64(i)*0.01,
 			})
 		}
-		filtered := filterUnseenScored(userID, scored, freshCount)
-		if len(filtered) != len(scored)-1 {
-			t.Errorf("expected %d items after strict drop, got %d", len(scored)-1, len(filtered))
-			record("seenFilter", "FAIL", fmt.Sprintf("kept %d items", len(filtered)))
+		ranked := applySeenPenaltyFor(userID, scored)
+		if len(ranked) != len(scored) {
+			t.Errorf("nothing may be dropped: got %d of %d", len(ranked), len(scored))
+			record("seenFilter", "FAIL", fmt.Sprintf("kept %d items", len(ranked)))
 			return
 		}
-		for _, si := range filtered {
-			if getItemID(si.Item) == "p-seen-1" {
-				t.Errorf("seen item p-seen-1 leaked into result")
-				record("seenFilter", "FAIL", "seen item leaked")
-				return
-			}
+		if got := getItemID(ranked[len(ranked)-1].Item); got != "p-seen-1" {
+			t.Errorf("just-watched item should rank last, got %q there", got)
+			record("seenFilter", "FAIL", "cooldown item did not sink")
+			return
 		}
-		record("seenFilter", "PASS", "drops seen, keeps unseen")
+		record("seenFilter", "PASS", "handicaps seen, drops nothing")
 	})
 
 	// ── 3. CONTENT EMBEDDING CACHE ───────────────────────────────────────────
