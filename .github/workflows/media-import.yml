@@ -1,0 +1,83 @@
+name: media-import
+
+# One-shot job: copy the sample reel clips into our own R2 bucket and
+# generate a real poster frame for each. Run it by hand from the Actions
+# tab; there is no schedule, because the work only needs redoing when the
+# clip list in cmd/mediaimport/main.go changes.
+#
+# It exists because the seeded feed currently hotlinks its videos from
+# third-party test-file hosts, one of which answers in about a second.
+# That delay is paid on every range request the player makes, which is
+# what makes seeded videos freeze until you pause and play. See the
+# package comment in cmd/mediaimport/main.go for the full reasoning.
+#
+# Required repo secrets (Settings -> Secrets and variables -> Actions):
+#   R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+#   R2_PUBLIC_BASE_URL  - optional. When unset the importer falls back to
+#                         R2's default pub-<account>.r2.dev host, the same
+#                         fallback the backend uses. Set it if the bucket
+#                         is served through a custom domain, because the
+#                         URLs printed here get pasted into the seeder and
+#                         have to be the ones the app will actually fetch.
+#
+# The bucket must allow public reads. Uploading to a private bucket
+# SUCCEEDS silently, so the importer finishes by issuing a range request
+# against every object it just wrote and fails the run if any of them
+# does not come back 206. That turns a misconfigured bucket into a red
+# build here instead of an unplayable feed on the device.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Print the plan and the object keys without uploading'
+        type: boolean
+        default: false
+
+concurrency:
+  group: media-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+          cache-dependency-path: go.sum
+
+      # Runner images no longer ship ffmpeg preinstalled; same install
+      # step the hls-worker workflow needs.
+      - name: install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg && ffmpeg -version | head -1
+
+      - name: import clips and posters
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
+        run: |
+          go build -o /tmp/mediaimport ./cmd/mediaimport
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            /tmp/mediaimport -dry-run | tee /tmp/media-manifest.txt
+          else
+            /tmp/mediaimport | tee /tmp/media-manifest.txt
+          fi
+
+      # Saved as an artifact as well as printed, because the manifest is
+      # the input to the next step (updating the seeder's URLs) and a log
+      # pane is an awkward place to copy fourteen URL pairs from.
+      - name: upload manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: media-manifest
+          path: /tmp/media-manifest.txt
+          if-no-files-found: warn
