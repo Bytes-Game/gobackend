@@ -635,27 +635,36 @@ func saveSessionState(state *SessionState) {
 	rdb.Set(rctx, key, data, time.Duration(sessionTTLMin)*time.Minute)
 }
 
-// applyRefreshSignal handles a pull-to-refresh from the client. Two effects:
-//
-//  1. Drop the per-user seen-content Redis ZSET so previously-shown items
-//     can resurface. Without this, the seen filter (12h TTL) keeps removing
-//     the same head-of-feed items from candidate pools, which is exactly
-//     what makes a refresh "feel" like nothing changed.
-//
-//  2. Reset the session's dedup counters — CategoriesSeen / CreatorsSeen /
-//     LastCategories / LastCreators. These accumulate as the user scrolls
-//     and the ranker uses them to penalize repeats. After a refresh the
-//     user's intent is "show me different stuff," so the prior fatigue
-//     signal would push us back toward the same not-yet-fatigued bucket
-//     and undermine the refresh.
+// applyRefreshSignal handles a pull-to-refresh from the client: it resets the
+// session's dedup counters — CategoriesSeen / CreatorsSeen / LastCategories /
+// LastCreators. These accumulate as the user scrolls and the ranker uses them
+// to penalize repeats. After a refresh the user's intent is "show me different
+// stuff," so the prior fatigue signal would push us back toward the same
+// not-yet-fatigued bucket and undermine the refresh.
 //
 // Other session signals (DopamineBudget, mood, strategy memory, lifecycle
-// counters) are intentionally preserved — those represent the user's
-// genuine state and should survive a refresh, just like in TikTok/IG.
+// counters) are intentionally preserved — those represent the user's genuine
+// state and should survive a refresh, just like in TikTok/IG.
+//
+// WHAT THIS DELIBERATELY NO LONGER DOES
+//
+// It used to also DELETE the per-user seen ZSET, on the reasoning that the
+// seen filter was what made a refresh feel static. That cure was worse than
+// the disease: wiping the set declares the user's entire watch history unseen,
+// so the very next ranking pass is free to re-serve — at the head of the feed,
+// ahead of genuinely new content — the clips they just finished watching. A
+// refresh would hand back the same videos it was supposed to move past.
+//
+// The two mechanisms that actually deliver a fresh page are still here and are
+// applied by the handlers around this call: ±0.10 score jitter plus a -0.30 /
+// -0.20 / -0.10 demotion of the previous refresh's top three, which rotate the
+// unseen pool. What the wipe was really compensating for was the seen filter's
+// old all-or-nothing cut, which returned a stub page once the unseen pool ran
+// dry. That is fixed where it belongs, in seen_filter.go: unseen content leads,
+// and already-watched content backfills the tail ordered by longest-ago-watched
+// — so an exhausted catalog still fills a page, still leads with anything new,
+// and still reorders between pulls, without lying about what the user has seen.
 func applyRefreshSignal(userID, sessionID string) {
-	if rdb != nil && userID != "" {
-		_ = rdb.Del(rctx, seenKey(userID)).Err()
-	}
 	unlock := sessionKeyLocks.lock(userID + ":" + sessionID)
 	defer unlock()
 	state := getSessionState(userID, sessionID)
@@ -5026,9 +5035,11 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	limitStr := r.URL.Query().Get("limit")
 	debug := r.URL.Query().Get("debug") == "true"
 	// refresh=true is the user's pull-to-refresh signal. Treat the same way
-	// TikTok/Instagram do: drop the seen-content filter, reset session dedup
-	// counters (so categoriesSeen/creatorsSeen fatigue doesn't drag from the
-	// pre-refresh feed), and let the candidate sources re-shuffle freely.
+	// TikTok/Instagram do: reset session dedup counters (so
+	// categoriesSeen/creatorsSeen fatigue doesn't drag from the pre-refresh
+	// feed), jitter near-ties, demote the last refresh's head, and let the
+	// candidate sources re-shuffle freely. What it does NOT do is forget what
+	// the user has watched — see applyRefreshSignal.
 	// Only honored on page=1 — refresh on a later page would either show a
 	// duplicate of page 1 or be confusing UI behavior.
 	refresh := r.URL.Query().Get("refresh") == "true"
@@ -5053,8 +5064,8 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// Apply the refresh signal up-front so every downstream stage sees a
 	// clean slate. We do NOT clear DopamineBudget, mood, or strategy memory
 	// — those are session-state useful even across a refresh; we only wipe
-	// the "what have I already shown / are we fatigued on this category"
-	// signals that would otherwise re-bias the new feed toward the old one.
+	// the "are we fatigued on this category" signals that would otherwise
+	// re-bias the new feed toward the old one.
 	if refresh && page == 1 {
 		applyRefreshSignal(userID, sessionID)
 	}
@@ -5338,7 +5349,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// this request runs between here and the mix (it happens after composition),
 	// so the shared snapshot stays consistent.
 	seenSet := loadSeenSet(userID)
-	scored = filterUnseenScoredWith(scored, seenSet)
+	scored = filterUnseenScoredWith(scored, seenSet, limit)
 
 	// Step 6.6: Diversity re-rank (MMR) on the top-K so near-duplicates
 	// don't stack next to each other in the feed.
@@ -5671,13 +5682,11 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Same pull-to-refresh signal the other two feed surfaces honour.
-	// Following needs it for one specific reason: the seen-aware pass
-	// further down sinks everything in loadSeenSet below the unseen
-	// items, so once a user had watched what their follows posted, every
-	// pull rebuilt the identical order and the tab looked frozen.
-	// applyRefreshSignal drops that seen set, which is the whole lever
-	// here — chronological order is otherwise the point of this feed and
-	// is deliberately left alone.
+	// On Following it resets session dedup only: chronological order is the
+	// point of this feed and is deliberately left alone. The movement a pull
+	// produces here comes from the seen-aware pass further down, whose
+	// already-watched tail is ordered longest-ago-watched first and so
+	// reshuffles on its own as the user watches things.
 	//
 	// Session id is synthesized when absent exactly as ExploreFeedHandler
 	// does it, so a client that omits it still gets its session dedup
@@ -5779,28 +5788,12 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 	// Seen-aware ordering (the one algorithmic touch Following gets):
 	// the tab stays CHRONOLOGICAL — that's its contract, same as
 	// TikTok/IG — but within this page, items the user has already
-	// watched sink below unseen ones (both groups keep their own
-	// chronological order). Re-opening the tab leads with what's new
-	// to YOU instead of the same top video every session.
-	if len(items) > 1 {
-		seen := loadSeenSet(userID)
-		if len(seen) > 0 {
-			unseen := make([]HomeFeedItem, 0, len(items))
-			watched := make([]HomeFeedItem, 0, 4)
-			for _, it := range items {
-				key := ""
-				if it.Challenge != nil {
-					key = "challenge:" + it.Challenge.ID
-				}
-				if key != "" && seen[key] {
-					watched = append(watched, it)
-				} else {
-					unseen = append(unseen, it)
-				}
-			}
-			items = append(unseen, watched...)
-		}
-	}
+	// watched sink below unseen ones. Unseen items keep their
+	// chronological order; the watched tail is ordered longest-ago-watched
+	// first, so re-opening the tab leads with what's new to YOU and a pull
+	// on an exhausted feed still moves. Nothing is dropped — this is a
+	// reordering, which is what a chronological contract allows.
+	items = sinkSeenItems(items, loadSeenSet(userID))
 
 	// Shared enrichment choke point — same as For You / Explore.
 	finalizeFeedItems(items)

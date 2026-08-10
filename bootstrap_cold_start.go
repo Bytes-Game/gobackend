@@ -288,7 +288,7 @@ func fetchBootstrapPool(limit int) []trendingRealtimeEntry {
 // You path already loads it for filterUnseenScored earlier in the same request
 // and threads it here so we don't ZRANGE seen:{user} twice; pass nil to have it
 // loaded lazily (only when the user is actually cold and the pool is non-empty).
-func applyBootstrapMixIfCold(userID string, primary []ScoredItem, eventCount int, seen map[string]bool) []ScoredItem {
+func applyBootstrapMixIfCold(userID string, primary []ScoredItem, eventCount int, seen map[string]int64) []ScoredItem {
 	mix := userBootstrapMix(eventCount)
 	if mix <= 0 {
 		return primary
@@ -325,7 +325,7 @@ func applyBootstrapMixIfCold(userID string, primary []ScoredItem, eventCount int
 		if exclude[key] {
 			continue
 		}
-		if seen[seenMember(e.Type, e.ID)] {
+		if _, alreadyShown := seen[seenMember(e.Type, e.ID)]; alreadyShown {
 			continue
 		}
 		item, ok := loadHomeFeedItemByID(e.Type, e.ID)

@@ -98,16 +98,17 @@ func TestAlgorithm_EndToEnd_AllComponentsProduceExpectedOutput(t *testing.T) {
 	// Verify each member is present in the zset.
 	seen := loadSeenSet(userID)
 	for _, want := range []string{"post:p1", "post:p2", "post:p3"} {
-		if !seen[want] {
+		if _, ok := seen[want]; !ok {
 			t.Fatalf("[seen_filter] expected %q in seen set, got %v", want, seen)
 		}
 	}
-	// filterUnseen drops all 3 and lets a fresh one through.
+	// A page with room to spare (want=1) drops the seen one and lets the
+	// fresh one through — the strict, tier-1-only path.
 	mix := []HomeFeedItem{
 		{Type: "post", Post: &Post{ID: "p1"}},
 		{Type: "post", Post: &Post{ID: "p_fresh"}},
 	}
-	out := filterUnseen(userID, mix)
+	out := filterUnseen(userID, mix, 1)
 	if len(out) != 1 || getItemID(out[0]) != "p_fresh" {
 		t.Fatalf("[seen_filter] expected only p_fresh to pass, got %+v", out)
 	}
