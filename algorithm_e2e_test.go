@@ -102,15 +102,18 @@ func TestAlgorithm_EndToEnd_AllComponentsProduceExpectedOutput(t *testing.T) {
 			t.Fatalf("[seen_filter] expected %q in seen set, got %v", want, seen)
 		}
 	}
-	// A page with room to spare (want=1) drops the seen one and lets the
-	// fresh one through — the strict, tier-1-only path.
+	// The seen signal reorders and never drops: the fresh item leads, the
+	// already-watched one follows rather than disappearing.
 	mix := []HomeFeedItem{
 		{Type: "post", Post: &Post{ID: "p1"}},
 		{Type: "post", Post: &Post{ID: "p_fresh"}},
 	}
-	out := filterUnseen(userID, mix, 1)
-	if len(out) != 1 || getItemID(out[0]) != "p_fresh" {
-		t.Fatalf("[seen_filter] expected only p_fresh to pass, got %+v", out)
+	out := sinkSeenItems(mix, loadSeenSet(userID))
+	if len(out) != 2 {
+		t.Fatalf("[seen_filter] nothing may be dropped, got %+v", out)
+	}
+	if getItemID(out[0]) != "p_fresh" {
+		t.Fatalf("[seen_filter] expected p_fresh to lead, got %+v", out)
 	}
 
 	// ───────────────────────── 3. MMR re-ranker ─────────────────────────

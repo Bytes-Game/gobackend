@@ -40,7 +40,7 @@ import (
 //   Anti-loop / surprise       enabled          enabled
 //
 // What stays the same:
-//   - Seen-filter (don't re-show within 12h)
+//   - Seen signal (already-watched content is handicapped, never removed)
 //   - Negative signals (block / report still hide content)
 //   - Quality / freshness baseline scoring
 //   - Pagination contract
@@ -146,9 +146,9 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 		// buildInteractedSet keys on "type:id" while this looked up a bare
 		// id, so the branch never fired — and had it fired, every video the
 		// user had ever touched would have been removed from explore outright,
-		// with no tier able to re-admit it. Feed content is ranked down, never
-		// deleted; the seen filter is the one place repeats are held back, and
-		// it hands them back when there is nothing newer to show.
+		// permanently. Nothing in this handler removes content; the seen
+		// signal below is likewise a handicap, so what the user has watched
+		// changes where things rank, never whether they exist.
 		score, breakdown := exploreScore(cs, ns, interactedIDs[item.Type+":"+id])
 		scored = append(scored, ScoredItem{
 			Item:           item,
@@ -202,7 +202,7 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Seen-filter. Same graceful fallback applies — if the user has scrolled
 	// through everything, top up with seen items rather than blank the page.
-	scored = filterUnseenScored(userID, scored, limit)
+	scored = applySeenPenaltyFor(userID, scored)
 
 	// Aggressive MMR: lambda=0.40 (way more diversity weight than For You's
 	// 0.55-0.85 ramp), creator penalty 0.30 (vs 0.18 default) so the same
@@ -233,7 +233,16 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	if len(composed) > limit {
 		composed = composed[:limit]
 	}
-	hasMore := len(scored) > limit
+	// A FULL page means "ask me again", matching SmartFeedHandler. The old
+	// `> limit` test read as "is there a spare item beyond this page", which
+	// went false the moment the pool happened to land exactly on the page
+	// size — and the client stops paging the instant hasMore is false, so a
+	// pool of exactly `limit` items ended the feed outright. Deciding the
+	// feed is over is not this handler's call to make; it reports whether it
+	// filled the page and lets the client keep asking. Short of a full page
+	// there is genuinely nothing to page to, which is a fact about the
+	// catalog rather than a ranking decision.
+	hasMore := len(composed) >= limit
 
 	// Mark shown + LTR stash (still useful for the "did the user engage with
 	// this trending piece" signal — feeds back into LTR on next For You).
@@ -429,4 +438,3 @@ func logSafe(x float64) float64 {
 	}
 	return math.Log10(x)
 }
-
