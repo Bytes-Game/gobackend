@@ -104,19 +104,20 @@ func TestAlgorithm_AllFields_CollectExpectedData(t *testing.T) {
 	})
 
 	// ── 2. SEEN FILTER — strict-drop path ────────────────────────────────────
-	// With ≥ seenFilterMinKeep unseen items, every seen item is dropped.
-	// (Graceful-fallback path — re-admitting seen items when catalog is
-	// exhausted — has dedicated coverage in seen_filter_test.go.)
+	// When unseen content alone can fill the requested page, every seen item
+	// is dropped. (The backfill path — appending re-watches when the catalog
+	// is exhausted — has dedicated coverage in seen_filter_test.go.)
 	t.Run("seenFilter", func(t *testing.T) {
 		markShownBatch(userID, []HomeFeedItem{
 			{Type: "post", Post: &Post{ID: "p-seen-1", AuthorID: creatorA}},
 		})
 		// Build a candidate set with the seen one + plenty of fresh items so
-		// the unseen pool stays above the graceful-fallback floor.
+		// the unseen pool can fill the page on its own.
+		const freshCount = 10
 		scored := []ScoredItem{
 			{Item: HomeFeedItem{Type: "post", Post: &Post{ID: "p-seen-1", AuthorID: creatorA}}, Score: 0.9},
 		}
-		for i := 0; i < seenFilterMinKeep+2; i++ {
+		for i := 0; i < freshCount; i++ {
 			scored = append(scored, ScoredItem{
 				Item: HomeFeedItem{Type: "post", Post: &Post{
 					ID: fmt.Sprintf("p-fresh-%d", i), AuthorID: creatorA,
@@ -124,7 +125,7 @@ func TestAlgorithm_AllFields_CollectExpectedData(t *testing.T) {
 				Score: 0.8 - float64(i)*0.01,
 			})
 		}
-		filtered := filterUnseenScored(userID, scored)
+		filtered := filterUnseenScored(userID, scored, freshCount)
 		if len(filtered) != len(scored)-1 {
 			t.Errorf("expected %d items after strict drop, got %d", len(scored)-1, len(filtered))
 			record("seenFilter", "FAIL", fmt.Sprintf("kept %d items", len(filtered)))

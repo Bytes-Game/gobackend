@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
 
@@ -16,12 +17,37 @@ import (
 // (liked/commented); plain impressions were invisible to dedup. This fills
 // that gap with a bounded Redis sorted set per user, keyed by unix-ts score
 // so we can evict old entries cheaply.
+//
+// TWO TIERS, NOT ONE CUT
+//
+// "Never re-serve" is the right rule only while there is something else to
+// serve. A seed catalog, a niche region, or a user who has watched everything
+// their follows posted all reach the same state: nothing unseen is left. The
+// filter therefore ranks in two tiers rather than making a single yes/no cut:
+//
+//	tier 1  unseen items, in the ranker's own order — always first
+//	tier 2  already-watched items, appended ONLY to backfill the page the
+//	        caller asked for, ordered by merit plus how long ago the user
+//	        watched them
+//
+// A page with enough unseen content never sees tier 2 at all, so the 12h
+// no-repeat guarantee is unchanged for a healthy catalog. An exhausted one
+// degrades into re-watches at the tail instead of into a short page.
+//
+// History: this used to cap its own output at seenFilterMinKeep (8) whenever
+// the unseen pool fell below 8 — a constant written as a FLOOR but applied as
+// a CEILING. A client asking for 30 items got exactly 8, and the ~15 ranked
+// items it had just thrown away were the ones the user was waiting to see.
+// Because battles outscore shorts in every ranker we have, the surviving 8
+// were nearly all battles, and the kind-spacing pass downstream cannot
+// interleave a page that contains no shorts — so "the app has no shorts in
+// it" was the visible symptom of a ceiling in this file.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
-	seenKeyPrefix = "seen:"           // + userID
-	seenTTL       = 12 * time.Hour    // window after which content may reappear
-	seenMaxSize   = 2000              // hard cap to bound memory per user
+	seenKeyPrefix = "seen:"        // + userID
+	seenTTL       = 12 * time.Hour // window after which content may reappear
+	seenMaxSize   = 2000           // hard cap to bound memory per user
 )
 
 func seenKey(userID string) string { return seenKeyPrefix + userID }
@@ -92,67 +118,85 @@ func markShownBatch(userID string, items []HomeFeedItem) {
 	}()
 }
 
-// loadSeenSet reads all members into a hash for O(1) membership checks.
+// loadSeenSet reads the user's seen ZSET into a map of member → unix
+// timestamp of the LAST time we served it.
+//
+// The timestamp is the point of the map, not incidental: it is what lets the
+// re-watch tier prefer something the user saw eleven hours ago over something
+// they saw ninety seconds ago. A plain membership set cannot express that, and
+// a feed that re-shows in merit order alone replays the same clip every pull.
 // Small users stay small; capped users stay capped.
-func loadSeenSet(userID string) map[string]bool {
-	out := make(map[string]bool)
+func loadSeenSet(userID string) map[string]int64 {
+	out := make(map[string]int64)
 	if rdb == nil || userID == "" {
 		return out
 	}
-	members, err := rdb.ZRange(rctx, seenKey(userID), 0, -1).Result()
+	members, err := rdb.ZRangeWithScores(rctx, seenKey(userID), 0, -1).Result()
 	if err != nil {
 		return out
 	}
 	for _, m := range members {
-		out[m] = true
+		name, ok := m.Member.(string)
+		if !ok || name == "" {
+			continue
+		}
+		out[name] = int64(m.Score)
 	}
 	return out
 }
 
-// filterUnseen returns items the user has NOT already been shown in the
-// current TTL window. Preserves input order.
-func filterUnseen(userID string, items []HomeFeedItem) []HomeFeedItem {
-	seen := loadSeenSet(userID)
-	if len(seen) == 0 {
-		return items
+// seenBackfillFloor is the page size assumed when a caller does not say how
+// many items it wants. It is a floor on the backfill target, never a cap on
+// the result: a caller passing want=30 gets up to 30.
+const seenBackfillFloor = 8
+
+// seenRepeatMaxBonus is the largest re-rank nudge a re-watch can earn for
+// being stale. Sized deliberately below a typical score spread: it reorders
+// WITHIN the re-watch tier (where merit alone would replay the same clip on
+// every pull) without ever being large enough to matter — the tier is
+// appended wholesale after the unseen items regardless of what it contains.
+const seenRepeatMaxBonus = 0.5
+
+// seenRepeatBonus scales from 0 for something just watched to
+// seenRepeatMaxBonus for something watched a full window ago.
+func seenRepeatBonus(lastSeen, now int64) float64 {
+	if lastSeen <= 0 || now <= lastSeen {
+		return 0
 	}
-	out := make([]HomeFeedItem, 0, len(items))
-	dropped := 0
-	for _, it := range items {
-		id := getItemID(it)
+	frac := float64(now-lastSeen) / seenTTL.Seconds()
+	if frac > 1 {
+		frac = 1
+	}
+	return seenRepeatMaxBonus * frac
+}
+
+// splitSeenScored partitions items into unseen and already-watched, each
+// keeping the caller's order. Items with no resolvable id (suggested-account
+// cards and similar non-content entries) count as unseen: they can be neither
+// marked nor deduped, and dropping them would silently delete them from every
+// returning user's feed.
+func splitSeenScored(items []ScoredItem, seen map[string]int64) (unseen, repeats []ScoredItem) {
+	unseen = make([]ScoredItem, 0, len(items))
+	repeats = make([]ScoredItem, 0, len(items))
+	for _, si := range items {
+		id := getItemID(si.Item)
 		if id == "" {
+			unseen = append(unseen, si)
 			continue
 		}
-		if seen[seenMember(it.Type, id)] {
-			dropped++
-			continue
+		if _, ok := seen[seenMember(si.Item.Type, id)]; ok {
+			repeats = append(repeats, si)
+		} else {
+			unseen = append(unseen, si)
 		}
-		out = append(out, it)
 	}
-	if metricSeenFiltered != nil && dropped > 0 {
-		metricSeenFiltered.Add(float64(dropped))
-	}
-	return out
+	return unseen, repeats
 }
 
-// seenFilterMinKeep is the floor below which we stop dropping seen items.
-// If filtering everything seen would leave the page nearly empty (sparse
-// catalog, exhausted user, brand-new region), re-admit the best-scored
-// seen items so the user sees SOMETHING. Re-watching popular content is
-// normal behavior on Reels/TikTok — empty page is not.
-const seenFilterMinKeep = 8
-
-// filterUnseenScored is the ScoredItem variant used after ranking.
-//
-// Strategy:
-//  1. Walk items, separating unseen from seen (preserving order = score).
-//  2. If we have ≥ seenFilterMinKeep unseen, return them — same as before.
-//  3. If we have fewer, top up from the seen pile (highest-score first)
-//     so the user sees re-watches rather than an empty feed. The first
-//     `len(unseen)` slots are still strictly fresh; only the tail gets
-//     re-admitted seen content.
-func filterUnseenScored(userID string, items []ScoredItem) []ScoredItem {
-	return filterUnseenScoredWith(items, loadSeenSet(userID))
+// filterUnseenScored is the ScoredItem variant used after ranking. `want` is
+// the page size the handler is about to serve; pass the request's limit.
+func filterUnseenScored(userID string, items []ScoredItem, want int) []ScoredItem {
+	return filterUnseenScoredWith(items, loadSeenSet(userID), want)
 }
 
 // filterUnseenScoredWith is filterUnseenScored with a caller-supplied `seen`
@@ -161,44 +205,130 @@ func filterUnseenScored(userID string, items []ScoredItem) []ScoredItem {
 // applyBootstrapMixIfCold, eliminating a redundant ZRANGE (up to seenMaxSize
 // members) on every cold feed request. A nil/empty map means "nothing seen"
 // (fail-open), matching loadSeenSet's behaviour on rdb==nil / ZRANGE error.
-func filterUnseenScoredWith(items []ScoredItem, seen map[string]bool) []ScoredItem {
+//
+//	want > len(unseen)  → unseen, then re-watches ranked by score + staleness,
+//	                      appended until the page is `want` long
+//	want <= len(unseen) → unseen only; no re-watch is served
+func filterUnseenScoredWith(items []ScoredItem, seen map[string]int64, want int) []ScoredItem {
 	if len(seen) == 0 {
 		return items
 	}
-	unseen := make([]ScoredItem, 0, len(items))
-	seenItems := make([]ScoredItem, 0, len(items))
-	for _, si := range items {
-		id := getItemID(si.Item)
-		if id == "" {
-			continue
-		}
-		if seen[seenMember(si.Item.Type, id)] {
-			seenItems = append(seenItems, si)
-		} else {
-			unseen = append(unseen, si)
-		}
+	if want <= 0 {
+		want = seenBackfillFloor
 	}
-	// Healthy case: enough unseen items to fill a page.
-	if len(unseen) >= seenFilterMinKeep {
-		if metricSeenFiltered != nil && len(seenItems) > 0 {
-			metricSeenFiltered.Add(float64(len(seenItems)))
+	unseen, repeats := splitSeenScored(items, seen)
+
+	// Healthy case: enough unseen items to fill the page the caller asked
+	// for. Nothing already watched is served — the 12h guarantee holds.
+	if len(unseen) >= want {
+		if metricSeenFiltered != nil && len(repeats) > 0 {
+			metricSeenFiltered.Add(float64(len(repeats)))
 		}
 		return unseen
 	}
-	// Catalog exhausted (sparse data, power user, etc.): top up with
-	// best-scored seen items so the user gets re-watches instead of nothing.
-	out := make([]ScoredItem, 0, seenFilterMinKeep)
-	out = append(out, unseen...)
-	need := seenFilterMinKeep - len(unseen)
-	if need > len(seenItems) {
-		need = len(seenItems)
+
+	// Catalog exhausted for this user. Rank the re-watch tier by merit plus
+	// how long ago they watched it, so the pull that follows a pull does not
+	// replay the same clip in the same order.
+	now := time.Now().Unix()
+	rank := func(si ScoredItem) float64 {
+		id := getItemID(si.Item)
+		if id == "" {
+			return si.Score
+		}
+		return si.Score + seenRepeatBonus(seen[seenMember(si.Item.Type, id)], now)
 	}
-	out = append(out, seenItems[:need]...)
+	sort.SliceStable(repeats, func(i, j int) bool { return rank(repeats[i]) > rank(repeats[j]) })
+
+	need := want - len(unseen)
+	if need > len(repeats) {
+		need = len(repeats)
+	}
+	out := make([]ScoredItem, 0, len(unseen)+need)
+	out = append(out, unseen...)
+	out = append(out, repeats[:need]...)
 	if metricSeenFiltered != nil {
-		actuallyDropped := len(seenItems) - need
-		if actuallyDropped > 0 {
-			metricSeenFiltered.Add(float64(actuallyDropped))
+		if dropped := len(repeats) - need; dropped > 0 {
+			metricSeenFiltered.Add(float64(dropped))
 		}
 	}
 	return out
+}
+
+// sinkSeenItems reorders — never drops — so unseen items lead in the caller's
+// existing order and already-watched ones follow, longest-ago-watched first.
+//
+// This is the unscored counterpart of the two-tier rule above, for surfaces
+// whose contract is an order rather than a ranking (Following is
+// chronological). The longest-ago-first tail is also what makes a pull feel
+// alive on those surfaces: it changes on its own as the user watches things,
+// which is why refresh no longer needs to delete the seen set to produce
+// movement.
+func sinkSeenItems(items []HomeFeedItem, seen map[string]int64) []HomeFeedItem {
+	if len(items) < 2 || len(seen) == 0 {
+		return items
+	}
+	unseen, repeats := splitSeen(items, seen)
+	if len(repeats) == 0 {
+		return items
+	}
+	return append(unseen, repeats...)
+}
+
+// splitSeen is splitSeenScored for plain items, with the repeats already
+// ordered longest-ago-watched first.
+func splitSeen(items []HomeFeedItem, seen map[string]int64) (unseen, repeats []HomeFeedItem) {
+	type stamped struct {
+		item HomeFeedItem
+		at   int64
+	}
+	unseen = make([]HomeFeedItem, 0, len(items))
+	watched := make([]stamped, 0, len(items))
+	for _, it := range items {
+		id := getItemID(it)
+		if id == "" {
+			unseen = append(unseen, it)
+			continue
+		}
+		if at, ok := seen[seenMember(it.Type, id)]; ok {
+			watched = append(watched, stamped{item: it, at: at})
+		} else {
+			unseen = append(unseen, it)
+		}
+	}
+	sort.SliceStable(watched, func(i, j int) bool { return watched[i].at < watched[j].at })
+	repeats = make([]HomeFeedItem, 0, len(watched))
+	for _, w := range watched {
+		repeats = append(repeats, w.item)
+	}
+	return unseen, repeats
+}
+
+// filterUnseen is the plain-item flavour of the two-tier rule: unseen first,
+// then just enough longest-ago-watched items to reach `want`.
+func filterUnseen(userID string, items []HomeFeedItem, want int) []HomeFeedItem {
+	seen := loadSeenSet(userID)
+	if len(seen) == 0 {
+		return items
+	}
+	if want <= 0 {
+		want = seenBackfillFloor
+	}
+	unseen, repeats := splitSeen(items, seen)
+	if len(unseen) >= want {
+		if metricSeenFiltered != nil && len(repeats) > 0 {
+			metricSeenFiltered.Add(float64(len(repeats)))
+		}
+		return unseen
+	}
+	need := want - len(unseen)
+	if need > len(repeats) {
+		need = len(repeats)
+	}
+	if metricSeenFiltered != nil {
+		if dropped := len(repeats) - need; dropped > 0 {
+			metricSeenFiltered.Add(float64(dropped))
+		}
+	}
+	return append(unseen, repeats[:need]...)
 }

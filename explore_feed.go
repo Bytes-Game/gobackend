@@ -67,12 +67,26 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	if limit > 50 {
 		limit = 50
 	}
-	// Same TikTok-style refresh signal as SmartFeedHandler. Drops the
-	// seen-content filter and clears session dedup so the explore tab's
-	// pull-to-refresh visibly delivers fresh content. Anti-repeat top-3
-	// demotion + ±0.10 score jitter is applied below before sorting so
-	// the same item rarely lands at the head two refreshes in a row.
+	// Same TikTok-style refresh signal as SmartFeedHandler. Clears session
+	// dedup; anti-repeat top-3 demotion + ±0.10 score jitter is applied below
+	// before sorting so the same item rarely lands at the head two refreshes
+	// in a row. It does not forget what the user has watched — see
+	// applyRefreshSignal.
 	refresh := r.URL.Query().Get("refresh") == "true"
+
+	// markShown=false asks us to serve the page WITHOUT recording an
+	// impression against it.
+	//
+	// The search page's discovery grid is the caller that needs this. It
+	// requests 30 items to fill a scrollable grid, of which the user actually
+	// looks at the first handful — and it refetches on every visit to the tab.
+	// Recording all 30 as watched each time burns through a small catalog in
+	// two visits and then reports the whole platform as already-seen, which
+	// pushes every later feed onto the re-watch tier for no reason. An
+	// impression should mean the user watched something, not that a tile
+	// existed somewhere below the fold.
+	markShown := r.URL.Query().Get("markShown") != "false"
+
 	sessionID := r.URL.Query().Get("sessionId")
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%s_%d", userID, time.Now().Unix()/1800)
@@ -183,7 +197,7 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Seen-filter. Same graceful fallback applies — if the user has scrolled
 	// through everything, top up with seen items rather than blank the page.
-	scored = filterUnseenScored(userID, scored)
+	scored = filterUnseenScored(userID, scored, limit)
 
 	// Aggressive MMR: lambda=0.40 (way more diversity weight than For You's
 	// 0.55-0.85 ramp), creator penalty 0.30 (vs 0.18 default) so the same
@@ -223,9 +237,14 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 		for _, it := range composed {
 			items = append(items, it.Item)
 		}
-		markShownBatch(userID, items)
+		if markShown {
+			markShownBatch(userID, items)
+		}
 		// Anti-repeat memory: remember the head of THIS refresh so the
 		// next refresh demotes them. Only on actual refresh requests.
+		// Recorded even when the caller opted out of impressions: this is
+		// what stops a pull-to-refresh returning the same head twice, and it
+		// is a claim about the last response, not about what was watched.
 		if refresh && page == 1 {
 			go savePrevRefreshTops(userID, items)
 		}
