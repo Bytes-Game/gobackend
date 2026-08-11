@@ -5562,8 +5562,11 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		sunlock()
 	}
 
-	// Pagination
-	hasMore := len(composed) >= limit
+	// Pagination. Asks whether composition left anything over, NOT whether
+	// the page filled — a For You page is capped at (eligible creators × 3)
+	// by maxItemsPerCreator, so a short page is usually a diversity
+	// decision rather than an empty catalog. See feed_pagination.go.
+	hasMore := feedHasMore(len(scored), len(composed), limit)
 
 	// Payload enrichment — ONE choke point shared by every feed path
 	// (see finalizeFeedItems). The cold path once skipped this and
