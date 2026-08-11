@@ -288,7 +288,7 @@ type SuggestedAccountsCard struct {
 type ChallengeResponse struct {
 	ID                string         `json:"id"`
 	ChallengeID       string         `json:"challengeId"`
-	ResponderID       string         `json:"responderld"`
+	ResponderID       string         `json:"responderId"`
 	ResponderUsername string         `json:"responderUsername"`
 	ResponderLeague   string         `json:"responderLeague"`
 	VideoURL          string         `json:"videoUrl"`
