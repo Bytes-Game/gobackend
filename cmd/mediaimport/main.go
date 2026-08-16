@@ -178,6 +178,23 @@ func importOne(ctx context.Context, cfg *config, workDir, src string, dryRun boo
 	}
 	res.bytes = n
 
+	// Normalise the box order before anything else touches the file. A
+	// source with its index at the end is uploaded to our bucket exactly
+	// as it arrived unless it is fixed here, and after that every client
+	// pays for it forever — see mp4_layout.go for what it costs.
+	fixed, err := ensureFastStart(ctx, videoPath)
+	if err != nil {
+		return res, fmt.Errorf("faststart: %w", err)
+	}
+	if fixed {
+		fmt.Println("        remuxed to faststart (index was at the end)")
+		// The remux rewrites the container, so the size reported in the
+		// manifest has to be the one actually uploaded.
+		if st, statErr := os.Stat(videoPath); statErr == nil {
+			res.bytes = st.Size()
+		}
+	}
+
 	posterPath := filepath.Join(workDir, filepath.Base(key)+".jpg")
 	if err := extractPoster(ctx, videoPath, posterPath); err != nil {
 		return res, fmt.Errorf("poster: %w", err)
@@ -251,6 +268,82 @@ func extractPoster(ctx context.Context, videoPath, posterPath string) error {
 		return fmt.Errorf("ffmpeg produced an empty poster")
 	}
 	return nil
+}
+
+// ensureFastStart moves an MP4's index to the front if it is at the back,
+// rewriting videoPath in place. Reports whether it did anything.
+//
+// The remux is `-c copy`: no decoding, no re-encoding, no quality change —
+// ffmpeg reads the container and writes the same streams back with the
+// boxes in the other order. On a reel it takes about a second.
+//
+// A file that is already faststart is left completely alone. That matters
+// for a tool that is re-run: rewriting healthy files on every import would
+// churn the bucket, change every object's bytes, and make the "remuxed"
+// line above meaningless as a report of which sources were bad.
+func ensureFastStart(ctx context.Context, videoPath string) (bool, error) {
+	layout, err := layoutOf(videoPath)
+	if err != nil {
+		return false, err
+	}
+	// unknown is deliberately not remuxed — see mp4_layout.go. Rewriting on
+	// the strength of a read we could not interpret would touch files that
+	// are very likely fine.
+	if layout != mp4LayoutMoovAtEnd {
+		return false, nil
+	}
+
+	remuxed := videoPath + ".faststart.mp4"
+	defer os.Remove(remuxed)
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-y",
+		"-i", videoPath,
+		// Copy both streams through untouched. Anything else here would
+		// silently re-encode and cost quality for a container-level fix.
+		"-c", "copy",
+		"-movflags", "+faststart",
+		remuxed,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return false, fmt.Errorf("ffmpeg -movflags +faststart: %w: %s",
+			err, lastLines(string(out), 3))
+	}
+
+	// Verify rather than assume. ffmpeg exits 0 on plenty of outputs that
+	// are not what was asked for, and an unverified remux would upload a
+	// still-broken file while printing that it had fixed it — the same
+	// class of silent wrongness this whole change is about.
+	switch after, err := layoutOf(remuxed); {
+	case err != nil:
+		return false, err
+	case after != mp4LayoutFastStart:
+		return false, fmt.Errorf(
+			"remux produced a %s file; refusing to upload it as fixed", after)
+	}
+
+	if err := os.Rename(remuxed, videoPath); err != nil {
+		return false, fmt.Errorf("replace with remuxed file: %w", err)
+	}
+	return true, nil
+}
+
+// layoutOf reads just enough of a file's opening to classify it.
+func layoutOf(path string) (mp4Layout, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return mp4LayoutUnknown, err
+	}
+	defer f.Close()
+
+	head := make([]byte, mp4LayoutProbeBytes)
+	// ReadFull over Read: a single Read is allowed to return one byte, and
+	// a short buffer here would report "unknown" for a perfectly good file.
+	// A file shorter than the probe is fine, hence the EOF cases.
+	n, err := io.ReadFull(f, head)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return mp4LayoutUnknown, err
+	}
+	return readMP4Layout(head[:n]), nil
 }
 
 func runFFmpeg(ctx context.Context, videoPath, posterPath, seekSeconds string) error {
