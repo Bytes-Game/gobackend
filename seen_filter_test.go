@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"testing"
 	"time"
 
@@ -173,6 +174,63 @@ func TestSeenPenalty_PageTwoDoesNotReplayPageOne(t *testing.T) {
 	}
 	if len(got) != 4 {
 		t.Fatalf("page 1's items must still be present, just last: %v", got)
+	}
+}
+
+func TestSeenPenalty_SurvivesADownstreamResortByScore(t *testing.T) {
+	// THE REGRESSION THIS FILE MISSED FOR A RELEASE.
+	//
+	// TestSeenPenalty_PageTwoDoesNotReplayPageOne above passes whether or not
+	// the handicap reaches Score, because it only inspects the slice this
+	// function returns. Every stage after it re-sorts by Score — MMR seeds
+	// from the top Score in its head window, composeFeed re-buckets by Score
+	// — so an ordering that Score does not back is discarded before anything
+	// is served. Page 2 then re-ran the same ranking, arrived at the same
+	// top-N, the client de-duplicated it to nothing, and the feed ended after
+	// two pages.
+	//
+	// Re-sorting the output by Score here is the cheapest possible stand-in
+	// for those stages: if the order survives it, the handicap is real.
+	resetRedis(t)
+	u := "upen10"
+	markShownBatch(u, []HomeFeedItem{
+		{Type: "post", Post: &Post{ID: "served1"}},
+		{Type: "post", Post: &Post{ID: "served2"}},
+	})
+
+	out := applySeenPenaltyFor(u, []ScoredItem{
+		scoredPost("served1", 9.0),
+		scoredPost("served2", 8.0),
+		scoredPost("unserved1", 1.0),
+		scoredPost("unserved2", 0.9),
+	})
+
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+
+	if got := rankedIDs(out); got[0] != "unserved1" || got[1] != "unserved2" {
+		t.Fatalf("the handicap did not survive a re-sort by Score, so no "+
+			"downstream stage would honour it; got %v", got)
+	}
+}
+
+func TestSeenPenalty_LeavesTheBreakdownAlone(t *testing.T) {
+	// ScoreBreakdown is what ltrStashBreakdownAll learns from. It has to keep
+	// describing what the ranker computed — serving decisions like "we showed
+	// this an hour ago" are not features of the content.
+	resetRedis(t)
+	u := "upen11"
+	seedSeen(t, u, "post", "watched", 1*time.Hour)
+	si := scoredPost("watched", 2.0)
+	si.ScoreBreakdown = map[string]float64{"quality": 0.4}
+	out := applySeenPenaltyFor(u, []ScoredItem{si, scoredPost("fresh", 1.0)})
+
+	for _, r := range out {
+		if getItemID(r.Item) != "watched" {
+			continue
+		}
+		if len(r.ScoreBreakdown) != 1 || r.ScoreBreakdown["quality"] != 0.4 {
+			t.Fatalf("breakdown was rewritten: %v", r.ScoreBreakdown)
+		}
 	}
 }
 
