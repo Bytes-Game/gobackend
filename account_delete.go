@@ -12,8 +12,13 @@ package main
 // DeleteChallengeByID, which also feeds the search-index removal).
 // Chat messages the user SENT remain (they're the other participant's
 // history too) but are already attributed by numeric id only.
-// R2 media objects are not deleted here (same policy as challenge
-// deletion — decoupled storage cleanup).
+//
+// The videos themselves go too. This file used to say they did not —
+// "decoupled storage cleanup" — but nothing was ever doing the decoupled
+// part, so every deleted account left its videos in the bucket forever.
+// DeleteChallengeByID now queues each one's storage paths and a background
+// worker clears them; see media_delete.go. Nothing extra is needed here,
+// because every video a user owns hangs off one of their challenges.
 
 import (
 	"encoding/json"

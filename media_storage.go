@@ -167,6 +167,29 @@ func (c *R2Config) presignURL(method, objectKey string, extraQuery url.Values, e
 	if objectKey == "" {
 		return "", errors.New("objectKey is empty")
 	}
+	// S3 path-style: /<bucket>/<key>. URL-encode each segment of the key
+	// individually so e.g. spaces or slashes inside a single segment are
+	// preserved correctly. We treat objectKey as already containing slash
+	// separators between path segments.
+	return c.presignCanonical(method, "/"+c.Bucket+encodeS3Path(objectKey), extraQuery, expiry)
+}
+
+// presignBucketURL signs a request against the bucket itself rather than an
+// object in it. That is what a listing is: GET /<bucket>?list-type=2.
+//
+// It cannot go through presignURL, which always appends an encoded key and
+// would produce "/<bucket>//" — a path S3 reads as an object literally named
+// "/", not as the bucket root, so the listing comes back empty or refused.
+func (c *R2Config) presignBucketURL(method string, extraQuery url.Values, expiry time.Duration) (string, error) {
+	if c == nil {
+		return "", errors.New("R2Config is nil")
+	}
+	return c.presignCanonical(method, "/"+c.Bucket+"/", extraQuery, expiry)
+}
+
+// presignCanonical is the shared signer. canonicalURI must already be the
+// exact, encoded path S3 will see — everything above decides what that is.
+func (c *R2Config) presignCanonical(method, canonicalURI string, extraQuery url.Values, expiry time.Duration) (string, error) {
 	if expiry <= 0 || expiry > 7*24*time.Hour {
 		// SigV4 caps query expiry at 7 days, and we'd never legitimately
 		// want more than ~1 hour for a client upload.
@@ -183,12 +206,6 @@ func (c *R2Config) presignURL(method, objectKey string, extraQuery url.Values, e
 	credentialScope := fmt.Sprintf("%s/%s/%s/aws4_request", dateStamp, region, service)
 
 	host := c.endpointHost()
-	// S3 path-style: /<bucket>/<key>. URL-encode each segment of the key
-	// individually so e.g. spaces or slashes inside a single segment are
-	// preserved correctly. We treat objectKey as already containing slash
-	// separators between path segments.
-	encodedKey := encodeS3Path(objectKey)
-	canonicalURI := "/" + c.Bucket + encodedKey
 
 	// Query parameters are required to be sorted alphabetically by key in
 	// the canonical request. We build them as a map and emit in order.
