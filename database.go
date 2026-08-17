@@ -521,6 +521,21 @@ func runMigrations() {
 	CREATE INDEX IF NOT EXISTS idx_notif_outbox_pending ON notification_outbox(scheduled_at)
 		WHERE status = 'pending';
 	CREATE INDEX IF NOT EXISTS idx_notif_outbox_user ON notification_outbox(user_id, queued_at DESC);
+
+	-- Storage paths waiting to be cleared from R2 after the rows that
+	-- pointed at them were deleted. A table rather than a goroutine because
+	-- this service restarts often and a deletion lost to a restart is a file
+	-- nobody will ever look at again. Drained by startMediaDeleter; see
+	-- media_delete.go for why it exists at all.
+	CREATE TABLE IF NOT EXISTS pending_media_deletions (
+		id            SERIAL PRIMARY KEY,
+		object_prefix TEXT NOT NULL UNIQUE,
+		attempts      INT NOT NULL DEFAULT 0,
+		last_error    TEXT NOT NULL DEFAULT '',
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_pending_media_deletions_attempts
+		ON pending_media_deletions (attempts, id);
 	`
 
 	if _, err := db.Exec(schema); err != nil {
@@ -1782,6 +1797,13 @@ func DeleteChallengeByID(idStr string) error {
 	if err != nil {
 		return fmt.Errorf("invalid challenge id %q: %w", idStr, err)
 	}
+	// Read where the videos live BEFORE the rows go — afterwards there is
+	// nothing left to read the addresses from. Deleting the rows used to be
+	// the whole job, which left every video sitting in the bucket forever,
+	// unreachable from the app but still stored and still billed. See
+	// media_delete.go.
+	prefixes := mediaPrefixesForChallenge(id)
+
 	res, err := db.Exec(`DELETE FROM challenges WHERE id = $1`, id)
 	if err != nil {
 		return err
@@ -1790,6 +1812,11 @@ func DeleteChallengeByID(idStr string) error {
 	if n == 0 {
 		return fmt.Errorf("no challenge with id %d", id)
 	}
+
+	// Queued, not done here: clearing a bucket is slow and can fail, and
+	// neither should make the user's delete button look broken. A background
+	// worker drains the queue.
+	enqueueMediaDeletions(prefixes)
 	return nil
 }
 
