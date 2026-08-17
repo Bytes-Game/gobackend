@@ -207,10 +207,36 @@ func seenPenalty(lastSeen, now int64) float64 {
 }
 
 // applySeenPenalty ranks items with prior impressions handicapped rather than
-// removed, and returns EVERY item it was given, newly sorted.
+// removed, and returns EVERY item it was given, newly sorted, with the
+// handicap subtracted from each returned item's Score.
 //
-// The returned slice is a copy; input Scores are not mutated, so a caller that
-// stashes scores for LTR sees what the ranker actually computed.
+// The input slice is not mutated — the returned items are copies — so a
+// caller holding the pre-penalty ranking still has it. ScoreBreakdown is
+// deliberately untouched: it is the map ltrStashBreakdownAll learns from, and
+// it must keep describing what the ranker computed, not what serving decided.
+//
+// WHY THE HANDICAP LANDS ON Score
+//
+// It used to live only in this function's return ORDER: scores were left
+// alone and the slice came back sorted by score-minus-penalty. That reads as
+// the tidier choice and it silently did nothing, because every stage after
+// this one re-sorts by Score:
+//
+//	applyMMRDefault      seeds from the highest Score in the head window and
+//	                     scores candidates on Score (mmr.go)
+//	composeFeed          re-buckets and re-sorts by Score
+//
+// So the ordering this function produced was overwritten a few lines later
+// and the seen signal reached the served page not at all. The symptom was
+// pagination that looked broken: page 2 re-ran the same ranking over a
+// slightly larger pool, arrived at the same top-N, and the client — which
+// de-duplicates and stops when a page brings back nothing new — ended the
+// feed after two pages. On a small catalog every session ended there.
+//
+// Step 6.9's cross-page diversity penalty in feed_engine.go already did the
+// right thing (`scored[i].Score -= …`). This is now consistent with it: a
+// penalty in this pipeline is a subtraction from Score, because Score is the
+// only thing downstream stages read.
 //
 // `seen` is the snapshot loadSeenSet returns. A nil/empty map means "nothing
 // seen" (fail-open), matching loadSeenSet's behaviour on rdb==nil or a ZRANGE
@@ -251,7 +277,12 @@ func applySeenPenalty(items []ScoredItem, seen map[string]int64) []ScoredItem {
 	})
 	ranked := make([]ScoredItem, 0, len(out))
 	for _, i := range idx {
-		ranked = append(ranked, out[i])
+		si := out[i]
+		// Carry the handicap in the score itself, not just in this slice's
+		// order — see the note above. A later re-sort by Score now preserves
+		// what this function decided instead of undoing it.
+		si.Score -= penalties[i]
+		ranked = append(ranked, si)
 	}
 
 	// The metric's meaning is "items the seen signal held back". It used to
