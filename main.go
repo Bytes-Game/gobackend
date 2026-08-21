@@ -153,25 +153,32 @@ var (
 	allowOriginWildcard = true
 )
 
+// parseAllowedOrigins turns the raw ALLOWED_ORIGINS value into the two things
+// the decision needs. Pure, so the parsing rules can be tested without
+// touching package state or the environment.
+//
+// Unset (and an explicit "*") keeps the wildcard this service has always sent.
+// That is deliberately the default: the mobile app is the only client today
+// and native HTTP does not send an Origin header at all, so tightening this by
+// default would change nothing for users while risking a silent breakage for
+// any web build already in use.
+func parseAllowedOrigins(raw string) (wildcard bool, set map[string]bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "*" {
+		return true, nil
+	}
+	set = map[string]bool{}
+	for _, o := range strings.Split(raw, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			set[strings.ToLower(o)] = true
+		}
+	}
+	return false, set
+}
+
 func loadAllowedOrigins() {
 	allowedOriginsOnce.Do(func() {
-		raw := strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS"))
-		if raw == "" || raw == "*" {
-			// Unset keeps the wildcard this service has always sent. That is
-			// deliberately the default: the mobile app is the only client
-			// today and native HTTP does not send an Origin header at all, so
-			// tightening this by default would change nothing for users while
-			// risking a silent breakage for any web build already in use.
-			allowOriginWildcard = true
-			return
-		}
-		allowOriginWildcard = false
-		allowedOriginSet = map[string]bool{}
-		for _, o := range strings.Split(raw, ",") {
-			if o = strings.TrimSpace(o); o != "" {
-				allowedOriginSet[strings.ToLower(o)] = true
-			}
-		}
+		allowOriginWildcard, allowedOriginSet = parseAllowedOrigins(os.Getenv("ALLOWED_ORIGINS"))
 	})
 }
 
@@ -188,15 +195,22 @@ func loadAllowedOrigins() {
 // sending an empty one.
 func corsAllowOrigin(origin string) (allow string, vary bool) {
 	loadAllowedOrigins()
+	return corsAllowOriginIn(origin, allowOriginWildcard, allowedOriginSet)
+}
+
+// corsAllowOriginIn is the decision itself, with the configuration handed in
+// rather than read from package state — which is what lets every rule below be
+// tested directly, without an environment variable or a reset hook.
+func corsAllowOriginIn(origin string, wildcard bool, set map[string]bool) (allow string, vary bool) {
 	switch {
-	case allowOriginWildcard:
+	case wildcard:
 		// One fixed answer for everybody, so nothing varies by Origin.
 		return "*", false
 	case origin == "":
 		// Not a browser cross-origin request (native app, curl,
 		// server-to-server). There is nothing to allow and nothing to vary on.
 		return "", false
-	case allowedOriginSet[strings.ToLower(origin)]:
+	case set[strings.ToLower(origin)]:
 		// Echo the caller's own origin rather than the configured string —
 		// required by the spec once the value is not "*".
 		return origin, true
