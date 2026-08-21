@@ -28,6 +28,34 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Brute-force gate. actionLimitTable has carried a "login" row (6/min)
+	// since it was written, but nothing ever called it — so the only thing
+	// between an attacker and a password list was the global per-IP limiter
+	// in rateLimitMiddleware, which allows 10 requests a second. That is
+	// roughly 600 password guesses a minute from a single address.
+	//
+	// Two buckets, because the two attacks do not look alike and either one
+	// alone leaves the other wide open:
+	//
+	//   * keyed by USERNAME — stops a password list being run against one
+	//     account, however many addresses it is spread across.
+	//   * keyed by IP — stops one address spraying a single common password
+	//     across many accounts, which never touches the username bucket.
+	//
+	// The username is normalised for the key only (never for the credential
+	// lookup below, which keeps its existing exact-match semantics) so that
+	// "Alice" and "alice" cannot buy two budgets against the same account.
+	//
+	// Short-circuit is deliberate: when the username bucket is already empty
+	// we return without spending an IP token, so one hammered account cannot
+	// exhaust the address budget for everyone else behind that NAT.
+	rlUser := strings.ToLower(strings.TrimSpace(creds.Username))
+	if !allowAction("user:"+rlUser, "login") || !allowAction("ip:"+clientIP(r), "login") {
+		log.Printf("Login rate limited for user %q from %s.", rlUser, clientIP(r))
+		writeRateLimited(w, "login")
+		return
+	}
+
 	// First, validate the user's credentials.
 	if !IsValidUser(creds.Username, creds.Password) {
 		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
@@ -113,12 +141,118 @@ func GetUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// corsMiddleware adds CORS headers to every response so the Flutter app
-// (web or mobile) can reach the backend without cross-origin errors.
+// allowedOrigins is the parsed ALLOWED_ORIGINS env var: the exact set of web
+// origins permitted to call this API from a browser. Empty means "unset",
+// which keeps the historical wildcard.
+//
+// Parsed once — the value cannot change without a restart, and this is on
+// every single request.
+var (
+	allowedOriginsOnce  sync.Once
+	allowedOriginSet    map[string]bool
+	allowOriginWildcard = true
+)
+
+// parseAllowedOrigins turns the raw ALLOWED_ORIGINS value into the two things
+// the decision needs. Pure, so the parsing rules can be tested without
+// touching package state or the environment.
+//
+// Unset (and an explicit "*") keeps the wildcard this service has always sent.
+// That is deliberately the default: the mobile app is the only client today
+// and native HTTP does not send an Origin header at all, so tightening this by
+// default would change nothing for users while risking a silent breakage for
+// any web build already in use.
+func parseAllowedOrigins(raw string) (wildcard bool, set map[string]bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "*" {
+		return true, nil
+	}
+	set = map[string]bool{}
+	for _, o := range strings.Split(raw, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			set[strings.ToLower(o)] = true
+		}
+	}
+	return false, set
+}
+
+func loadAllowedOrigins() {
+	allowedOriginsOnce.Do(func() {
+		allowOriginWildcard, allowedOriginSet = parseAllowedOrigins(os.Getenv("ALLOWED_ORIGINS"))
+	})
+}
+
+// corsAllowOrigin decides the Access-Control-Allow-Origin value for one
+// request's Origin header, and whether the response must carry Vary: Origin.
+//
+// Pure, and split out from the middleware, because it is the whole of the
+// decision and the failure modes are invisible at runtime: sending the
+// wildcard when a list was configured looks identical to a working server
+// until someone checks, and omitting Vary only misbehaves once a shared cache
+// is in front of it.
+//
+// An empty allow value means "send no header at all", which is not the same as
+// sending an empty one.
+func corsAllowOrigin(origin string) (allow string, vary bool) {
+	loadAllowedOrigins()
+	return corsAllowOriginIn(origin, allowOriginWildcard, allowedOriginSet)
+}
+
+// corsAllowOriginIn is the decision itself, with the configuration handed in
+// rather than read from package state — which is what lets every rule below be
+// tested directly, without an environment variable or a reset hook.
+func corsAllowOriginIn(origin string, wildcard bool, set map[string]bool) (allow string, vary bool) {
+	switch {
+	case wildcard:
+		// One fixed answer for everybody, so nothing varies by Origin.
+		return "*", false
+	case origin == "":
+		// Not a browser cross-origin request (native app, curl,
+		// server-to-server). There is nothing to allow and nothing to vary on.
+		return "", false
+	case set[strings.ToLower(origin)]:
+		// Echo the caller's own origin rather than the configured string —
+		// required by the spec once the value is not "*".
+		return origin, true
+	default:
+		return "", true
+	}
+}
+
+// corsMiddleware adds CORS headers so a browser-based Flutter build can reach
+// the backend. Native mobile clients never send an Origin header and are not
+// subject to any of this — CORS is a browser rule, not a server-side
+// authorization check, and nothing here is what keeps an attacker out. Auth
+// does that.
+//
+// Set ALLOWED_ORIGINS to a comma-separated list of exact origins
+// ("https://app.example.com,https://staging.example.com") to stop answering
+// every website that asks. Leave it unset and the wildcard stands, which is
+// what this service has always sent.
+//
+// Worth knowing why the wildcard has been survivable so far: this API
+// authenticates with a bearer token that the client attaches deliberately,
+// not with a cookie the browser attaches automatically. "Allow-Origin: *"
+// lets any page ASK, but a page that does not have the user's token learns
+// nothing by asking. The day any endpoint starts trusting a cookie, this
+// stops being true and the list becomes mandatory.
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		loadAllowedOrigins()
+
+		if allow, vary := corsAllowOrigin(r.Header.Get("Origin")); allow != "" {
+			w.Header().Set("Access-Control-Allow-Origin", allow)
+			if vary {
+				w.Header().Add("Vary", "Origin")
+			}
+		} else if vary {
+			// Not on the list: no allow header, so the browser refuses. Vary
+			// still matters — without it a shared cache can hand this response
+			// to a DIFFERENT origin that would have been allowed.
+			w.Header().Add("Vary", "Origin")
+		}
+
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 		if r.Method == "OPTIONS" {
@@ -319,6 +453,10 @@ func main() {
 	// Warn loudly (but don't crash) if the session-token signing key is missing,
 	// so it's noticed at boot rather than on the first failed login.
 	checkAuthConfig()
+	// Same idea for the admin surface: warn loudly at boot when the dashboard
+	// credentials are missing or are an obvious placeholder, rather than
+	// letting an unrotated dev password quietly guard /admin/reseed.
+	checkAdminConfig()
 	// Build the challenge-subject autocomplete index. Runs the
 	// curated-vocab + existing-challenge merge in the background so
 	// it doesn't block startup; the handler degrades to the in-binary

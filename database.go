@@ -728,6 +728,12 @@ func runMigrations() {
 		}
 	}
 
+	// Versioned, run-once migrations on top of the idempotent baseline above.
+	// Everything from here on that CHANGES the schema (rather than adding to
+	// it) lives in migrations/*.sql — see schema_migrations.go for why, and
+	// migrations/README.md for how to write one. Fatal on failure by design.
+	applyVersionedMigrations()
+
 	log.Println("Database migrations completed")
 }
 

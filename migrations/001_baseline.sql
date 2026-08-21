@@ -1,0 +1,22 @@
+-- 001_baseline — the line in the sand, not a schema.
+--
+-- Everything that existed before versioned migrations were introduced is
+-- created by runMigrations() in database.go, which runs on every boot and is
+-- idempotent (CREATE TABLE IF NOT EXISTS / ADD COLUMN IF NOT EXISTS). That
+-- code is the baseline. Re-stating those ~30 tables here would mean two
+-- descriptions of the same schema, and the one that drifts silently is always
+-- the one nobody runs.
+--
+-- So this file deliberately does nothing. Recording it as applied is what
+-- gives every later migration a version to count from.
+--
+-- A previous migrations/001_init.sql tried to be a real schema and was both
+-- incomplete (5 tables of ~30) and broken — it declared `author id` instead of
+-- `author_id`, so it would have failed on its first statement had anything
+-- ever executed it. Nothing did. It was removed rather than repaired: the
+-- honest fix for a second, drifting description of the schema is to not keep
+-- one.
+--
+-- Write new changes as 002_*.sql, 003_*.sql and so on. See README.md here.
+
+SELECT 1;
