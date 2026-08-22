@@ -12,10 +12,15 @@ package main
 // permanently. So new content needs to be SHOWN before it can be judged, and
 // showing it costs a slot that a known-good video would otherwise have.
 //
-// That trade is what an audition is. Until a video reaches auditionViewTarget
-// views it is "under audition": it gets exploration impressions so its real
-// performance can be measured, and it graduates automatically once there are
-// enough views to judge it on.
+// That trade is what an audition is. A new video is "under audition" while it
+// is still being tried out: it gets exploration impressions so its real
+// performance can be measured, and it leaves the audition on its own once there
+// is an answer about it.
+//
+// This file decides HOW MANY of those impressions each page gives away, WHO
+// should get them, and how the waiting queue is reached at all. What each video
+// COSTS — a small crowd first, a bigger one only if the small one liked it — is
+// audition_ladder.go.
 //
 // ════════════════════════════════════════════════════════════════════════════════
 // WHY THE OLD SHAPE RAN OUT
@@ -118,10 +123,15 @@ var (
 
 // auditionBacklog counts videos still waiting to be measured.
 //
-// Deliberately counts every under-viewed video regardless of age, matching
-// what sourceAudition can actually reach — a backlog number that counted only
-// recent uploads would shrink to nothing while a real queue sat behind it, and
-// the slot count would fall exactly when it was most needed.
+// Deliberately counts every waiting video regardless of age, matching what
+// sourceAudition can actually reach — a backlog number that counted only recent
+// uploads would shrink to nothing while a real queue sat behind it, and the
+// slot count would fall exactly when it was most needed.
+//
+// "Waiting" means still on the ladder (see audition_ladder.go), not simply
+// under-viewed. A video that was tried on a matched crowd and did not land is
+// not waiting for anything — counting it would inflate the backlog forever and
+// hand more and more of every page to video that has already had its answer.
 func auditionBacklog() int {
 	auditionBacklogMu.Lock()
 	defer auditionBacklogMu.Unlock()
@@ -136,7 +146,7 @@ func auditionBacklog() int {
 		SELECT COUNT(*) FROM challenges
 		WHERE visibility = 'arena'
 		  AND status IN ('open','active','completed')
-		  AND views < $1`, auditionViewTarget).Scan(&n)
+		  AND audition_state = $1`, auditionStateActive).Scan(&n)
 	if err != nil {
 		// Keep the last good reading rather than collapsing to zero. Zero
 		// would switch auditions off entirely, which is the worst response to
@@ -347,11 +357,11 @@ func injectAuditionContent(scored []ScoredItem, composed []ScoredItem, slots int
 //
 // Nothing ever said an audition times out. It timed out anyway.
 //
-// Eligibility is "under auditionViewTarget views", with no mention of age. But
-// a video only gets scored if some retrieval lane returned it, and every lane
-// walks a bounded recency window ordered newest-first. A video that missed its
-// chance in its first days stops being returned by any of them, and its
-// permanent eligibility becomes permanently theoretical.
+// Eligibility is "still on the ladder", with no mention of age. But a video
+// only gets scored if some retrieval lane returned it, and every lane walks a
+// bounded recency window ordered newest-first. A video that missed its chance
+// in its first days stops being returned by any of them, and its permanent
+// eligibility becomes permanently theoretical.
 //
 // This lane closes that gap: under-viewed content of ANY age, ordered by how
 // long it has been waiting. It is how a video posted last month can still
@@ -374,6 +384,13 @@ const auditionSourceWeight = 0.05
 // and is the entire point: the video that has been waiting longest is the one
 // most in danger of never being seen. Newer uploads are already well served by
 // the recency lane.
+//
+// The filter is audition_state, not a raw view count: a video that has been
+// tried and did not land stops riding this lane, so its share of it goes to
+// something that has not had its turn yet. That is the trade the ladder makes —
+// see audition_ladder.go. Retiring is not removal; the video is still in the
+// app, still reachable by every other lane, and gets another full run a month
+// later.
 func sourceAudition(userID string, limit int) []HomeFeedItem {
 	if db == nil || limit <= 0 {
 		return nil
@@ -390,10 +407,10 @@ func sourceAudition(userID string, limit int) []HomeFeedItem {
 			ON cl.challenge_id = c.id
 		WHERE c.visibility = 'arena'
 		AND c.status IN ('open','active','completed')
-		AND c.views < $3
+		AND c.audition_state = $3
 		AND c.creator_id != CAST($1 AS INT)
 		ORDER BY c.created_at ASC
-		LIMIT $2`, userID, limit, auditionViewTarget)
+		LIMIT $2`, userID, limit, auditionStateActive)
 	if err != nil {
 		return nil // fail quiet: one lane returning nothing never breaks a feed
 	}

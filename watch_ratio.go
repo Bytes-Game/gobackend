@@ -123,6 +123,7 @@ func wrPredictBonus(cohort Cohort, breakdown map[string]float64) float64 {
 		}
 	}
 	center := m.MeanRatio
+	samples := m.Samples
 	watchRatio.mu.RUnlock()
 	pred := 1.0 / (1.0 + math.Exp(-z))
 	if center <= 0 || center >= 1 {
@@ -150,7 +151,15 @@ func wrPredictBonus(cohort Cohort, breakdown map[string]float64) float64 {
 	} else if delta < -1 {
 		delta = -1
 	}
-	return wrMaxBonus * delta
+	// Scale by how much of its budget this head has earned. It used to jump
+	// from nothing to the full wrMaxBonus on the single sample that crossed
+	// wrMinSamples, and then stay there forever however much better it got.
+	//
+	// This head earns on volume alone, because the accuracy tracker follows the
+	// engagement prediction rather than the watch-time one. That is the weaker
+	// test, so learnedGainByVolume tops out at half — a head nobody is checking
+	// does not get to overrule the rest on its own. See learned_authority.go.
+	return wrMaxBonus * learnedGainByVolume(samples, wrMinSamples) * delta
 }
 
 // wrObserve records a (breakdown, watch_ratio) sample and SGD-updates the

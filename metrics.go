@@ -143,6 +143,28 @@ var (
 		},
 	)
 
+	// How many videos actually got a verdict. This is the throughput number the
+	// whole audition ladder exists to raise: if it sits below the upload rate,
+	// videos are piling up unjudged no matter how healthy everything else looks.
+	metricAuditionReviewed = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "devf_audition_reviewed_total",
+			Help: "Videos judged at the end of an audition rung.",
+		},
+	)
+
+	// How many of those verdicts were "stop here". This is what pays for the
+	// throughput — each retirement frees the rest of that video's audience for
+	// the next one in the queue. Near zero means the ladder is not saving
+	// anything; near the reviewed count means the bar is cutting almost
+	// everyone.
+	metricAuditionRetired = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "devf_audition_retired_total",
+			Help: "Videos that finished a rung below the bar and stopped taking audition slots.",
+		},
+	)
+
 	// ── MMR diversity re-rank ────────────────────────────────────────────────
 	metricMMRReranks = prometheus.NewCounter(
 		prometheus.CounterOpts{
@@ -282,6 +304,8 @@ func registerMetrics() {
 		metricSeenMarks,
 		metricSeenFiltered,
 		metricAuditionInjected,
+		metricAuditionReviewed,
+		metricAuditionRetired,
 		metricMMRReranks,
 		metricPlattFits,
 		metricCandidateSource,
