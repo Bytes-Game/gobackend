@@ -5048,6 +5048,10 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// Only honored on page=1 — refresh on a later page would either show a
 	// duplicate of page 1 or be confusing UI behavior.
 	refresh := r.URL.Query().Get("refresh") == "true"
+	// What this phone can actually decode, in pixels on the longer side. Absent
+	// (every client older than this parameter) means no constraint. See
+	// device_fit.go — the feed fixes what it can before it drops anything.
+	deviceMax := parseDeviceMaxLongSide(r.URL.Query().Get(deviceMaxLongSideParam))
 
 	if userID == "" {
 		http.Error(w, `{"error":"userId is required"}`, http.StatusBadRequest)
@@ -5145,6 +5149,11 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		// feed_kind_spacing.go — a brand-new user is exactly the cohort
 		// that was being shown eight shorts before their first battle.
 		items = spaceOutFeedKinds(items)
+
+		// Last step before encoding: make every item playable on the phone
+		// that asked. AFTER finalizeFeedItems so the adaptive-streaming check
+		// sees the manifest URLs it just filled in.
+		items = applyDeviceFit(items, deviceMax)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -5584,6 +5593,11 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		composed = injectSuggestedAccountsCard(userID, page, composed)
 	}
 
+	// Make every item playable on the phone that asked. Last thing before the
+	// payload is built, so it sees the fully enriched item — in particular the
+	// manifest URL, which is what lets an adaptive item skip this entirely.
+	composed = applyDeviceFitScored(composed, deviceMax)
+
 	// Strip debug info if not requested. Note: the entry includes every
 	// possible inner pointer, but Go's JSON encoder skips nil pointers when
 	// the struct field is omitempty — except map values are never omitted.
@@ -5704,6 +5718,10 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 	// Page 1 only: refreshing on a later page would reshuffle under the
 	// user mid-scroll.
 	refresh := r.URL.Query().Get("refresh") == "true"
+	// What this phone can actually decode, in pixels on the longer side. Absent
+	// (every client older than this parameter) means no constraint. See
+	// device_fit.go — the feed fixes what it can before it drops anything.
+	deviceMax := parseDeviceMaxLongSide(r.URL.Query().Get(deviceMaxLongSideParam))
 	sessionID := r.URL.Query().Get("sessionId")
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%s_%d", userID, time.Now().Unix()/1800)
@@ -5811,6 +5829,10 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 	// kind, and both kinds keep their own newest-first order inside the
 	// page — the same shape as the seen-aware pass just above.
 	items = spaceOutFeedKinds(items)
+
+	// Make every item playable on the phone that asked. After the enrichment
+	// above, so the adaptive-streaming check sees the manifest URLs.
+	items = applyDeviceFit(items, deviceMax)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{

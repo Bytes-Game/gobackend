@@ -73,6 +73,10 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// in a row. It does not forget what the user has watched — see
 	// applyRefreshSignal.
 	refresh := r.URL.Query().Get("refresh") == "true"
+	// What this phone can actually decode, in pixels on the longer side. Absent
+	// (every client older than this parameter) means no constraint. See
+	// device_fit.go — the feed fixes what it can before it drops anything.
+	deviceMax := parseDeviceMaxLongSide(r.URL.Query().Get(deviceMaxLongSideParam))
 
 	// markShown=false asks us to serve the page WITHOUT recording an
 	// impression against it.
@@ -267,6 +271,10 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// Shared enrichment choke point — same as For You / Following.
 	finalizeFeedItemsScored(composed)
 	composed = spaceOutFeedKindsScored(composed)
+
+	// Make every item playable on the phone that asked. After the enrichment
+	// above, so the adaptive-streaming check sees the manifest URLs.
+	composed = applyDeviceFitScored(composed, deviceMax)
 
 	// Response shape matches SmartFeedHandler so the Flutter widget reuses
 	// the same parsing path.

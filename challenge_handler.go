@@ -78,10 +78,32 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Size gate. The bytes went straight from the phone to object storage
+	// without passing through here, so this is the first moment the server can
+	// find out what was actually uploaded — see video_probe.go. The app shrinks
+	// video before sending, but that promise is made by code on someone else's
+	// device, and a profile run caught files named "720p.mp4" that were really
+	// 1920x1080. Serving one of those to a cheap phone is how a feed freezes on
+	// hardware we never tested.
+	//
+	// Fails open: an unreachable probe allows the upload. Only a positive
+	// measurement over the ceiling refuses.
+	refusal, dims, measured := gateUpload(payload.VideoURL)
+	if refusal != "" {
+		log.Printf("rejected oversized challenge video from %s: %s", payload.CreatorID, dims)
+		http.Error(w, refusal, http.StatusRequestEntityTooLarge)
+		return
+	}
+
 	challenge, err := CreateChallenge(payload)
 	if err != nil {
 		http.Error(w, "Failed to create challenge: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// Keep what the gate measured. The row is already published and useful
+	// without it, so this is off the response path.
+	if measured {
+		go recordVideoDimensions("challenge", challenge.ID, dims)
 	}
 
 	// Notify friends if visibility is friends.
@@ -179,11 +201,11 @@ func GetChallengeDetailHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"challenge":      challenge,
-		"responses":      responses,
-		"votes":          votes,
-		"canAccept":      canAccept,
-		"leagueMessage":  leagueMsg,
+		"challenge":     challenge,
+		"responses":     responses,
+		"votes":         votes,
+		"canAccept":     canAccept,
+		"leagueMessage": leagueMsg,
 	})
 }
 
@@ -225,10 +247,23 @@ func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Same size gate as challenge creation. A battle's second video is
+	// decoded on the same phones as its first — often BOTH at once during a
+	// flip — so it cannot be held to a looser standard. See video_probe.go.
+	refusal, dims, measured := gateUpload(payload.VideoURL)
+	if refusal != "" {
+		log.Printf("rejected oversized response video from %s: %s", payload.ResponderID, dims)
+		http.Error(w, refusal, http.StatusRequestEntityTooLarge)
+		return
+	}
+
 	response, err := AcceptChallenge(payload)
 	if err != nil {
 		http.Error(w, "Failed to accept challenge: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if measured {
+		go recordVideoDimensions("response", response.ID, dims)
 	}
 
 	// Notify the challenger that someone accepted.
