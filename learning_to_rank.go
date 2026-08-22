@@ -26,7 +26,9 @@ import (
 // engaged (like/share/rewatch), 0 if they skipped or bounced.
 //
 // SAFETY:
-//  - Delta is bounded to ±ltrMaxDelta so a bad update can't capsize the feed.
+//  - Delta is bounded to ±ltrDeltaCeiling so a bad update can't capsize the
+//    feed, and a model only reaches that ceiling by having seen a great deal
+//    and been right about it — see learned_authority.go.
 //  - Learning rate is small and scales down over time (1/√updates).
 //  - If we have no data for a cohort, delta is 0 (ranker falls back to base).
 //
@@ -34,7 +36,7 @@ import (
 // on boot and flushed every 5 minutes.
 
 const (
-	ltrMaxDelta      = 0.25  // Hard cap on LTR correction
+	ltrMaxDelta      = 0.25  // Correction a model at gain 1 may apply — see learned_authority.go
 	ltrLearningRate  = 0.02  // Base step size; scaled down by 1/√updates
 	ltrFlushInterval = 5 * time.Minute
 	ltrRedisKey      = "ltr:weights:"
@@ -110,31 +112,66 @@ func ltrEnsureLoaded() {
 // plattCalibrate — never the bounded delta from ltrScoreDelta, which would be a
 // train/serve scale mismatch that pins the calibrated bonus near a constant.
 func ltrRawLogit(cohort Cohort, breakdown map[string]float64) (float64, bool) {
+	z, _, ok := ltrRawLogitWithSamples(cohort, breakdown)
+	return z, ok
+}
+
+// ltrWarmupSamples is the point below which the model has seen too little for
+// its opinion to be worth having at all.
+const ltrWarmupSamples = 20
+
+// ltrDeltaCeiling is the most this head can ever move an item, reached only by
+// a model that has seen a great deal and been right about it.
+//
+// Stated as a constant rather than left implied by two other constants
+// multiplied together, because "how far can the learned part move the feed" is
+// the first question anybody asks about a ranker and it should have an answer
+// that can be read rather than derived.
+const ltrDeltaCeiling = ltrMaxDelta * learnedAuthorityMaxGain
+
+// ltrRawLogitWithSamples is ltrRawLogit plus how much the model has learned.
+//
+// The sample count comes back from the same locked read that produces the
+// logit, because callers need both together and a second lock per candidate
+// per page would be pure waste. What the count is FOR is deciding how much of
+// its budget this head has earned — see learned_authority.go.
+func ltrRawLogitWithSamples(cohort Cohort, breakdown map[string]float64) (z float64, samples int, ok bool) {
 	ltrEnsureLoaded()
 	ltr.mu.RLock()
-	m, ok := ltr.byCoh[cohort]
-	ltr.mu.RUnlock()
-	if !ok || m == nil || m.Updates < 20 {
-		return 0, false // Not enough data yet — don't add noise
+	m, exists := ltr.byCoh[cohort]
+	if !exists || m == nil || m.Updates < ltrWarmupSamples {
+		ltr.mu.RUnlock()
+		return 0, 0, false // Not enough data yet — don't add noise
 	}
-	z := m.Bias
+	samples = m.Updates
+	z = m.Bias
 	for _, k := range ltrFeatureKeys {
 		if v, ok := breakdown[k]; ok {
 			z += m.Weights[k] * v
 		}
 	}
-	return z, true
+	ltr.mu.RUnlock()
+	return z, samples, true
 }
 
 // ltrScoreDelta returns a bounded correction that scoreForUser adds on top.
 // Read path — hot path, must be fast.
 func ltrScoreDelta(cohort Cohort, breakdown map[string]float64) float64 {
-	z, ok := ltrRawLogit(cohort, breakdown)
+	z, samples, ok := ltrRawLogitWithSamples(cohort, breakdown)
 	if !ok {
 		return 0
 	}
-	// Map logit to [-ltrMaxDelta, +ltrMaxDelta] via scaled tanh.
-	return ltrMaxDelta * math.Tanh(z)
+	// Map logit to ±ltrMaxDelta via scaled tanh, then scale by how much of that
+	// budget this model has actually earned.
+	//
+	// ltrMaxDelta used to be the whole story: the moment a cohort crossed its
+	// warmup line the model was handed the full correction, and it never got any
+	// more however much it went on to learn. Now it starts near nothing and
+	// grows with evidence and accuracy together, so a model that has seen a lot
+	// and been right about it can outweigh rules that were guessed at before
+	// launch — and one that has seen thirty samples cannot. See
+	// learned_authority.go.
+	return ltrMaxDelta * learnedGain(cohort, samples, ltrWarmupSamples) * math.Tanh(z)
 }
 
 // ltrObserve records a (breakdown, label) pair and updates the cohort's model.

@@ -131,6 +131,26 @@ func bayesianRecord(cohort Cohort, predicted, actual float64) {
 	s.observeBayesian(predicted, actual)
 }
 
+// bayesianResidual reports how wrong this cohort's engagement predictions have
+// been: the average signed miss, and the spread around it.
+//
+// The store already tracks both, for exploration. Reading them for a second
+// question — not "how unsure is this model" but "has it been right" — is what
+// lets a learned head earn its influence rather than be handed it. See
+// learned_authority.go.
+//
+// ok is false until there are enough samples for the numbers to mean anything.
+func bayesianResidual(cohort Cohort) (mean, variance float64, ok bool) {
+	bayesianEnsureLoaded()
+	bayesianLTR.mu.RLock()
+	defer bayesianLTR.mu.RUnlock()
+	s, exists := bayesianLTR.byCoh[cohort]
+	if !exists || s == nil || s.N < bayesianMinSamples {
+		return 0, 0, false
+	}
+	return s.Mean, s.variance(), true
+}
+
 // bayesianUncertaintyBonus returns a Thompson-sampled adjustment based on
 // the current cohort's predictive uncertainty. Used by the ranker to add
 // stochastic exploration where the model is unsure, deterministic

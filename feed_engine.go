@@ -3973,9 +3973,11 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 
 	// ── LEARNING-TO-RANK DELTA (Tier 3.11) ──
 	// Small online-SGD residual that learns which score breakdowns correlate
-	// with completions for this cohort. Adds a bounded correction, never more
-	// than ±0.25 so the hand-tuned base score stays dominant until LTR has
-	// enough evidence.
+	// with completions for this cohort. How far it is allowed to move an item
+	// is not fixed: it starts at nothing and grows as the model sees more and
+	// gets more of its guesses right, up to ±ltrDeltaCeiling. So the hand-written
+	// rules lead while the model is still learning, and a model that has learned
+	// this audience properly can outweigh them. See learned_authority.go.
 	ltrDelta := ltrScoreDelta(cohort, breakdown)
 	breakdown["ltrDelta"] = ltrDelta
 	finalScore += ltrDelta
@@ -3989,10 +3991,14 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// Query the calibrator with the RAW logit z — the scale plattRecord trains
 	// on. Passing the bounded ltrDelta (0.25·tanh(z)) here was a train/serve
 	// mismatch that pinned calibBonus near a constant σ(B), wasting its budget.
-	if z, ok := ltrRawLogit(cohort, breakdown); ok {
+	// Scaled by the same earned authority as the LTR delta, because it is the
+	// same model read a second way — a calibrated reading of a guess that has
+	// not earned its say is still a guess that has not earned its say.
+	if z, samples, ok := ltrRawLogitWithSamples(cohort, breakdown); ok {
 		p := plattCalibrate(z)
-		// Centre around 0.5 so p≈0.5 contributes nothing, p≈1 adds ~+0.15.
-		calibBonus := (p - 0.5) * 0.30
+		// Centre around 0.5 so p≈0.5 contributes nothing, p≈1 adds ~+0.15 at a
+		// gain of 1, more once the model has earned it.
+		calibBonus := (p - 0.5) * 0.30 * learnedGain(cohort, samples, ltrWarmupSamples)
 		breakdown["calibBonus"] = calibBonus
 		finalScore += calibBonus
 	}

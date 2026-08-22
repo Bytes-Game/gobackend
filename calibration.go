@@ -10,8 +10,8 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 // PLATT CALIBRATION for LTR scores.
 //
-// The LTR model outputs a logit — a raw score in roughly [-ltrMaxDelta,
-// +ltrMaxDelta]. That value gets added directly to the base score. But:
+// The LTR model outputs a logit — a raw score on an arbitrary scale, which is
+// mapped into a bounded correction and added to the base score. But:
 //
 //   * raw logits are *not* probabilities
 //   * their scale can drift as the model trains

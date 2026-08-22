@@ -56,26 +56,69 @@ func TestLTR_NoDataReturnsZeroDelta(t *testing.T) {
 	}
 }
 
-func TestLTR_DeltaBounded(t *testing.T) {
+// deltaWithUpdates forces a model that is as certain as arithmetic allows and
+// asks what it is permitted to move an item by. Everything about the model is
+// held fixed except how much it has seen, so the only thing the returned number
+// can vary with is earned authority.
+func deltaWithUpdates(t *testing.T, updates int) float64 {
+	t.Helper()
 	resetRedis(t)
 	resetLTR()
-	// Force a big positive model manually — delta must still be bounded.
 	ltrEnsureLoaded()
 	ltr.mu.Lock()
 	ltr.byCoh[CohortEngaged] = &ltrModel{
 		Weights: map[string]float64{"quality": 100},
 		Bias:    50,
-		Updates: 500,
+		Updates: updates,
 	}
 	ltr.mu.Unlock()
-	bd := map[string]float64{"quality": 10}
-	got := ltrScoreDelta(CohortEngaged, bd)
-	if got > ltrMaxDelta+1e-9 || got < -ltrMaxDelta-1e-9 {
-		t.Errorf("delta must be bounded to ±%v, got %v", ltrMaxDelta, got)
+	// The skill reading is cached per cohort, and these cases run back to back
+	// inside the TTL. Clear it so each case is measured, not remembered.
+	learnedSkillMu.Lock()
+	learnedSkillCache = map[Cohort]learnedSkillEntry{}
+	learnedSkillMu.Unlock()
+	return ltrScoreDelta(CohortEngaged, map[string]float64{"quality": 10})
+}
+
+func TestLTR_DeltaBounded(t *testing.T) {
+	// However certain the model and however much it has seen, it cannot move an
+	// item further than the ceiling. This is the guardrail that stops one bad
+	// training run from capsizing the feed.
+	for _, updates := range []int{500, 50_000, 5_000_000} {
+		got := deltaWithUpdates(t, updates)
+		if got > ltrDeltaCeiling+1e-9 || got < -ltrDeltaCeiling-1e-9 {
+			t.Errorf("with %d updates, delta %v breaks the ±%v ceiling",
+				updates, got, ltrDeltaCeiling)
+		}
 	}
-	// Also that the bound is approached (very large logit → near max).
-	if got < ltrMaxDelta*0.9 {
-		t.Errorf("large positive logit should approach max delta, got %v", got)
+}
+
+func TestLTR_DeltaGrowsWithEvidence(t *testing.T) {
+	// The property this replaced: the model used to be handed its whole budget
+	// on the sample that crossed the warmup line and never got any more. A
+	// barely-warmed model and a heavily-trained one had exactly the same say.
+	barely := deltaWithUpdates(t, 100)
+	trained := deltaWithUpdates(t, 50_000)
+	if barely >= trained {
+		t.Errorf("a model with 100 samples was allowed %v and one with 50,000 was "+
+			"allowed %v — a head must earn its influence, not be handed it at warmup",
+			barely, trained)
+	}
+	if barely > ltrDeltaCeiling*0.25 {
+		t.Errorf("a model with 100 samples was allowed %v, which is most of the "+
+			"±%v ceiling — it has memorised noise and should barely count",
+			barely, ltrDeltaCeiling)
+	}
+}
+
+func TestLTR_AWellTrainedModelReachesItsCeiling(t *testing.T) {
+	// The other half: earning authority has to actually be possible. If the ramp
+	// never got near the top, the learned part would be permanently outvoted by
+	// rules guessed at before launch, which is the thing being fixed.
+	got := deltaWithUpdates(t, 5_000_000)
+	if got < ltrDeltaCeiling*0.9 {
+		t.Errorf("a model with five million samples and a huge logit was allowed "+
+			"only %v of the ±%v ceiling", got, ltrDeltaCeiling)
 	}
 }
 
