@@ -139,8 +139,39 @@ func AdminFeedHealthHandler(w http.ResponseWriter, r *http.Request) {
 		return map[string]any{"value": value, "status": status, "note": note}
 	}
 
+	// The audition queue: how much unproven content is waiting, and how much of
+	// it has been waiting a long time.
+	//
+	// These two numbers are what tells you whether new uploads are getting
+	// their turn. The slot count that decides how much of each page goes to
+	// unproven video scales off the first one, and the second is the one to
+	// actually watch: a backlog that is large but young is a busy day, while a
+	// backlog full of week-old videos is content that arrived, was never shown
+	// enough to be judged, and is quietly stuck.
+	var auditionWaiting, auditionStale int
+	_ = db.QueryRow(`
+		SELECT
+			COUNT(*),
+			COUNT(*) FILTER (WHERE created_at < NOW() - INTERVAL '7 days')
+		FROM challenges
+		WHERE visibility = 'arena'
+		  AND status IN ('open','active','completed')
+		  AND views < $1`, auditionViewTarget).Scan(&auditionWaiting, &auditionStale)
+
 	resp := map[string]any{
-		"window":      window,
+		"window": window,
+		"auditions": map[string]any{
+			"waiting":       auditionWaiting,
+			"waitingOver7d": auditionStale,
+			"viewTarget":    auditionViewTarget,
+			"slotsPerPage":  auditionSlotsForPage(auditionWaiting, defaultPageSize),
+			"note": "waiting = videos with too few views to judge yet. " +
+				"waitingOver7d is the number that matters: a big backlog of NEW " +
+				"uploads is just a busy day, but old ones are videos that never " +
+				"got shown enough to be judged. If waitingOver7d keeps climbing, " +
+				"the per-page audition ceiling is binding and creators are being " +
+				"ignored rather than rejected.",
+		},
 		"activeUsers": activeUsers,
 		"views":       views,
 		"catalogSize": catalog,

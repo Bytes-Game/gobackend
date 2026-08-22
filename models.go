@@ -74,29 +74,29 @@ type Notification struct {
 
 // ChatMessage represents a direct message between two users.
 type ChatMessage struct {
-	ID              string `json:"id"`
-	SenderID        string `json:"senderId"`
-	SenderUsername  string `json:"senderUsername"`
-	ReceiverID      string `json:"receiverId"`
+	ID               string `json:"id"`
+	SenderID         string `json:"senderId"`
+	SenderUsername   string `json:"senderUsername"`
+	ReceiverID       string `json:"receiverId"`
 	ReceiverUsername string `json:"receiverUsername"`
-	Message         string `json:"message"`
-	IsRead          bool   `json:"isRead"`
-	Status          string `json:"status"`
-	ReplyToID       string `json:"replyToId,omitempty"`
-	ReplyToText     string `json:"replyToText,omitempty"`
-	IsEdited        bool   `json:"isEdited"`
-	IsDeleted       bool   `json:"isDeleted"`
-	CreatedAt       string `json:"createdAt"`
+	Message          string `json:"message"`
+	IsRead           bool   `json:"isRead"`
+	Status           string `json:"status"`
+	ReplyToID        string `json:"replyToId,omitempty"`
+	ReplyToText      string `json:"replyToText,omitempty"`
+	IsEdited         bool   `json:"isEdited"`
+	IsDeleted        bool   `json:"isDeleted"`
+	CreatedAt        string `json:"createdAt"`
 }
 
 // Conversation represents a chat thread between two users (for the list view).
 type Conversation struct {
-	UserID       string `json:"userId"`
-	Username     string `json:"username"`
-	League       string `json:"league"`
-	LastMessage  string `json:"lastMessage"`
-	LastTime     string `json:"lastTime"`
-	UnreadCount  int    `json:"unreadCount"`
+	UserID      string `json:"userId"`
+	Username    string `json:"username"`
+	League      string `json:"league"`
+	LastMessage string `json:"lastMessage"`
+	LastTime    string `json:"lastTime"`
+	UnreadCount int    `json:"unreadCount"`
 }
 
 // Post represents a piece of content (video/image short) uploaded by a user.
@@ -116,9 +116,9 @@ type Post struct {
 	IsLiked        bool     `json:"isLiked"`
 	LikedBy        []string `json:"likedBy,omitempty"`
 	// Content understanding fields
-	Category       string   `json:"category"`              // Primary category
-	EmotionTags    []string `json:"emotionTags,omitempty"`  // Emotion labels
-	EnergyLevel    string   `json:"energyLevel"`            // "low","medium","high"
+	Category    string   `json:"category"`              // Primary category
+	EmotionTags []string `json:"emotionTags,omitempty"` // Emotion labels
+	EnergyLevel string   `json:"energyLevel"`           // "low","medium","high"
 }
 
 // FeedResponse wraps the paginated feed.
@@ -169,12 +169,12 @@ type VideoVariants map[string]string
 
 // challenge represents an open challenge created by a user.
 type Challenge struct {
-	ID              string         `json:"id"`
-	CreatorID       string         `json:"creatorId"`
-	CreatorUsername string         `json:"creatorUsername"`
-	CreatorLeague   string         `json:"creatorLeague"`
-	VideoURL        string         `json:"videoUrl"`
-	VideoVariants   VideoVariants  `json:"videoVariants,omitempty"`
+	ID              string        `json:"id"`
+	CreatorID       string        `json:"creatorId"`
+	CreatorUsername string        `json:"creatorUsername"`
+	CreatorLeague   string        `json:"creatorLeague"`
+	VideoURL        string        `json:"videoUrl"`
+	VideoVariants   VideoVariants `json:"videoVariants,omitempty"`
 	// HLS master manifest URL (.m3u8). Set by the background transcode
 	// worker once it has produced the segmented bitrate ladder for this
 	// challenge. When non-empty, the client should prefer this over
@@ -183,27 +183,44 @@ type Challenge struct {
 	// finished yet (or isn't deployed in this env) — clients fall back
 	// to the per-bitrate MP4 path automatically. omitempty keeps the
 	// payload tight for the (eventually rare) legacy case.
-	HLSManifestURL  string         `json:"hlsManifestUrl,omitempty"`
-	ThumbnailURL    string         `json:"thumbnailUrl,omitempty"`
-	Prefix          string   `json:"prefix"`              // "Who is better", "Which is best", etc.
-	Subject         string   `json:"subject"`             // "Dancer", "Painting", etc.
-	Visibility      string   `json:"visibility"`          // "arena" or "friends"
-	VisibleTo       []string `json:"visibleTo,omitempty"` // friends IDs (empty = all friends)
-	Status          string   `json:"status"`              // "open", "active", "completed", "expired"
-	Likes           int      `json:"likes"`
-	Views           int      `json:"views"`
+	HLSManifestURL string   `json:"hlsManifestUrl,omitempty"`
+	ThumbnailURL   string   `json:"thumbnailUrl,omitempty"`
+	Prefix         string   `json:"prefix"`              // "Who is better", "Which is best", etc.
+	Subject        string   `json:"subject"`             // "Dancer", "Painting", etc.
+	Visibility     string   `json:"visibility"`          // "arena" or "friends"
+	VisibleTo      []string `json:"visibleTo,omitempty"` // friends IDs (empty = all friends)
+	Status         string   `json:"status"`              // "open", "active", "completed", "expired"
+	Likes          int      `json:"likes"`
+	Views          int      `json:"views"`
 	// Live count of comments on this challenge. Computed from
 	// challenge_comments at the feed-handler boundary so the reels right-rail
 	// can render the same digit the comment sheet shows. Omitempty keeps the
 	// payload tight for legacy callers that haven't started reading it.
-	CommentCount    int      `json:"commentCount,omitempty"`
-	CreatedAt       string   `json:"createdAt"`
-	ExpiresAt       string   `json:"expiresAt"`
-	ResponseCount   int      `json:"responseCount"`
+	CommentCount  int    `json:"commentCount,omitempty"`
+	CreatedAt     string `json:"createdAt"`
+	ExpiresAt     string `json:"expiresAt"`
+	ResponseCount int    `json:"responseCount"`
+	// Repeat says this is something the viewer has already been shown.
+	//
+	// The feed does not remove what you have seen; it ranks it down and only
+	// serves it once there is nothing fresher left. That is deliberate — a hard
+	// filter used to make the feed announce it had ended when it had not.
+	//
+	// But the client could not tell a genuine re-serve from a bug, so it deleted
+	// every duplicate it saw. Two systems answering the same question, and they
+	// disagreed: the server sent 21 items and the app kept none, which cost a
+	// round trip and left the page short.
+	//
+	// So the server says so out loud. The client may label it ("Watch again"),
+	// space it out, or ignore it — what it must not do is delete it, because
+	// deciding what you see is the server's job alone.
+	//
+	// omitempty: absent means fresh, which is the overwhelmingly common case.
+	Repeat bool `json:"repeat,omitempty"`
 	// Content understanding fields (creator-declared + system-inferred)
-	Category        string   `json:"category"`             // Primary: "comedy","motivation","sports","dance","music",etc.
-	EmotionTags     []string `json:"emotionTags,omitempty"` // ["happy","intense","inspiring"]
-	EnergyLevel     string   `json:"energyLevel"`           // "low","medium","high"
+	Category    string   `json:"category"`              // Primary: "comedy","motivation","sports","dance","music",etc.
+	EmotionTags []string `json:"emotionTags,omitempty"` // ["happy","intense","inspiring"]
+	EnergyLevel string   `json:"energyLevel"`           // "low","medium","high"
 
 	// Top response fields — populated by populateTopResponses() at the
 	// feed-handler boundary for any challenge with responseCount > 0. Lets
@@ -239,12 +256,12 @@ type Challenge struct {
 // Type values:
 //   - "challenge"         → Challenge populated
 //   - "post"              → Post populated (legacy; the home reels feed no
-//                            longer emits these but the type is kept so test
-//                            fixtures and any external callers still parse)
+//     longer emits these but the type is kept so test
+//     fixtures and any external callers still parse)
 //   - "suggestedAccounts" → SuggestedAccounts populated. Rendered by the
-//                            client as a non-video card showing 3–5 user
-//                            follow suggestions, interleaved into the feed
-//                            every ~8 items in TikTok / Instagram style.
+//     client as a non-video card showing 3–5 user
+//     follow suggestions, interleaved into the feed
+//     every ~8 items in TikTok / Instagram style.
 type HomeFeedItem struct {
 	Type              string                 `json:"type"`
 	Challenge         *Challenge             `json:"challenge,omitempty"`
@@ -278,31 +295,31 @@ type SuggestedAccount struct {
 type SuggestedAccountsCard struct {
 	// Stable card ID so the client can dedupe across pages and so analytics
 	// can attribute card-level events. Built as "sa_<userID>_<page>".
-	ID      string             `json:"id"`
-	Title   string             `json:"title"`  // e.g. "Accounts you might like"
-	Reason  string             `json:"reason"` // e.g. "Based on who you follow"
-	Users   []SuggestedAccount `json:"users"`
+	ID     string             `json:"id"`
+	Title  string             `json:"title"`  // e.g. "Accounts you might like"
+	Reason string             `json:"reason"` // e.g. "Based on who you follow"
+	Users  []SuggestedAccount `json:"users"`
 }
 
 // ChallengeResponse represents someone accepting and responding to a challenge.
 type ChallengeResponse struct {
-	ID                string         `json:"id"`
-	ChallengeID       string         `json:"challengeId"`
-	ResponderID       string         `json:"responderId"`
-	ResponderUsername string         `json:"responderUsername"`
-	ResponderLeague   string         `json:"responderLeague"`
-	VideoURL          string         `json:"videoUrl"`
-	VideoVariants     VideoVariants  `json:"videoVariants,omitempty"`
-	ThumbnailURL      string         `json:"thumbnailUrl,omitempty"`
-	Likes             int     `json:"likes"`
-	Views             int     `json:"views"`
-	CreatedAt         string  `json:"createdAt"`
+	ID                string        `json:"id"`
+	ChallengeID       string        `json:"challengeId"`
+	ResponderID       string        `json:"responderId"`
+	ResponderUsername string        `json:"responderUsername"`
+	ResponderLeague   string        `json:"responderLeague"`
+	VideoURL          string        `json:"videoUrl"`
+	VideoVariants     VideoVariants `json:"videoVariants,omitempty"`
+	ThumbnailURL      string        `json:"thumbnailUrl,omitempty"`
+	Likes             int           `json:"likes"`
+	Views             int           `json:"views"`
+	CreatedAt         string        `json:"createdAt"`
 	// Validation + community moderation fields
-	DurationMs        int     `json:"durationMs,omitempty"`
-	Caption           string  `json:"caption,omitempty"`
-	RelevanceScore    float64 `json:"relevanceScore,omitempty"`
-	OffTopicFlags     int     `json:"offTopicFlags,omitempty"`
-	IsHidden          bool    `json:"isHidden,omitempty"`
+	DurationMs     int     `json:"durationMs,omitempty"`
+	Caption        string  `json:"caption,omitempty"`
+	RelevanceScore float64 `json:"relevanceScore,omitempty"`
+	OffTopicFlags  int     `json:"offTopicFlags,omitempty"`
+	IsHidden       bool    `json:"isHidden,omitempty"`
 }
 
 // CreateChallengePayload is the request body for creating a challenge.
@@ -313,35 +330,35 @@ type CreateChallengePayload struct {
 	ThumbnailURL  string        `json:"thumbnailUrl"`
 	Prefix        string        `json:"prefix"`
 	Subject       string        `json:"subject"`
-	Visibility    string        `json:"visibility"`   // "arena" or "friends"
-	VisibleTo     []string      `json:"visibleTo"`    // friend IDs (empty = all)
-	Category      string        `json:"category"`     // "comedy","motivation","sports","dance",etc.
-	EmotionTags   []string      `json:"emotionTags"`  // ["happy","intense","inspiring"]
-	EnergyLevel   string        `json:"energyLevel"`  // "low","medium","high"
+	Visibility    string        `json:"visibility"`  // "arena" or "friends"
+	VisibleTo     []string      `json:"visibleTo"`   // friend IDs (empty = all)
+	Category      string        `json:"category"`    // "comedy","motivation","sports","dance",etc.
+	EmotionTags   []string      `json:"emotionTags"` // ["happy","intense","inspiring"]
+	EnergyLevel   string        `json:"energyLevel"` // "low","medium","high"
 }
 
 // ContentCategory defines the available categories for content.
 // Categories help the recommendation engine understand what kind of content
 // a video is, so it can match it to users who enjoy that type.
 var ContentCategories = []string{
-	"comedy",       // Funny, humor, roasts, pranks, memes
-	"motivation",   // Inspirational, discipline, success, hustle
-	"sports",       // Athletic skills, sports challenges, fitness
-	"dance",        // Choreography, dance battles, freestyle
-	"music",        // Singing, instruments, beatbox, rap
-	"gaming",       // Gameplay, esports, game challenges
-	"art",          // Drawing, painting, creative crafts
-	"education",    // Tutorials, how-to, skill teaching
-	"story",        // Vlogs, storytime, personal experiences
-	"fashion",      // Style, beauty, outfit challenges
-	"food",         // Cooking, food challenges, recipes
-	"horror",       // Scary, thriller, creepy content
-	"emotional",    // Sad, heartfelt, deep emotional content
-	"lifestyle",    // Day in life, routines, wellness
-	"tech",         // Technology, coding, gadgets
-	"prank",        // Pranks, social experiments
-	"news",         // Commentary, opinions, current events
-	"other",        // Anything that doesn't fit above
+	"comedy",     // Funny, humor, roasts, pranks, memes
+	"motivation", // Inspirational, discipline, success, hustle
+	"sports",     // Athletic skills, sports challenges, fitness
+	"dance",      // Choreography, dance battles, freestyle
+	"music",      // Singing, instruments, beatbox, rap
+	"gaming",     // Gameplay, esports, game challenges
+	"art",        // Drawing, painting, creative crafts
+	"education",  // Tutorials, how-to, skill teaching
+	"story",      // Vlogs, storytime, personal experiences
+	"fashion",    // Style, beauty, outfit challenges
+	"food",       // Cooking, food challenges, recipes
+	"horror",     // Scary, thriller, creepy content
+	"emotional",  // Sad, heartfelt, deep emotional content
+	"lifestyle",  // Day in life, routines, wellness
+	"tech",       // Technology, coding, gadgets
+	"prank",      // Pranks, social experiments
+	"news",       // Commentary, opinions, current events
+	"other",      // Anything that doesn't fit above
 }
 
 // EmotionLabels are the available emotion tags for content.
@@ -369,12 +386,12 @@ var EmotionLabels = []string{
 // MoodTags represent the user's mood context — used to match
 // content emotion to what the user NEEDS right now.
 var MoodTags = []string{
-	"bored",       // Needs stimulation — serve high-energy, funny, surprising
-	"stressed",    // Needs relief — serve chill, funny, satisfying
-	"confident",   // Riding high — serve challenges, intense, competitive
-	"lonely",      // Needs connection — serve social, wholesome, romantic
-	"motivated",   // In the zone — serve inspiring, intense, empowering
-	"relaxed",     // Taking it easy — serve chill, funny, satisfying
+	"bored",     // Needs stimulation — serve high-energy, funny, surprising
+	"stressed",  // Needs relief — serve chill, funny, satisfying
+	"confident", // Riding high — serve challenges, intense, competitive
+	"lonely",    // Needs connection — serve social, wholesome, romantic
+	"motivated", // In the zone — serve inspiring, intense, empowering
+	"relaxed",   // Taking it easy — serve chill, funny, satisfying
 }
 
 // EnergyLevels define how stimulating the content is.
@@ -416,8 +433,8 @@ type AcceptChallengePayload struct {
 	ThumbnailURL  string        `json:"thumbnailUrl"`
 	// Tier-1 validation fields — required so the server can enforce length limits
 	// and store metadata for downstream relevance scoring.
-	DurationMs   int    `json:"durationMs"`
-	Caption      string `json:"caption,omitempty"`
+	DurationMs int    `json:"durationMs"`
+	Caption    string `json:"caption,omitempty"`
 }
 
 // FlagResponsePayload is the body for community-moderation off-topic flagging.
@@ -451,13 +468,13 @@ type VoteSummary struct {
 
 // WatchEvent tracks how long a user watched a post or challenge response.
 type WatchEvent struct {
-	ID         string `json:"id"`
-	UserID     string `json:"userId"`
-	ContentID  string `json:"contentId"`
+	ID          string `json:"id"`
+	UserID      string `json:"userId"`
+	ContentID   string `json:"contentId"`
 	ContentType string `json:"contentType"` // "post", "challenge", "response"
-	WatchTime  int    `json:"watchTime"`    // milliseconds
-	Completed  bool   `json:"completed"`    // watched to end
-	CreatedAt  string `json:"createdAt"`
+	WatchTime   int    `json:"watchTime"`   // milliseconds
+	Completed   bool   `json:"completed"`   // watched to end
+	CreatedAt   string `json:"createdAt"`
 }
 
 // WatchEventPayload is the request body for recording a watch event.
@@ -471,14 +488,14 @@ type WatchEventPayload struct {
 
 // Report represents a user report on content or another user.
 type Report struct {
-	ID           string `json:"id"`
-	ReporterID   string `json:"reporterId"`
-	TargetID     string `json:"targetId"`
-	TargetType   string `json:"targetType"` // "post", "challenge", "response", "user"
-	Reason       string `json:"reason"`
-	Description  string `json:"description"`
-	Status       string `json:"status"` // "pending", "reviewed", "resolved"
-	CreatedAt    string `json:"createdAt"`
+	ID          string `json:"id"`
+	ReporterID  string `json:"reporterId"`
+	TargetID    string `json:"targetId"`
+	TargetType  string `json:"targetType"` // "post", "challenge", "response", "user"
+	Reason      string `json:"reason"`
+	Description string `json:"description"`
+	Status      string `json:"status"` // "pending", "reviewed", "resolved"
+	CreatedAt   string `json:"createdAt"`
 }
 
 // ReportPayload is the request body for creating a report.

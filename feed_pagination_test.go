@@ -22,12 +22,12 @@ func TestFeedHasMore(t *testing.T) {
 		{
 			name:       "short page that used everything it had",
 			candidates: 12, composed: 12, limit: 20, want: false,
-			why:        "the pool really was 12; there is nothing to page to",
+			why: "the pool really was 12; there is nothing to page to",
 		},
 		{
 			name:       "full page",
 			candidates: 20, composed: 20, limit: 20, want: true,
-			why:        "landing exactly on the page size means the bounded fetch was the constraint",
+			why: "landing exactly on the page size means the bounded fetch was the constraint",
 		},
 		{
 			name:       "full page with more behind it",
@@ -54,11 +54,14 @@ func TestFeedHasMore(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := feedHasMore(c.candidates, c.composed, c.limit)
+			// These cases predate repeat-marking, when every served item was
+			// by definition fresh. Passing composed as fresh keeps them
+			// asserting exactly what they always did.
+			got := feedHasMore(c.candidates, c.composed, c.composed, c.limit)
 			if got != c.want {
 				msg := fmt.Sprintf(
-					"feedHasMore(candidates=%d, composed=%d, limit=%d) = %v, want %v",
-					c.candidates, c.composed, c.limit, got, c.want)
+					"feedHasMore(candidates=%d, composed=%d, fresh=%d, limit=%d) = %v, want %v",
+					c.candidates, c.composed, c.composed, c.limit, got, c.want)
 				if c.why != "" {
 					msg += " — " + c.why
 				}
@@ -136,7 +139,7 @@ func TestForYouPageIsNotDeclaredFinalWhenTheCreatorCapTruncatedIt(t *testing.T) 
 			"this page cannot fill", len(composed), limit)
 	}
 
-	if !feedHasMore(len(scored), len(composed), limit) {
+	if !feedHasMore(len(scored), len(composed), len(composed), limit) {
 		t.Errorf("hasMore = false with %d of %d candidates unplaced. The "+
 			"page is short because %d creators × %d is %d, not because the "+
 			"catalog ran out — and since that ceiling is structural, "+
@@ -144,5 +147,65 @@ func TestForYouPageIsNotDeclaredFinalWhenTheCreatorCapTruncatedIt(t *testing.T) 
 			"session no matter how much content exists",
 			len(scored)-len(composed), len(scored),
 			len(perCreator), maxItemsPerCreator, wantComposed)
+	}
+}
+
+// The rule this function gained when repeats started being marked: a page made
+// entirely of things the viewer has already seen is the end of what we have to
+// give right now, and saying otherwise sends the client after a page that
+// cannot exist.
+//
+// A device run walked six pages before this existed. Pages four, five and six
+// yielded 7, 16 and 0 new items out of 21 sent, and every one of them reported
+// "keep going" — because a full page of repeats is indistinguishable from a
+// full page of new videos unless somebody counts.
+func TestFeedHasMore_StopsWhenEverythingIsARepeat(t *testing.T) {
+	cases := []struct {
+		name                               string
+		candidates, composed, fresh, limit int
+		want                               bool
+		why                                string
+	}{
+		{
+			name:       "full page, nothing new in it",
+			candidates: 60, composed: 20, fresh: 0, limit: 20, want: false,
+			why: "a full page of repeats is the catalogue running out, not a reason to ask again",
+		},
+		{
+			name:       "full page, one new item",
+			candidates: 60, composed: 20, fresh: 1, limit: 20, want: true,
+			why: "one fresh item means the pool has not run dry",
+		},
+		{
+			name:       "short page, nothing new",
+			candidates: 20, composed: 8, fresh: 0, limit: 20, want: false,
+		},
+		{
+			name: "short page with unplaced candidates, but nothing new",
+			// The per-creator cap left candidates on the table, which normally
+			// means "ask again". It does not help when everything left over is
+			// something this viewer has already been shown.
+			candidates: 60, composed: 8, fresh: 0, limit: 20, want: false,
+			why: "unplaced candidates are only worth another page if any of them are new",
+		},
+		{
+			name:       "short page, some new",
+			candidates: 60, composed: 8, fresh: 3, limit: 20, want: true,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := feedHasMore(c.candidates, c.composed, c.fresh, c.limit)
+			if got != c.want {
+				msg := fmt.Sprintf(
+					"feedHasMore(candidates=%d, composed=%d, fresh=%d, limit=%d) = %v, want %v",
+					c.candidates, c.composed, c.fresh, c.limit, got, c.want)
+				if c.why != "" {
+					msg += " — " + c.why
+				}
+				t.Error(msg)
+			}
+		})
 	}
 }

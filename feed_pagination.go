@@ -44,10 +44,34 @@ package main
 // candidates is the size of the scored pool the page was composed FROM;
 // composed is what actually made it onto the page; limit is what the
 // client asked for.
-func feedHasMore(candidates, composed, limit int) bool {
+// feedHasMore answers "is it worth asking for another page".
+//
+// fresh is how many of the composed items the viewer has NOT already been
+// shown. It is the difference between a feed with more to give and a feed that
+// has started going round in circles, and without it this function cannot tell
+// those apart — a page of twenty repeats looks exactly like a page of twenty
+// new videos from in here.
+//
+// That gap had a cost. A device run walked six pages: the first three were
+// almost entirely fresh, the fourth yielded seven new items out of twenty-one,
+// the fifth sixteen, and the sixth nothing at all — and this function said
+// "keep going" every time, because the pages were full. The client asked again
+// and again for content that was not there.
+func feedHasMore(candidates, composed, fresh, limit int) bool {
 	// Nothing was served. There is no next page to ask for, and claiming
 	// otherwise would spin a client that stops only on an empty result.
 	if composed == 0 {
+		return false
+	}
+	// Everything on this page has been seen before. The catalogue is exhausted
+	// for this viewer right now, and another page can only bring more of the
+	// same — so say so instead of sending them after it.
+	//
+	// This is NOT the old hard filter coming back. Repeats are still served;
+	// the viewer keeps scrolling through them and the seen-handicap fades over
+	// twelve hours so they return properly later. What stops is the pretence
+	// that there is something new one page further on.
+	if fresh == 0 {
 		return false
 	}
 	// Composition left candidates on the table. Whatever the reason —

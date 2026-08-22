@@ -215,7 +215,7 @@ func seenPenalty(lastSeen, now int64) float64 {
 // deliberately untouched: it is the map ltrStashBreakdownAll learns from, and
 // it must keep describing what the ranker computed, not what serving decided.
 //
-// WHY THE HANDICAP LANDS ON Score
+// # WHY THE HANDICAP LANDS ON Score
 //
 // It used to live only in this function's return ORDER: scores were left
 // alone and the slice came back sorted by score-minus-penalty. That reads as
@@ -263,6 +263,13 @@ func applySeenPenalty(items []ScoredItem, seen map[string]int64) []ScoredItem {
 		penalties[i] = p
 		if p > 0 {
 			handicapped++
+			// Say so on the wire. The client used to work this out for itself
+			// by deleting anything it had already displayed, which disagreed
+			// with the ranking decision made here — see Challenge.Repeat.
+			if si.Item.Challenge != nil {
+				si.Item.Challenge.Repeat = true
+				out[i] = si
+			}
 		}
 	}
 
