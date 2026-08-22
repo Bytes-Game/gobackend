@@ -481,6 +481,11 @@ func main() {
 	// challenge or an account drops the rows and queues the storage paths;
 	// this drains that queue. Without it every delete leaks its video.
 	startMediaDeleter()
+	// Try each new video on a small crowd first, and only spend a big crowd on
+	// the ones that earn it. Without this every video costs the same 300 views
+	// before anyone is allowed to judge it, which is what caps how many uploads
+	// a day can get a verdict at all.
+	startAuditionReviewer()
 	// One-shot repair: rewrite manifest URLs stored with the fabricated
 	// pub-<ACCOUNT_ID>.r2.dev/<bucket> base (written by workers whose
 	// optional R2_PUBLIC_BASE_URL env was unset) to the real public base.

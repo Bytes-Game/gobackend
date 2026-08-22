@@ -281,7 +281,7 @@ const (
 	maxItemsPerCreator   = 3   // Diversity: max 3 items from same creator in one feed page
 	coldStartThreshold   = 15  // Users with <15 events are "cold start"
 	contentColdThreshold = 5   // Content with <5 views is "cold start"
-	auditionViewTarget   = 300 // Until a video has this many views it is "under audition": it gets exploration impressions so its true performance can be measured before merit-ranking judges it. 5 views can't measure quality; ~hundreds can.
+	auditionViewTarget   = 300 // The most views a video can be given to prove itself, across every rung of the audition ladder (see audition_ladder.go — it is spent in a small first showing and a larger second one, and most videos never spend all of it). 5 views can't measure quality; ~hundreds can.
 	profileStalenessMin  = 5   // Recompute profile if older than 5 minutes — fast cohort transitions during onboarding (TikTok-style)
 	sessionTTLMin        = 30  // Redis session expires after 30 min inactivity
 
@@ -3505,15 +3505,21 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 
 	// ── COLD CONTENT / AUDITION BONUS ──
 	// New content needs enough impressions before its engagement is a reliable
-	// signal. Give it a modest, decaying boost across the whole audition window
-	// (not just <5 views — a 5-view sample can't measure quality) so it climbs
-	// above already-proven content while it gathers data, tapering to 0 once it
-	// has enough views to be judged on merit. auditionEligible marks it for the
-	// guaranteed exploration slot (injectAuditionContent) so it gets seen even if
-	// merit-ranking would still bury it.
+	// signal. Give it a modest, decaying boost while it is gathering that data
+	// so it climbs above already-proven content, tapering to nothing as it
+	// fills up. auditionEligible marks it for the guaranteed exploration slot
+	// (injectAuditionContent) so it gets seen even if merit-ranking would still
+	// bury it.
+	//
+	// "While it is gathering data" is a ladder, not one long stretch — see
+	// audition_ladder.go. A video gets a small crowd first and a bigger one only
+	// if the small crowd liked it, so the push restarts each time it is promoted
+	// and stops for good once it is done. auditionStanding is the one place that
+	// knows which; it falls back to the old flat rule whenever the ladder has
+	// nothing to say.
 	coldContentBonus := 0.0
-	if cs.ViewCount < auditionViewTarget {
-		coldContentBonus = 0.25 * (1.0 - float64(cs.ViewCount)/float64(auditionViewTarget))
+	if progress, underAudition := auditionStanding(cs.ContentType, cs.ContentID, cs.ViewCount); underAudition {
+		coldContentBonus = 0.25 * (1.0 - progress)
 		breakdown["auditionEligible"] = 1
 	}
 	breakdown["coldContentBonus"] = coldContentBonus
@@ -5433,10 +5439,12 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// it's still recorded as shown by the block below.
 	composed = applySurpriseInjection(composed, profile, cohort, nil)
 
-	// Step 7.2: Audition — guarantee a fresh under-audition upload one impression
-	// per page even if merit-ranking buried it, so new content reliably gathers
-	// the views it needs to prove itself (item-level exploration). Bounded to one
-	// per page; items graduate out automatically once they pass auditionViewTarget.
+	// Step 7.2: Audition — give videos nobody has vouched for yet a guaranteed
+	// share of this page even where merit-ranking buried them, so new content
+	// reliably gathers the views it needs to prove itself. Videos leave the
+	// audition on their own once the ladder in audition_ladder.go has an answer
+	// about them, whether that answer is good or bad.
+	//
 	// How much of this page goes to video nobody has vouched for yet. Scales
 	// with how many are waiting rather than being fixed at one — see
 	// audition.go for why a fixed slot silently stops working as uploads grow.

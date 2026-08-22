@@ -139,38 +139,96 @@ func AdminFeedHealthHandler(w http.ResponseWriter, r *http.Request) {
 		return map[string]any{"value": value, "status": status, "note": note}
 	}
 
-	// The audition queue: how much unproven content is waiting, and how much of
-	// it has been waiting a long time.
+	// The audition queue: how much unproven content is waiting, how much of it
+	// has been waiting a long time, and how fast videos are actually getting an
+	// answer.
 	//
-	// These two numbers are what tells you whether new uploads are getting
-	// their turn. The slot count that decides how much of each page goes to
-	// unproven video scales off the first one, and the second is the one to
-	// actually watch: a backlog that is large but young is a busy day, while a
-	// backlog full of week-old videos is content that arrived, was never shown
-	// enough to be judged, and is quietly stuck.
-	var auditionWaiting, auditionStale int
+	// These are what tell you whether new uploads are getting their turn. The
+	// slot count that decides how much of each page goes to unproven video
+	// scales off the first one, and waitingOver7d is the one to actually watch:
+	// a backlog that is large but young is a busy day, while a backlog full of
+	// week-old videos is content that arrived, was never shown enough to be
+	// judged, and is quietly stuck.
+	var auditionWaiting, auditionStale, auditionRetiredN, auditionGraduated int
 	_ = db.QueryRow(`
 		SELECT
-			COUNT(*),
-			COUNT(*) FILTER (WHERE created_at < NOW() - INTERVAL '7 days')
+			COUNT(*) FILTER (WHERE audition_state = $1),
+			COUNT(*) FILTER (WHERE audition_state = $1 AND created_at < NOW() - INTERVAL '7 days'),
+			COUNT(*) FILTER (WHERE audition_state = $2),
+			COUNT(*) FILTER (WHERE audition_state = $3)
 		FROM challenges
 		WHERE visibility = 'arena'
-		  AND status IN ('open','active','completed')
-		  AND views < $1`, auditionViewTarget).Scan(&auditionWaiting, &auditionStale)
+		  AND status IN ('open','active','completed')`,
+		auditionStateActive, auditionStateRetired, auditionStateGraduated).
+		Scan(&auditionWaiting, &auditionStale, &auditionRetiredN, &auditionGraduated)
+
+	// How many verdicts the ladder produced in the last day, and what share of
+	// them moved a video up. verdictsPerDay is the throughput number: while it
+	// is comfortably above the upload rate, nothing is piling up unjudged.
+	var verdictsPerDay, promotedPerDay int
+	_ = db.QueryRow(`
+		SELECT COUNT(*),
+		       COUNT(*) FILTER (WHERE audition_state <> $1)
+		FROM challenges
+		WHERE audition_reviewed_at > NOW() - INTERVAL '24 hours'`,
+		auditionStateRetired).Scan(&verdictsPerDay, &promotedPerDay)
+	promotionRate := 0.0
+	if verdictsPerDay > 0 {
+		promotionRate = float64(promotedPerDay) / float64(verdictsPerDay)
+	}
+
+	// What a verdict costs on average, in views. This is the number the ladder
+	// exists to pull down: slots available ÷ views per verdict = verdicts per
+	// day, so halving this doubles how many creators get an answer without
+	// taking a single extra slot away from viewers.
+	avgViewsPerVerdict := float64(auditionLadderTotal())
+	if verdictsPerDay > 0 {
+		avgViewsPerVerdict = float64(auditionLadder[0].views) +
+			promotionRate*float64(auditionLadderTotal()-auditionLadder[0].views)
+	}
+
+	// Is the bar switched on yet? Below the evidence threshold every video is
+	// promoted, which is correct on a small app and worth saying out loud so a
+	// promotion rate of 1.0 doesn't read as a bug.
+	rungs := make([]map[string]any, 0, len(auditionLadder))
+	for i, rung := range auditionLadder {
+		bar, ready := auditionBar(i)
+		var waitingHere int
+		_ = db.QueryRow(`
+			SELECT COUNT(*) FROM challenges
+			WHERE visibility = 'arena' AND audition_state = $1 AND audition_stage = $2`,
+			auditionStateActive, i).Scan(&waitingHere)
+		rungs = append(rungs, map[string]any{
+			"rung":     i,
+			"name":     rung.name,
+			"audience": rung.views,
+			"waiting":  waitingHere,
+			"barSet":   ready,
+			"bar":      round3(bar),
+		})
+	}
 
 	resp := map[string]any{
 		"window": window,
 		"auditions": map[string]any{
-			"waiting":       auditionWaiting,
-			"waitingOver7d": auditionStale,
-			"viewTarget":    auditionViewTarget,
-			"slotsPerPage":  auditionSlotsForPage(auditionWaiting, defaultPageSize),
-			"note": "waiting = videos with too few views to judge yet. " +
-				"waitingOver7d is the number that matters: a big backlog of NEW " +
-				"uploads is just a busy day, but old ones are videos that never " +
-				"got shown enough to be judged. If waitingOver7d keeps climbing, " +
-				"the per-page audition ceiling is binding and creators are being " +
-				"ignored rather than rejected.",
+			"waiting":            auditionWaiting,
+			"waitingOver7d":      auditionStale,
+			"retired":            auditionRetiredN,
+			"graduated":          auditionGraduated,
+			"verdictsPerDay":     verdictsPerDay,
+			"promotionRate":      round3(promotionRate),
+			"avgViewsPerVerdict": round3(avgViewsPerVerdict),
+			"viewTarget":         auditionViewTarget,
+			"slotsPerPage":       auditionSlotsForPage(auditionWaiting, defaultPageSize),
+			"ladder":             rungs,
+			"note": "waiting = videos still being tried out. waitingOver7d is the " +
+				"number that matters: a big backlog of NEW uploads is just a busy " +
+				"day, but old ones are videos that never got shown enough to be " +
+				"judged. If waitingOver7d keeps climbing, creators are being ignored " +
+				"rather than rejected — check verdictsPerDay against your upload rate " +
+				"first, then the per-page ceiling. barSet=false on a rung means too " +
+				"few videos have been scored there to set a fair bar yet, so everyone " +
+				"is promoted; that is expected on a young app, not a fault.",
 		},
 		"activeUsers": activeUsers,
 		"views":       views,
