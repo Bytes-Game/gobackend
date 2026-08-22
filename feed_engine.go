@@ -5575,7 +5575,17 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// the page filled — a For You page is capped at (eligible creators × 3)
 	// by maxItemsPerCreator, so a short page is usually a diversity
 	// decision rather than an empty catalog. See feed_pagination.go.
-	hasMore := feedHasMore(len(scored), len(composed), limit)
+	// Count what the viewer has not already been shown. A page that is entirely
+	// repeats means the catalogue is exhausted for them right now, and telling
+	// them otherwise sends the client after a page that cannot exist — see
+	// feedHasMore.
+	freshCount := 0
+	for _, si := range composed {
+		if si.Item.Challenge == nil || !si.Item.Challenge.Repeat {
+			freshCount++
+		}
+	}
+	hasMore := feedHasMore(len(scored), len(composed), freshCount, limit)
 
 	// Payload enrichment — ONE choke point shared by every feed path
 	// (see finalizeFeedItems). The cold path once skipped this and

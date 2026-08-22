@@ -348,3 +348,63 @@ func TestApplyRefreshSignal_KeepsWatchHistory(t *testing.T) {
 		t.Fatalf("refresh must preserve the seen set, got %v", seen)
 	}
 }
+
+// Marking a repeat must not remove it.
+//
+// The distinction is the whole design: the feed ranks seen content DOWN and
+// still serves it, because the hard filter this replaced used to announce the
+// feed had ended when it had not. Two changes went into undoing that, and a
+// well-meaning edit here could quietly bring it back — the client would simply
+// see shorter pages and nobody would know why.
+func TestApplySeenPenalty_MarksRepeatsWithoutRemovingThem(t *testing.T) {
+	now := time.Now().Unix()
+	items := []ScoredItem{
+		{Item: HomeFeedItem{Type: "challenge", Challenge: &Challenge{ID: "1"}}, Score: 1.0},
+		{Item: HomeFeedItem{Type: "challenge", Challenge: &Challenge{ID: "2"}}, Score: 0.9},
+		{Item: HomeFeedItem{Type: "challenge", Challenge: &Challenge{ID: "3"}}, Score: 0.8},
+	}
+	// Two of the three were shown an hour ago.
+	seen := map[string]int64{
+		seenMember("challenge", "1"): now - 3600,
+		seenMember("challenge", "3"): now - 3600,
+	}
+
+	out := applySeenPenalty(items, seen)
+
+	if len(out) != len(items) {
+		t.Fatalf("got %d items back from %d — seen content must be ranked "+
+			"down, never dropped", len(out), len(items))
+	}
+
+	marked := map[string]bool{}
+	for _, si := range out {
+		if si.Item.Challenge != nil && si.Item.Challenge.Repeat {
+			marked[si.Item.Challenge.ID] = true
+		}
+	}
+	for _, id := range []string{"1", "3"} {
+		if !marked[id] {
+			t.Errorf("challenge %s was seen but not marked as a repeat — the "+
+				"client cannot tell a deliberate re-serve from a bug without it", id)
+		}
+	}
+	if marked["2"] {
+		t.Error("challenge 2 was never seen and must not be marked a repeat")
+	}
+}
+
+// An unseen page must carry no marks at all, or "repeat" stops meaning
+// anything and the client's page-ending rule fires on a healthy feed.
+func TestApplySeenPenalty_LeavesAFreshPageUnmarked(t *testing.T) {
+	items := []ScoredItem{
+		{Item: HomeFeedItem{Type: "challenge", Challenge: &Challenge{ID: "10"}}, Score: 1.0},
+		{Item: HomeFeedItem{Type: "challenge", Challenge: &Challenge{ID: "11"}}, Score: 0.9},
+	}
+	out := applySeenPenalty(items, map[string]int64{})
+	for _, si := range out {
+		if si.Item.Challenge != nil && si.Item.Challenge.Repeat {
+			t.Errorf("challenge %s marked as a repeat on a page nothing was "+
+				"seen on", si.Item.Challenge.ID)
+		}
+	}
+}
