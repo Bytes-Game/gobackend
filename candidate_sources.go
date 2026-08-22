@@ -167,6 +167,12 @@ func buildSourcesForCohort(cohort Cohort) []candidateSource {
 		{name: "embedding", weight: weights["embedding"], fetch: sourceEmbeddingNeighbors},
 		{name: "coocurrence", weight: weights["coocurrence"], fetch: sourceCoOccurrence},
 		{name: "searchAffinity", weight: weights["searchAffinity"], fetch: sourceSearchAffinity},
+		// Under-viewed content of any age, longest wait first. Every lane above
+		// walks a bounded recency window newest-first, so without this one a
+		// video that missed its chance in its first days becomes unreachable
+		// and its permanent audition eligibility never gets to mean anything.
+		// See audition.go.
+		{name: "audition", weight: auditionSourceWeight, fetch: sourceAudition},
 	}
 }
 
@@ -213,6 +219,8 @@ func buildDefaultSources() []candidateSource {
 		{name: "embedding", weight: defaultSourceWeights["embedding"], fetch: sourceEmbeddingNeighbors},
 		{name: "coocurrence", weight: defaultSourceWeights["coocurrence"], fetch: sourceCoOccurrence},
 		{name: "searchAffinity", weight: defaultSourceWeights["searchAffinity"], fetch: sourceSearchAffinity},
+		// Same reasoning as the cohort build above — see audition.go.
+		{name: "audition", weight: auditionSourceWeight, fetch: sourceAudition},
 	}
 }
 

@@ -131,6 +131,18 @@ var (
 		},
 	)
 
+	// ── Auditions ────────────────────────────────────────────────────────────
+	// How many unproven videos were forced onto a page because it had not
+	// surfaced its share on merit. Rising alongside a rising backlog is the
+	// system working; a flat line with a growing backlog means the ceiling is
+	// binding and new content is queueing up unseen.
+	metricAuditionInjected = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "devf_audition_injected_total",
+			Help: "Unproven videos injected into a feed page to make up its audition floor.",
+		},
+	)
+
 	// ── MMR diversity re-rank ────────────────────────────────────────────────
 	metricMMRReranks = prometheus.NewCounter(
 		prometheus.CounterOpts{
@@ -269,6 +281,7 @@ func registerMetrics() {
 		metricEmbedCacheHits,
 		metricSeenMarks,
 		metricSeenFiltered,
+		metricAuditionInjected,
 		metricMMRReranks,
 		metricPlattFits,
 		metricCandidateSource,

@@ -5437,7 +5437,12 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// per page even if merit-ranking buried it, so new content reliably gathers
 	// the views it needs to prove itself (item-level exploration). Bounded to one
 	// per page; items graduate out automatically once they pass auditionViewTarget.
-	composed = injectAuditionContent(scored, composed)
+	// How much of this page goes to video nobody has vouched for yet. Scales
+	// with how many are waiting rather than being fixed at one — see
+	// audition.go for why a fixed slot silently stops working as uploads grow.
+	// Anything that already won a place on merit counts toward it.
+	composed = injectAuditionContent(scored, composed,
+		auditionSlotsForPage(auditionBacklog(), limit))
 
 	// Step 7.5: Remember the tail of what we just served so the NEXT page's
 	// ranker can apply sequence-awareness penalties against it, AND stash the
@@ -6023,58 +6028,6 @@ func populateTopResponses(items []HomeFeedItem) {
 			}
 		}
 	}
-}
-
-// injectAuditionContent guarantees one under-audition item (recent, below the
-// audition view target) an impression per page when merit-ranking didn't already
-// surface it. This is item-level exploration: a new upload's engagement isn't a
-// measurable signal until it has had enough impressions, so the ranker can't
-// fairly judge it before then — without a guaranteed slot a fresh 0-view video
-// can be buried under proven content forever and never get its audition. Picks
-// the FRESHEST eligible item from the scored pool that isn't already on this
-// page; no-op when every eligible item already made the page on merit (or none
-// exist). Bounded to one injection per page (an ~8% exploration budget); items
-// graduate automatically once their view count passes auditionViewTarget.
-func injectAuditionContent(scored []ScoredItem, composed []ScoredItem) []ScoredItem {
-	if len(composed) == 0 {
-		return composed
-	}
-	inFeed := make(map[string]bool, len(composed))
-	for _, it := range composed {
-		inFeed[it.Item.Type+":"+getItemID(it.Item)] = true
-	}
-	best := -1
-	bestFresh := -1.0
-	for i := range scored {
-		bd := scored[i].ScoreBreakdown
-		if bd == nil || bd["auditionEligible"] <= 0 {
-			continue
-		}
-		key := scored[i].Item.Type + ":" + getItemID(scored[i].Item)
-		if inFeed[key] {
-			continue // already surfaced on merit — no need to force it
-		}
-		if f := bd["freshness"]; f > bestFresh {
-			bestFresh = f
-			best = i
-		}
-	}
-	if best < 0 {
-		return composed
-	}
-	aud := scored[best]
-	aud.SlotType = "audition"
-	// Insert just after the head so it's actually seen, not at position 0 (which
-	// would feel jarring and displace the strongest hook).
-	pos := 3
-	if pos > len(composed) {
-		pos = len(composed)
-	}
-	out := make([]ScoredItem, 0, len(composed)+1)
-	out = append(out, composed[:pos]...)
-	out = append(out, aud)
-	out = append(out, composed[pos:]...)
-	return out
 }
 
 // injectSuggestedAccountsCard builds an "Accounts you might like" card for
