@@ -118,6 +118,7 @@ type Post struct {
 	// Content understanding fields
 	Category    string   `json:"category"`              // Primary category
 	EmotionTags []string `json:"emotionTags,omitempty"` // Emotion labels
+	Tags        []string `json:"tags,omitempty"`        // Creator's own words — see content_tags.go
 	EnergyLevel string   `json:"energyLevel"`           // "low","medium","high"
 }
 
@@ -220,6 +221,7 @@ type Challenge struct {
 	// Content understanding fields (creator-declared + system-inferred)
 	Category    string   `json:"category"`              // Primary: "comedy","motivation","sports","dance","music",etc.
 	EmotionTags []string `json:"emotionTags,omitempty"` // ["happy","intense","inspiring"]
+	Tags        []string `json:"tags,omitempty"`        // Creator's own words — see content_tags.go
 	EnergyLevel string   `json:"energyLevel"`           // "low","medium","high"
 
 	// Top response fields — populated by populateTopResponses() at the
@@ -335,6 +337,11 @@ type CreateChallengePayload struct {
 	Category      string        `json:"category"`    // "comedy","motivation","sports","dance",etc.
 	EmotionTags   []string      `json:"emotionTags"` // ["happy","intense","inspiring"]
 	EnergyLevel   string        `json:"energyLevel"` // "low","medium","high"
+	// Tags are the creator's own words for what the video is about. Cleaned
+	// and capped on the way in — see content_tags.go. They pick the category
+	// when the creator did not choose one, and they pull videos that share a
+	// tag closer together in the embedding.
+	Tags []string `json:"tags,omitempty"`
 }
 
 // ContentCategory defines the available categories for content.

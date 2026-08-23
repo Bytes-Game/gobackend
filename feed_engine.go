@@ -204,6 +204,7 @@ type ContentScore struct {
 	EnergyLevel      float64            `json:"energyLevel"`      // 0=chill, 1=intense (may be inferred for medium/unset; used by energyFit)
 	EnergyLevelLabel float64            `json:"energyLevelLabel"` // discrete label energy (energyStringToFloat); used by energyHourMatch to match EnergyByHour's train scale
 	Category         string             `json:"category"`         // Primary category
+	Tags             []string           `json:"tags,omitempty"`   // Creator's own words — see content_tags.go
 	EmotionVector    map[string]float64 `json:"emotionVector"`    // "happy":0.5, "competitive":0.3
 	// === Creator info (denormalized for speed) ===
 	CreatorID        string  `json:"creatorId"`
@@ -2885,7 +2886,7 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 	// Category, creator info, and created_at — single query per content type
 	if contentType == "challenge" {
 		var subject, prefix, dbCategory, dbEnergy string
-		var emotionJSON []byte
+		var emotionJSON, tagsJSON []byte
 		var creatorID, league string
 		var followers, wins, losses, respCount, chViews, chLikes int
 		var createdAt time.Time
@@ -2893,6 +2894,7 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			SELECT COALESCE(c.subject,''), COALESCE(c.prefix,''),
 				COALESCE(c.category,'other'), COALESCE(c.energy_level,'medium'),
 				COALESCE(c.emotion_tags,'[]'::JSONB),
+				COALESCE(c.custom_tags,'[]'::JSONB),
 				CAST(u.id AS TEXT), u.league,
 				(SELECT COUNT(*) FROM follows WHERE following_id = u.id),
 				u.wins, u.losses, c.created_at,
@@ -2902,7 +2904,7 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			FROM challenges c
 			JOIN users u ON c.creator_id = u.id
 			WHERE c.id = $1`, contentID).Scan(
-			&subject, &prefix, &dbCategory, &dbEnergy, &emotionJSON,
+			&subject, &prefix, &dbCategory, &dbEnergy, &emotionJSON, &tagsJSON,
 			&creatorID, &league, &followers, &wins, &losses, &createdAt, &respCount,
 			&chViews, &chLikes)
 		cs.ResponseCount = respCount
@@ -2953,11 +2955,12 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			}
 		}
 
-		if dbCategory != "" && dbCategory != "other" {
-			cs.Category = dbCategory
-		} else {
-			cs.Category = inferCategory(subject, prefix, "")
-		}
+		json.Unmarshal(tagsJSON, &cs.Tags)
+		// Category, best source first: what the creator picked, then what
+		// their tags say, then keyword matching on the subject line. That
+		// last one is a guess and used to be the only input — see
+		// content_tags.go.
+		cs.Category = categoryForContent(dbCategory, cs.Tags, subject, prefix, "")
 		switch dbEnergy {
 		case "low":
 			cs.EnergyLevel = 0.25
@@ -6330,15 +6333,32 @@ func fetchCandidatesWindowed(userID string, limit int, window string) []HomeFeed
 	// surface, but shorts keep the catalog large enough to fill a session
 	// without repeating creators.
 	battleLimit := (limit * 7) / 10
-	shortLimit := limit - battleLimit
 	if battleLimit < 1 {
 		battleLimit = 1
 	}
+
+	items := fetchChallengesWindowedByKind(userID, "battle", battleLimit, window)
+
+	// THE BATTLE SHARE IS A FLOOR FOR BATTLES, NOT A CAP ON SHORTS. Shorts get
+	// the whole remaining budget, including whatever the battles could not use.
+	//
+	// This used to be a fixed 30%, and on a library short of battles that threw
+	// candidates away: asking for 14 battles, finding 4, asking for 6 shorts,
+	// and handing the ranker 10 candidates out of a 20-candidate budget. Ten
+	// slots empty, and ten shorts sitting in the database that the scorer never
+	// even got to look at — not beaten, just never fetched.
+	//
+	// The widening ladder above cannot make that up either. Every window is
+	// ordered newest-first, so a wider window returns the SAME newest rows this
+	// one already has; they all dedupe away and the pool stays short. Widening
+	// only helps when a window was empty, never when it was capped.
+	//
+	// When battles are plentiful nothing changes: they fill their share and
+	// shorts get exactly the rest, the same 70/30 as before.
+	shortLimit := limit - len(items)
 	if shortLimit < 1 {
 		shortLimit = 1
 	}
-
-	items := fetchChallengesWindowedByKind(userID, "battle", battleLimit, window)
 	items = append(items, fetchChallengesWindowedByKind(userID, "short", shortLimit, window)...)
 	return items
 }
