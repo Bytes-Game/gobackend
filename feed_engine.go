@@ -204,6 +204,7 @@ type ContentScore struct {
 	EnergyLevel      float64            `json:"energyLevel"`      // 0=chill, 1=intense (may be inferred for medium/unset; used by energyFit)
 	EnergyLevelLabel float64            `json:"energyLevelLabel"` // discrete label energy (energyStringToFloat); used by energyHourMatch to match EnergyByHour's train scale
 	Category         string             `json:"category"`         // Primary category
+	Tags             []string           `json:"tags,omitempty"`   // Creator's own words — see content_tags.go
 	EmotionVector    map[string]float64 `json:"emotionVector"`    // "happy":0.5, "competitive":0.3
 	// === Creator info (denormalized for speed) ===
 	CreatorID        string  `json:"creatorId"`
@@ -2621,17 +2622,38 @@ func saveUserProfile(p *UserProfile) {
 func inferCategory(subject, prefix, caption string) string {
 	text := strings.ToLower(subject + " " + prefix + " " + caption)
 
+	// Every key here MUST be a name from ContentCategories. It did not used
+	// to be, and that quietly broke categorisation in both directions:
+	//
+	//   * four of the answers were not categories at all — "skill",
+	//     "fitness", "challenge" and "general". A video inferred as "fitness"
+	//     could never match a viewer whose profile said "sports", because
+	//     nothing else in the app has ever used that word.
+	//   * ten real categories had no keywords, so nothing could ever be
+	//     inferred into them: art, education, fashion, food, horror,
+	//     lifestyle, news, prank, sports and tech. More than half the list
+	//     was unreachable.
+	//
+	// "challenge" is gone rather than renamed. Every item in this app is a
+	// challenge, so it described nothing and matched no one.
 	categories := map[string][]string{
-		"comedy":     {"funny", "lol", "roast", "comedy", "laugh", "joke", "humor", "meme", "prank"},
+		"comedy":     {"funny", "lol", "roast", "comedy", "laugh", "joke", "humor", "meme"},
 		"motivation": {"grind", "discipline", "success", "hustle", "motivat", "inspire", "goal", "mindset", "win"},
-		"skill":      {"tutorial", "learn", "how to", "technique", "skill", "trick", "tip", "teach", "lesson"},
+		"education":  {"tutorial", "learn", "how to", "technique", "skill", "trick", "tip", "teach", "lesson", "explain"},
 		"dance":      {"dance", "choreo", "moves", "groove", "dancer", "dancing", "step"},
 		"music":      {"sing", "song", "beat", "rap", "music", "vocal", "instrument", "cover"},
-		"fitness":    {"workout", "gym", "fit", "exercise", "muscle", "train", "body", "weight"},
+		"sports":     {"workout", "gym", "fit", "exercise", "muscle", "train", "weight", "football", "cricket", "match", "sport"},
 		"gaming":     {"game", "gaming", "play", "stream", "esport", "gamer"},
 		"story":      {"story", "vlog", "life", "day in", "experience", "journey", "storytime"},
-		"challenge":  {"challenge", "dare", "battle", "versus", "vs", "compete", "who is better"},
 		"emotional":  {"sad", "cry", "emotional", "feel", "heart", "miss", "love", "pain"},
+		"food":       {"food", "recipe", "cook", "eat", "kitchen", "meal", "snack", "taste", "chef"},
+		"fashion":    {"outfit", "fashion", "style", "makeup", "hair", "dress", "look", "grwm"},
+		"tech":       {"tech", "code", "coding", "phone", "gadget", "app", "computer", "ai"},
+		"prank":      {"prank", "prank on", "gotcha", "social experiment"},
+		"horror":     {"scary", "horror", "creepy", "haunted", "ghost", "nightmare"},
+		"art":        {"draw", "paint", "art", "sketch", "craft", "diy"},
+		"lifestyle":  {"routine", "morning", "clean", "organise", "organize", "wellness", "self care"},
+		"news":       {"news", "opinion", "commentary", "current", "debate"},
 	}
 
 	bestCategory := "general"
@@ -2885,7 +2907,7 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 	// Category, creator info, and created_at — single query per content type
 	if contentType == "challenge" {
 		var subject, prefix, dbCategory, dbEnergy string
-		var emotionJSON []byte
+		var emotionJSON, tagsJSON, autoTagsJSON, analysisJSON []byte
 		var creatorID, league string
 		var followers, wins, losses, respCount, chViews, chLikes int
 		var createdAt time.Time
@@ -2893,6 +2915,9 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			SELECT COALESCE(c.subject,''), COALESCE(c.prefix,''),
 				COALESCE(c.category,'other'), COALESCE(c.energy_level,'medium'),
 				COALESCE(c.emotion_tags,'[]'::JSONB),
+				COALESCE(c.custom_tags,'[]'::JSONB),
+				COALESCE(c.auto_tags,'[]'::JSONB),
+				c.video_analysis,
 				CAST(u.id AS TEXT), u.league,
 				(SELECT COUNT(*) FROM follows WHERE following_id = u.id),
 				u.wins, u.losses, c.created_at,
@@ -2902,7 +2927,8 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			FROM challenges c
 			JOIN users u ON c.creator_id = u.id
 			WHERE c.id = $1`, contentID).Scan(
-			&subject, &prefix, &dbCategory, &dbEnergy, &emotionJSON,
+			&subject, &prefix, &dbCategory, &dbEnergy, &emotionJSON, &tagsJSON,
+			&autoTagsJSON, &analysisJSON,
 			&creatorID, &league, &followers, &wins, &losses, &createdAt, &respCount,
 			&chViews, &chLikes)
 		cs.ResponseCount = respCount
@@ -2953,11 +2979,38 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			}
 		}
 
-		if dbCategory != "" && dbCategory != "other" {
-			cs.Category = dbCategory
-		} else {
-			cs.Category = inferCategory(subject, prefix, "")
+		var rawTags, rawAutoTags []string
+		json.Unmarshal(tagsJSON, &rawTags)
+		json.Unmarshal(autoTagsJSON, &rawAutoTags)
+		// What the worker made of the video, if it has been looked at yet.
+		// Absent is ordinary — an upload from before this existed, or a worker
+		// with none of the optional binaries installed — and means "not
+		// measured", never "measured as nothing".
+		var analysis *VideoAnalysis
+		if len(analysisJSON) > 0 {
+			var parsed VideoAnalysis
+			if json.Unmarshal(analysisJSON, &parsed) == nil {
+				analysis = &parsed
+			}
 		}
+		// Folded on READ as well as on write, so every tag in memory is
+		// comparable no matter how it got into the column. Tags written before
+		// normalization existed — and the ones migration 004 moved across from
+		// the emotion field — are raw creator strings, so "Hip Hop" from an old
+		// video would never match "hip hop" from a new one, and the whole point
+		// of tags is that two videos about the same thing look related.
+		//
+		// Cheap: at most ten short strings, and this runs inside the cached
+		// per-content computation rather than per request.
+		cs.Tags = mergeTags(normalizeTags(rawTags), normalizeTags(rawAutoTags))
+		// Category, best source first: what the creator picked, then what
+		// their tags say, then keyword matching on the subject line. That
+		// last one is a guess and used to be the only input — see
+		// content_tags.go.
+		// The caption the matcher reads now includes anything found on screen
+		// or spoken aloud, so a video whose only description is burned into
+		// the picture is no longer invisible to it.
+		cs.Category = categoryForContent(dbCategory, cs.Tags, subject, prefix, analysisText(analysis))
 		switch dbEnergy {
 		case "low":
 			cs.EnergyLevel = 0.25
@@ -2967,6 +3020,13 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			// 'medium'/unset = creator didn't really declare → use the inferred
 			// (engagement-modulated) energy instead of a flat constant.
 			cs.EnergyLevel = inferredEnergy
+			// …unless the video itself was measured. How fast it cuts and how
+			// much of it is not silence is a fact about the file, where the
+			// inferred value is a guess from engagement — and on a video
+			// nobody has watched yet there is no engagement to guess from.
+			if e, ok := analysisEnergy(analysis); ok {
+				cs.EnergyLevel = e
+			}
 		}
 		// Discrete label energy on the SAME scale EnergyByHour is trained on, so
 		// energyHourMatch compares like-for-like. cs.EnergyLevel above may be the
@@ -2975,10 +3035,11 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		cs.EnergyLevelLabel = energyStringToFloat(dbEnergy)
 		var emotions []string
 		json.Unmarshal(emotionJSON, &emotions)
-		// Auto-tag from caption if no creator-declared tags
-		if len(emotions) == 0 {
-			emotions = autoTagFromCaption(subject+" "+prefix, emotions)
-		}
+		// Mood, from everything known about the video — declared emotions,
+		// tags that name a mood, and a keyword pass over the caption AND the
+		// tags. Tags describe the subject and the feel; a video tagged "funny"
+		// is telling us both. See emotionsForContent.
+		emotions = emotionsForContent(emotions, cs.Tags, subject, prefix, analysisText(analysis))
 		for _, e := range emotions {
 			cs.EmotionVector[strings.ToLower(e)] = 1.0 // canonical lowercase — matches miner + EmotionPreference keys
 		}
@@ -4450,63 +4511,6 @@ func moodDrivenPattern(mood string) []string {
 	}
 }
 
-// applyBattleShortRatio enforces the feed's battle:short composition quota.
-//
-// A "battle" is a challenge with at least one response (two creators head to
-// head — the app's core surface); a "short" is a response-less challenge.
-// The battleBoost score term already tilts ranking toward battles, but a
-// soft boost can't guarantee the mix the product wants: with few battles in
-// the corpus the feed collapses to all-shorts, and with many battles shorts
-// disappear. This pass splits the composed feed into two rank-ordered
-// streams and re-interleaves them positionally at `ratio` battles per short
-// (default 3:1), preserving each stream's internal order.
-//
-// Tunable live via the "battleShortRatio" experiment key — e.g. 4.0 for a
-// harder battle skew, 0 (or negative) to disable the quota entirely.
-// Graceful degradation: when either stream runs dry the remainder of the
-// other is appended in rank order, so a battle-poor (or short-poor) corpus
-// still fills every slot.
-func applyBattleShortRatio(userID string, composed []ScoredItem) []ScoredItem {
-	ratio := experimentFloat(userID, "battleShortRatio", 3.0)
-	if ratio <= 0 || len(composed) < 2 {
-		return composed
-	}
-	battles := make([]ScoredItem, 0, len(composed))
-	others := make([]ScoredItem, 0, len(composed))
-	for _, it := range composed {
-		cs := getContentScore(getItemID(it.Item), it.Item.Type)
-		if it.Item.Type == "challenge" && cs != nil && cs.ResponseCount > 0 {
-			battles = append(battles, it)
-		} else {
-			others = append(others, it)
-		}
-	}
-	// Nothing to interleave — one stream is empty, order already correct.
-	if len(battles) == 0 || len(others) == 0 {
-		return composed
-	}
-	// Credit-based interleave: slot i wants a battle while the battles
-	// placed so far are below the target fraction ratio/(ratio+1) of the
-	// slots filled. Handles fractional ratios (e.g. 2.5) exactly.
-	targetFrac := ratio / (ratio + 1)
-	out := make([]ScoredItem, 0, len(composed))
-	bi, oi := 0, 0
-	for len(out) < len(composed) {
-		wantBattle := float64(bi) < targetFrac*float64(len(out)+1)
-		if wantBattle && bi < len(battles) {
-			out = append(out, battles[bi])
-			bi++
-		} else if oi < len(others) {
-			out = append(out, others[oi])
-			oi++
-		} else {
-			out = append(out, battles[bi])
-			bi++
-		}
-	}
-	return out
-}
-
 // composeFeed takes scored items and arranges them into the slot pattern.
 // Each slot is filled with the best available item matching that slot type.
 func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]bool) []ScoredItem {
@@ -5078,6 +5082,15 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > maxPageSize {
 		limit = defaultPageSize
 	}
+	// Which tab is asking: "" is the normal mixed feed, "shorts" and "battles"
+	// are the single-kind tabs. Filtering happens after ranking, so a filtered
+	// page is fetched larger and trimmed back — see feed_kind_filter.go.
+	kindFilter := feedKindFromRequest(r)
+	clientLimit := limit
+	limit = feedKindFetchLimit(limit, kindFilter)
+	if limit > maxPageSize {
+		limit = maxPageSize
+	}
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%s_%d", userID, time.Now().Unix()/1800)
 	}
@@ -5161,6 +5174,11 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		// feed_kind_spacing.go — a brand-new user is exactly the cohort
 		// that was being shown eight shorts before their first battle.
 		items = spaceOutFeedKinds(items)
+
+		// Single-kind tab, if that is the tab asking. After spacing, so the page
+		// it filters is the one the mixed feed would have served.
+		items = filterFeedKind(items, kindFilter)
+		items = trimFilteredPagePlain(items, clientLimit, kindFilter)
 
 		// Last step before encoding: make every item playable on the phone
 		// that asked. AFTER finalizeFeedItems so the adaptive-streaming check
@@ -5415,16 +5433,6 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	pattern := getFeedPattern(profile, session, limit)
 	composed := composeFeed(scored, pattern, followingSet)
 
-	// Step 7.-1: Battle:short composition quota. The battleBoost score term
-	// biases ranking toward battles, but a soft boost can't GUARANTEE the
-	// mix — when battles are scarce the feed degrades to all-shorts, and
-	// when they're plentiful shorts vanish entirely. Battles are the core
-	// product surface, so enforce a slot-level ratio (default 3 battles :
-	// 1 short) the way TikTok enforces content-mix quotas: interleave the
-	// two ranked streams positionally, preserving within-type rank order,
-	// and degrade gracefully to whatever's available when one runs dry.
-	composed = applyBattleShortRatio(userID, composed)
-
 	// Step 7.0: Cold-start bootstrap mix — sprinkle high-Wilson-score "known
 	// bangers" into the head for users with very few events. Done AFTER composeFeed
 	// (like surprise injection below): when it ran pre-composition, composeFeed
@@ -5613,6 +5621,12 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	finalizeFeedItemsScored(composed)
 	composed = spaceOutFeedKindsScored(composed)
 
+	// Single-kind tab, if that is the tab asking. After spacing so the page it
+	// filters is the one the mixed feed would have served, and before the trim
+	// so the client still gets a full page.
+	composed = filterFeedKindScored(composed, kindFilter)
+	composed = trimFilteredPage(composed, clientLimit, kindFilter)
+
 	// Interleave a "Suggested accounts" card into the feed. TikTok-style:
 	// one card injected at index 4 of page 1, and again every 8 items so
 	// long sessions see a fresh card per page without spam. Building the
@@ -5731,6 +5745,13 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(limitStr)
 	if limit < 1 || limit > maxPageSize {
 		limit = defaultPageSize
+	}
+	// Which tab is asking — see feed_kind_filter.go.
+	kindFilter := feedKindFromRequest(r)
+	clientLimit := limit
+	limit = feedKindFetchLimit(limit, kindFilter)
+	if limit > maxPageSize {
+		limit = maxPageSize
 	}
 
 	// Same pull-to-refresh signal the other two feed surfaces honour.
@@ -5858,6 +5879,10 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 	// kind, and both kinds keep their own newest-first order inside the
 	// page — the same shape as the seen-aware pass just above.
 	items = spaceOutFeedKinds(items)
+
+	// Single-kind tab, if that is the tab asking.
+	items = filterFeedKind(items, kindFilter)
+	items = trimFilteredPagePlain(items, clientLimit, kindFilter)
 
 	// Make every item playable on the phone that asked. After the enrichment
 	// above, so the adaptive-streaming check sees the manifest URLs.
@@ -6366,15 +6391,32 @@ func fetchCandidatesWindowed(userID string, limit int, window string) []HomeFeed
 	// surface, but shorts keep the catalog large enough to fill a session
 	// without repeating creators.
 	battleLimit := (limit * 7) / 10
-	shortLimit := limit - battleLimit
 	if battleLimit < 1 {
 		battleLimit = 1
 	}
+
+	items := fetchChallengesWindowedByKind(userID, "battle", battleLimit, window)
+
+	// THE BATTLE SHARE IS A FLOOR FOR BATTLES, NOT A CAP ON SHORTS. Shorts get
+	// the whole remaining budget, including whatever the battles could not use.
+	//
+	// This used to be a fixed 30%, and on a library short of battles that threw
+	// candidates away: asking for 14 battles, finding 4, asking for 6 shorts,
+	// and handing the ranker 10 candidates out of a 20-candidate budget. Ten
+	// slots empty, and ten shorts sitting in the database that the scorer never
+	// even got to look at — not beaten, just never fetched.
+	//
+	// The widening ladder above cannot make that up either. Every window is
+	// ordered newest-first, so a wider window returns the SAME newest rows this
+	// one already has; they all dedupe away and the pool stays short. Widening
+	// only helps when a window was empty, never when it was capped.
+	//
+	// When battles are plentiful nothing changes: they fill their share and
+	// shorts get exactly the rest, the same 70/30 as before.
+	shortLimit := limit - len(items)
 	if shortLimit < 1 {
 		shortLimit = 1
 	}
-
-	items := fetchChallengesWindowedByKind(userID, "battle", battleLimit, window)
 	items = append(items, fetchChallengesWindowedByKind(userID, "short", shortLimit, window)...)
 	return items
 }

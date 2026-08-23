@@ -1595,10 +1595,15 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 
 	var id int
 	var createdAt time.Time
-	category := payload.Category
-	if category == "" {
-		category = inferCategory(payload.Subject, payload.Prefix, "")
-	}
+	// The creator's own words for what this is about, cleaned and capped on
+	// the way in so two videos tagged the same thing compare equal later.
+	// See content_tags.go.
+	tags := normalizeTags(payload.Tags)
+
+	// Category, in order of how much the source can be trusted: what the
+	// creator picked, then what their tags say, then keyword matching on the
+	// subject line — which is a guess, and used to be the only input.
+	category := categoryForContent(payload.Category, tags, payload.Subject, payload.Prefix, "")
 	// Energy level: derived server-side from category + subject +
 	// caption + creator baseline. See energy_classifier.go for the
 	// weighted-scoring breakdown. Older clients that still send an
@@ -1619,8 +1624,14 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 			payload.CreatorID,
 		)
 	}
-	emotionJSON, _ := json.Marshal(payload.EmotionTags)
-	if len(payload.EmotionTags) == 0 {
+	// Mood, from everything the creator gave us. A tag can name a mood as
+	// readily as a subject — "funny", "chill" and "scary" are all on the
+	// emotion list — so tags feed this as well as the category. Reading them
+	// as only one or the other throws away half of what was said. See
+	// emotionsForContent.
+	emotions := emotionsForContent(payload.EmotionTags, tags, payload.Subject, payload.Prefix, "")
+	emotionJSON, _ := json.Marshal(emotions)
+	if len(emotions) == 0 {
 		emotionJSON = []byte("[]")
 	}
 	// Always write a non-nil JSONB blob — lib/pq's default nil-byte → SQL NULL
@@ -1632,11 +1643,18 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 		variantsJSON = []byte("{}")
 	}
 
+	// Same non-nil rule as variantsJSON above: an empty slice must reach the
+	// JSONB column as [] rather than as SQL NULL.
+	tagsJSON, _ := json.Marshal(tags)
+	if len(tags) == 0 {
+		tagsJSON = []byte("[]")
+	}
+
 	err = db.QueryRow(
-		`INSERT INTO challenges (creator_id, video_url, video_variants, thumbnail_url, prefix, subject, visibility, category, emotion_tags, energy_level)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, created_at`,
+		`INSERT INTO challenges (creator_id, video_url, video_variants, thumbnail_url, prefix, subject, visibility, category, emotion_tags, custom_tags, energy_level)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, created_at`,
 		creatorID, payload.VideoURL, variantsJSON, payload.ThumbnailURL, payload.Prefix, payload.Subject, payload.Visibility,
-		category, emotionJSON, energyLevel,
+		category, emotionJSON, tagsJSON, energyLevel,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return Challenge{}, err
@@ -1667,7 +1685,8 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 		Visibility:      payload.Visibility,
 		Status:          "open",
 		Category:        category,
-		EmotionTags:     payload.EmotionTags,
+		EmotionTags:     emotions,
+		Tags:            tags,
 		EnergyLevel:     energyLevel,
 		CreatedAt:       createdAt.UTC().Format(time.RFC3339),
 		ExpiresAt:       createdAt.Add(24 * time.Hour).UTC().Format(time.RFC3339),

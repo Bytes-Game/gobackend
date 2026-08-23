@@ -38,7 +38,15 @@ const (
 	// (categorical features + quality + energy) — recency and popularity are
 	// re-applied on every read so freshness is preserved. 6h TTL is short
 	// enough that any rare metadata edits propagate quickly.
-	contentEmbedRedisKey = "embed:content:"
+	// The version suffix is what retires cached vectors when the feature set
+	// changes. Tag tokens were added to the stable part, so every vector
+	// cached before that is missing them — and would keep being served for
+	// six hours after deploy, quietly leaving the new signal out of exactly
+	// the items the feed is busiest with. Bumping the key means those entries
+	// are simply never found again and expire on their own.
+	//
+	// Bump this whenever buildContentEmbeddingStable gains or loses a feature.
+	contentEmbedRedisKey = "embed:content:v2:"
 	contentEmbedTTL      = 6 * time.Hour
 
 	// Emotion tag cache. getContentEmotions is called O(candidates) times per
@@ -121,6 +129,23 @@ func buildContentEmbeddingStable(cs *ContentScore, emotions []string) []float64 
 			continue
 		}
 		featureToken("emo:"+strings.ToLower(e), 0.5, v)
+	}
+	// Creator tags: what the video is about, in the creator's own words.
+	//
+	// Weighted between category and emotion. Below category, because a
+	// category is one considered choice from a fixed list while a tag is
+	// free text somebody typed. Above emotion, because "hip hop" says far
+	// more about what a video IS than "intense" does.
+	//
+	// This is what lets two videos about the same narrow subject sit close
+	// together even when the category list has no word for that subject —
+	// which is most subjects. Already normalized at write time (see
+	// content_tags.go), so the token matches across videos.
+	for _, t := range cs.Tags {
+		if t == "" {
+			continue
+		}
+		featureToken("tag:"+t, 0.6, v)
 	}
 
 	// Stable continuous features in reserved slots.
