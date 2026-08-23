@@ -42,8 +42,24 @@ jobs:
       # ubuntu-24.04 runner images no longer ship ffmpeg preinstalled
       # (the first live run failed with "executable file not found").
       # apt install adds ~30-60s per run — still free.
-      - name: install ffmpeg
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg && ffmpeg -version | head -1
+      #
+      # tesseract is here for the same reason ffmpeg is: the worker now also
+      # LOOKS at each video while it has the file, and tesseract is what reads
+      # the words a creator burns onto the screen. On short video that caption
+      # is very often the best description of what the video is, and nothing
+      # else in the system can see it. Roughly 5 seconds of install.
+      #
+      # THIS is the install that matters, not the one in cmd/hls-worker/
+      # Dockerfile. The Dockerfile describes an always-on container worker,
+      # which is a paid plan on most hosts; this workflow is what actually
+      # runs, free, every 30 minutes. Adding a tool to the Dockerfile alone
+      # changes nothing about production.
+      - name: install ffmpeg + tesseract
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg tesseract-ocr tesseract-ocr-eng
+          ffmpeg -version | head -1
+          tesseract --version | head -1
 
       # TWO parallel workers: the backend's FOR UPDATE SKIP LOCKED claim
       # makes concurrent workers safe by construction, and the runner's

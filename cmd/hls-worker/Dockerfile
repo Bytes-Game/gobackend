@@ -1,5 +1,19 @@
 # syntax=docker/dockerfile:1.6
 #
+# ⚠ THIS FILE IS NOT WHAT RUNS IN PRODUCTION. ⚠
+#
+# The transcode worker runs in GitHub Actions, on a schedule, from
+# .github/workflows/hls-worker.yml. That is where tools get installed and
+# where environment variables get set. Changing this Dockerfile alone
+# changes nothing about the live app. Keep the two in step, but treat the
+# workflow as the real one.
+#
+# This file is the always-on container version, kept working for the day
+# somebody wants to pay for a background worker instead of running the
+# queue down every 30 minutes for free.
+#
+# ────────────────────────────────────────────────────────────────────────
+#
 # Dockerfile for the HLS transcode worker (sibling binary of the main
 # devb backend). Designed to deploy as a Render Background Worker but
 # works on any container host with outbound HTTPS to the backend +

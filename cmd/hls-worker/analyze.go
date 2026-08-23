@@ -34,9 +34,21 @@ package main
 // an optional binary was missing would take the whole upload path down for a
 // feature nobody asked to be blocking.
 //
-// The Dockerfile installs tesseract. Whisper is left to the operator: it is a
-// few hundred megabytes of model and a real CPU cost per video, and it is
-// worth turning on deliberately rather than by default.
+// ════════════════════════════════════════════════════════════════════════════
+// WHICH PASSES ARE ON RIGHT NOW, AND WHERE TO TURN THE LAST ONE ON
+// ════════════════════════════════════════════════════════════════════════════
+//
+// SHAPE and TEXT are on. SPEECH is off, and is waiting for somebody to decide
+// it is worth the hardware — see the ⚠ section at the top of README.md.
+//
+// This worker runs in GitHub Actions, from .github/workflows/hls-worker.yml,
+// every 30 minutes. That workflow is where tools are installed and where
+// environment variables are set. cmd/hls-worker/Dockerfile is the container
+// version of the same worker and is NOT what production uses; installing
+// something there alone does nothing to the live app.
+//
+// To turn speech on: put a whisper binary and a model wherever the worker
+// runs, and set WHISPER_BIN and WHISPER_MODEL. Nothing else changes.
 
 import (
 	"bufio"

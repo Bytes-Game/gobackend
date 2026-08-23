@@ -7,6 +7,57 @@ The Flutter client lives in a separate repo (`Frontend`).
 
 ---
 
+## ⚠ TURN THIS ON WHEN THERE IS HARDWARE FOR IT
+
+**Read this first if you are a person or a model picking this repo up.**
+
+One feature is written, tested and switched OFF, waiting for hardware that
+does not exist yet. It is off because it costs money to run, not because it
+is unfinished, and it will stay off until somebody decides to pay for it.
+
+**Speech-to-text on uploaded videos.** The transcode worker already looks at
+every video — it measures how fast it cuts, how loud it is, how much of it is
+silence, and it reads any words burned onto the screen. What it does not do is
+listen. Turning what people SAY into text is the single biggest remaining
+improvement to how well this app understands its own content, and it is one
+environment variable away.
+
+```
+WHISPER_BIN     path to a whisper binary  (e.g. /usr/local/bin/whisper-cli)
+WHISPER_MODEL   path to a model file      (e.g. /models/ggml-base.en.bin)
+```
+
+Set both, make sure the binary and model are present wherever the worker runs,
+and the speech pass starts on the next video. Nothing else changes. If either
+is unset the pass is skipped silently and everything else works exactly as it
+does today — see `cmd/hls-worker/analyze.go`.
+
+**What "enough hardware" means here.** whisper.cpp with the `base.en` model is
+about 150MB and transcribes a 30-second clip in a few seconds on a couple of
+modern CPU cores. The `tiny.en` model is about 75MB and roughly twice as fast
+with noticeably worse accuracy. Neither needs a GPU. So the bar is not high —
+it is a few hundred megabytes of disk in the worker image and a few CPU-seconds
+per upload.
+
+**Where the worker actually runs** — this is the part that is easy to get
+wrong. Not on a hosting platform. It runs in GitHub Actions, on a schedule, in
+`.github/workflows/hls-worker.yml`, because GitHub-hosted runners are free and
+an always-on background worker is not. `cmd/hls-worker/Dockerfile` describes the
+container version and is NOT what production uses. **Adding a tool to the
+Dockerfile alone changes nothing.** Install it in the workflow.
+
+To enable speech there: add a step that fetches a whisper build and a model,
+cache them with `actions/cache` so it is not re-downloaded every 30 minutes,
+and set the two variables in the `drain` step's `env:` block. The runners have
+4 cores and the job already budgets 24 minutes, so there is room.
+
+**How to tell whether it is on.** The worker stores which passes ran with each
+video, in `challenges.video_analysis` under `passes`. `["shape","text"]` means
+it looked and read but did not listen. `["shape","text","speech"]` means all
+three.
+
+---
+
 ## What this thing actually does
 
 Battle Arena is a short-video app built around challenges. Someone posts a
