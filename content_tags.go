@@ -229,3 +229,82 @@ func categoryForContent(explicit string, tags []string, subject, prefix, caption
 	}
 	return inferCategory(subject, prefix, caption)
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// TAGS ARE ALSO A MOOD SIGNAL
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Moving tags out of the emotion field was right — a tag like "hip hop" is not
+// a mood and was matching nothing there. But some tags ARE moods. "funny",
+// "chill", "scary", "wholesome" are all on the emotion list, and a creator who
+// types one of those is telling us how the video feels as much as what it is
+// about.
+//
+// So a tag does both jobs. It describes the subject, and where it names a
+// mood it feeds the emotion vector too, which is what the ranker matches
+// against how a viewer says they are feeling. Reading them as only one or the
+// other throws away half of what the creator said.
+
+// emotionsFromTags returns the tags that name a real emotion label.
+//
+// Exact matches only. A near-miss belongs to the keyword matcher in
+// autoTagFromCaption, which is built for guessing; this is for the case where
+// the creator used the app's own word and there is nothing to guess about.
+func emotionsFromTags(tags []string) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+	known := make(map[string]bool, len(EmotionLabels))
+	for _, e := range EmotionLabels {
+		known[e] = true
+	}
+	var out []string
+	for _, t := range tags {
+		if known[t] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// emotionsForContent works out a video's mood from everything available, in
+// order of how much each source can be trusted.
+//
+//	1. emotions the creator explicitly picked from the list
+//	2. tags that name a mood outright
+//	3. keyword matching over the caption AND the tags
+//
+// The third step reads the tags as text as well, so "hilarious" reaches the
+// "funny" mood through the keyword table even though it is not an emotion
+// label itself.
+func emotionsForContent(explicit []string, tags []string, subject, prefix, caption string) []string {
+	seen := make(map[string]bool, len(explicit))
+	out := make([]string, 0, len(explicit)+len(tags))
+	for _, e := range explicit {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e != "" && !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	for _, e := range emotionsFromTags(tags) {
+		if !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	// Keyword pass over caption and tags together. Runs even when something
+	// was found above: a video can be both funny and nostalgic, and stopping
+	// at the first answer would keep only one.
+	text := subject + " " + prefix + " " + caption + " " + strings.Join(tags, " ")
+	for _, e := range autoTagFromCaption(text, out) {
+		if !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}

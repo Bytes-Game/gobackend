@@ -72,6 +72,11 @@ type hlsCompleteRequest struct {
 	ChallengeID string `json:"challengeId"`
 	ManifestURL string `json:"manifestUrl"`
 	Kind        string `json:"kind"` // "" / "challenge" | "response"
+	// What the worker worked out about the video while it had the file —
+	// see cmd/hls-worker/analyze.go. Absent from workers that predate it,
+	// and from any worker whose optional passes all found nothing, so this
+	// being empty is ordinary rather than an error.
+	Analysis json.RawMessage `json:"analysis,omitempty"`
 }
 
 // hlsTableForKind maps the wire kind to the table whose
@@ -215,6 +220,14 @@ func HLSCompleteHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db update failed", http.StatusInternalServerError)
 		return
 	}
+
+	// The analysis is written separately, and a failure here is logged rather
+	// than returned. The manifest is the thing the worker must be told landed:
+	// if this call 500s the worker retries the whole job, re-downloading and
+	// re-transcoding a video that is already done, to re-save a signal that is
+	// a bonus. Losing one reading is much cheaper than that.
+	storeVideoAnalysis(table, cid, req.Analysis)
+
 	w.WriteHeader(http.StatusNoContent)
 }
 

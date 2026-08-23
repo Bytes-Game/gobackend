@@ -2622,17 +2622,38 @@ func saveUserProfile(p *UserProfile) {
 func inferCategory(subject, prefix, caption string) string {
 	text := strings.ToLower(subject + " " + prefix + " " + caption)
 
+	// Every key here MUST be a name from ContentCategories. It did not used
+	// to be, and that quietly broke categorisation in both directions:
+	//
+	//   * four of the answers were not categories at all — "skill",
+	//     "fitness", "challenge" and "general". A video inferred as "fitness"
+	//     could never match a viewer whose profile said "sports", because
+	//     nothing else in the app has ever used that word.
+	//   * ten real categories had no keywords, so nothing could ever be
+	//     inferred into them: art, education, fashion, food, horror,
+	//     lifestyle, news, prank, sports and tech. More than half the list
+	//     was unreachable.
+	//
+	// "challenge" is gone rather than renamed. Every item in this app is a
+	// challenge, so it described nothing and matched no one.
 	categories := map[string][]string{
-		"comedy":     {"funny", "lol", "roast", "comedy", "laugh", "joke", "humor", "meme", "prank"},
+		"comedy":     {"funny", "lol", "roast", "comedy", "laugh", "joke", "humor", "meme"},
 		"motivation": {"grind", "discipline", "success", "hustle", "motivat", "inspire", "goal", "mindset", "win"},
-		"skill":      {"tutorial", "learn", "how to", "technique", "skill", "trick", "tip", "teach", "lesson"},
+		"education":  {"tutorial", "learn", "how to", "technique", "skill", "trick", "tip", "teach", "lesson", "explain"},
 		"dance":      {"dance", "choreo", "moves", "groove", "dancer", "dancing", "step"},
 		"music":      {"sing", "song", "beat", "rap", "music", "vocal", "instrument", "cover"},
-		"fitness":    {"workout", "gym", "fit", "exercise", "muscle", "train", "body", "weight"},
+		"sports":     {"workout", "gym", "fit", "exercise", "muscle", "train", "weight", "football", "cricket", "match", "sport"},
 		"gaming":     {"game", "gaming", "play", "stream", "esport", "gamer"},
 		"story":      {"story", "vlog", "life", "day in", "experience", "journey", "storytime"},
-		"challenge":  {"challenge", "dare", "battle", "versus", "vs", "compete", "who is better"},
 		"emotional":  {"sad", "cry", "emotional", "feel", "heart", "miss", "love", "pain"},
+		"food":       {"food", "recipe", "cook", "eat", "kitchen", "meal", "snack", "taste", "chef"},
+		"fashion":    {"outfit", "fashion", "style", "makeup", "hair", "dress", "look", "grwm"},
+		"tech":       {"tech", "code", "coding", "phone", "gadget", "app", "computer", "ai"},
+		"prank":      {"prank", "prank on", "gotcha", "social experiment"},
+		"horror":     {"scary", "horror", "creepy", "haunted", "ghost", "nightmare"},
+		"art":        {"draw", "paint", "art", "sketch", "craft", "diy"},
+		"lifestyle":  {"routine", "morning", "clean", "organise", "organize", "wellness", "self care"},
+		"news":       {"news", "opinion", "commentary", "current", "debate"},
 	}
 
 	bestCategory := "general"
@@ -2886,7 +2907,7 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 	// Category, creator info, and created_at — single query per content type
 	if contentType == "challenge" {
 		var subject, prefix, dbCategory, dbEnergy string
-		var emotionJSON, tagsJSON []byte
+		var emotionJSON, tagsJSON, autoTagsJSON, analysisJSON []byte
 		var creatorID, league string
 		var followers, wins, losses, respCount, chViews, chLikes int
 		var createdAt time.Time
@@ -2895,6 +2916,8 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 				COALESCE(c.category,'other'), COALESCE(c.energy_level,'medium'),
 				COALESCE(c.emotion_tags,'[]'::JSONB),
 				COALESCE(c.custom_tags,'[]'::JSONB),
+				COALESCE(c.auto_tags,'[]'::JSONB),
+				c.video_analysis,
 				CAST(u.id AS TEXT), u.league,
 				(SELECT COUNT(*) FROM follows WHERE following_id = u.id),
 				u.wins, u.losses, c.created_at,
@@ -2905,6 +2928,7 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			JOIN users u ON c.creator_id = u.id
 			WHERE c.id = $1`, contentID).Scan(
 			&subject, &prefix, &dbCategory, &dbEnergy, &emotionJSON, &tagsJSON,
+			&autoTagsJSON, &analysisJSON,
 			&creatorID, &league, &followers, &wins, &losses, &createdAt, &respCount,
 			&chViews, &chLikes)
 		cs.ResponseCount = respCount
@@ -2955,8 +2979,20 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			}
 		}
 
-		var rawTags []string
+		var rawTags, rawAutoTags []string
 		json.Unmarshal(tagsJSON, &rawTags)
+		json.Unmarshal(autoTagsJSON, &rawAutoTags)
+		// What the worker made of the video, if it has been looked at yet.
+		// Absent is ordinary — an upload from before this existed, or a worker
+		// with none of the optional binaries installed — and means "not
+		// measured", never "measured as nothing".
+		var analysis *VideoAnalysis
+		if len(analysisJSON) > 0 {
+			var parsed VideoAnalysis
+			if json.Unmarshal(analysisJSON, &parsed) == nil {
+				analysis = &parsed
+			}
+		}
 		// Folded on READ as well as on write, so every tag in memory is
 		// comparable no matter how it got into the column. Tags written before
 		// normalization existed — and the ones migration 004 moved across from
@@ -2966,12 +3002,15 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		//
 		// Cheap: at most ten short strings, and this runs inside the cached
 		// per-content computation rather than per request.
-		cs.Tags = normalizeTags(rawTags)
+		cs.Tags = mergeTags(normalizeTags(rawTags), normalizeTags(rawAutoTags))
 		// Category, best source first: what the creator picked, then what
 		// their tags say, then keyword matching on the subject line. That
 		// last one is a guess and used to be the only input — see
 		// content_tags.go.
-		cs.Category = categoryForContent(dbCategory, cs.Tags, subject, prefix, "")
+		// The caption the matcher reads now includes anything found on screen
+		// or spoken aloud, so a video whose only description is burned into
+		// the picture is no longer invisible to it.
+		cs.Category = categoryForContent(dbCategory, cs.Tags, subject, prefix, analysisText(analysis))
 		switch dbEnergy {
 		case "low":
 			cs.EnergyLevel = 0.25
@@ -2981,6 +3020,13 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			// 'medium'/unset = creator didn't really declare → use the inferred
 			// (engagement-modulated) energy instead of a flat constant.
 			cs.EnergyLevel = inferredEnergy
+			// …unless the video itself was measured. How fast it cuts and how
+			// much of it is not silence is a fact about the file, where the
+			// inferred value is a guess from engagement — and on a video
+			// nobody has watched yet there is no engagement to guess from.
+			if e, ok := analysisEnergy(analysis); ok {
+				cs.EnergyLevel = e
+			}
 		}
 		// Discrete label energy on the SAME scale EnergyByHour is trained on, so
 		// energyHourMatch compares like-for-like. cs.EnergyLevel above may be the
@@ -2989,10 +3035,11 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		cs.EnergyLevelLabel = energyStringToFloat(dbEnergy)
 		var emotions []string
 		json.Unmarshal(emotionJSON, &emotions)
-		// Auto-tag from caption if no creator-declared tags
-		if len(emotions) == 0 {
-			emotions = autoTagFromCaption(subject+" "+prefix, emotions)
-		}
+		// Mood, from everything known about the video — declared emotions,
+		// tags that name a mood, and a keyword pass over the caption AND the
+		// tags. Tags describe the subject and the feel; a video tagged "funny"
+		// is telling us both. See emotionsForContent.
+		emotions = emotionsForContent(emotions, cs.Tags, subject, prefix, analysisText(analysis))
 		for _, e := range emotions {
 			cs.EmotionVector[strings.ToLower(e)] = 1.0 // canonical lowercase — matches miner + EmotionPreference keys
 		}

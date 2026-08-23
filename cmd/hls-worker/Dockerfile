@@ -57,13 +57,32 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # ────────────── runtime stage ──────────────
 FROM debian:bookworm-slim AS runtime
 
-# ffmpeg     — the transcoder; ca-certificates  — needed for HTTPS GETs
-# against R2 / the backend; tini       — proper PID 1 so signals from
-# Render (SIGTERM on redeploy) reach the worker and let it exit cleanly
-# mid-poll instead of being SIGKILLed.
+# ffmpeg     — the transcoder, and now also the measuring tool: the worker
+#              runs one extra pass over each source to work out how fast it
+#              cuts, how loud it is and how much of it is silence. See
+#              analyze.go. No extra package needed for that part.
+# tesseract  — reads words burned into the picture. Adds roughly 40MB, and
+#              earns it: on short video the caption a creator types onto the
+#              screen is very often the single best description of what the
+#              video is, and it is invisible to everything else. The eng
+#              language data is a separate package and is required — the
+#              binary alone cannot read anything.
+# ca-certificates — needed for HTTPS GETs against R2 / the backend
+# tini       — proper PID 1 so signals from Render (SIGTERM on redeploy)
+#              reach the worker and let it exit cleanly mid-poll instead of
+#              being SIGKILLed.
+#
+# Speech-to-text is deliberately NOT installed here. It wants a few hundred
+# megabytes of model and real CPU time per video, which is a decision about
+# hosting cost rather than about code — so the worker looks for a whisper
+# binary and model at run time via WHISPER_BIN and WHISPER_MODEL, and simply
+# skips the pass when they are not set. To turn it on, add whisper.cpp and a
+# model to this image and set both variables.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ffmpeg \
+        tesseract-ocr \
+        tesseract-ocr-eng \
         ca-certificates \
         tini \
  && rm -rf /var/lib/apt/lists/*

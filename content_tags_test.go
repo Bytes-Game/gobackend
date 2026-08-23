@@ -156,3 +156,71 @@ func TestCategoryForContent_AlwaysAnswers(t *testing.T) {
 		t.Error("a video with no category, no tags and no text got no category")
 	}
 }
+
+// ── Tags are a mood signal too ──────────────────────────────────────────────
+//
+// Moving tags out of the emotion field was right — "hip hop" is not a mood.
+// But some tags ARE moods, and losing those would have quietly cost the
+// ranker the mood matching it does against how a viewer says they feel.
+
+func TestEmotionsFromTags_PicksOutTheRealMoods(t *testing.T) {
+	got := emotionsFromTags([]string{"hip hop", "funny", "dance battle", "chill"})
+	if len(got) != 2 {
+		t.Fatalf("got %v, want the two that are real emotion labels", got)
+	}
+	if got[0] != "funny" || got[1] != "chill" {
+		t.Errorf("got %v, want [funny chill] in the creator's own order", got)
+	}
+}
+
+func TestEmotionsFromTags_SubjectTagsAreNotMoods(t *testing.T) {
+	// The half that must NOT happen. If subject tags leaked into the emotion
+	// vector, they would match no mood and dilute the ones that would — which
+	// is exactly what was wrong before tags had their own field.
+	if got := emotionsFromTags([]string{"hip hop", "gym", "pasta"}); len(got) != 0 {
+		t.Errorf("subject tags produced emotions %v", got)
+	}
+	if got := emotionsFromTags(nil); got != nil {
+		t.Errorf("no tags produced %v", got)
+	}
+}
+
+func TestEmotionsForContent_ATaggedMoodSurvives(t *testing.T) {
+	// The regression this exists to catch: a creator tags their video "funny"
+	// and the feed still knows it is funny.
+	got := emotionsForContent(nil, []string{"funny", "hip hop"}, "", "", "")
+	if !containsString(got, "funny") {
+		t.Errorf("got %v — a tag naming a mood must reach the emotion vector", got)
+	}
+}
+
+func TestEmotionsForContent_ExplicitPicksComeFirstAndAllSourcesCombine(t *testing.T) {
+	// A video can be several things at once. Stopping at the first source
+	// would keep only one, so a funny nostalgic video would lose half of what
+	// it is.
+	got := emotionsForContent([]string{"nostalgic"}, []string{"funny"}, "", "", "")
+	if len(got) == 0 || got[0] != "nostalgic" {
+		t.Errorf("got %v — what the creator explicitly picked should lead", got)
+	}
+	if !containsString(got, "funny") {
+		t.Errorf("got %v — the tagged mood was dropped once an explicit one existed", got)
+	}
+}
+
+func TestEmotionsForContent_ReadsTheTagsAsTextToo(t *testing.T) {
+	// "throwback" is not one of the sixteen emotion labels, but the keyword
+	// table maps it to "nostalgic". Running the keyword pass over the tags as
+	// well as the caption is what lets a word like that land somewhere
+	// sensible instead of being thrown away for not being an exact match.
+	got := emotionsForContent(nil, []string{"throwback"}, "", "", "")
+	if !containsString(got, "nostalgic") {
+		t.Errorf("a tag of throwback gave %v, want nostalgic among them — the "+
+			"keyword pass is not reading the tags", got)
+	}
+}
+
+func TestEmotionsForContent_NothingIsNil(t *testing.T) {
+	if got := emotionsForContent(nil, nil, "", "", ""); got != nil {
+		t.Errorf("nothing at all produced %v", got)
+	}
+}

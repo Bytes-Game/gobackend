@@ -1624,8 +1624,14 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 			payload.CreatorID,
 		)
 	}
-	emotionJSON, _ := json.Marshal(payload.EmotionTags)
-	if len(payload.EmotionTags) == 0 {
+	// Mood, from everything the creator gave us. A tag can name a mood as
+	// readily as a subject — "funny", "chill" and "scary" are all on the
+	// emotion list — so tags feed this as well as the category. Reading them
+	// as only one or the other throws away half of what was said. See
+	// emotionsForContent.
+	emotions := emotionsForContent(payload.EmotionTags, tags, payload.Subject, payload.Prefix, "")
+	emotionJSON, _ := json.Marshal(emotions)
+	if len(emotions) == 0 {
 		emotionJSON = []byte("[]")
 	}
 	// Always write a non-nil JSONB blob — lib/pq's default nil-byte → SQL NULL
@@ -1679,7 +1685,7 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 		Visibility:      payload.Visibility,
 		Status:          "open",
 		Category:        category,
-		EmotionTags:     payload.EmotionTags,
+		EmotionTags:     emotions,
 		Tags:            tags,
 		EnergyLevel:     energyLevel,
 		CreatedAt:       createdAt.UTC().Format(time.RFC3339),

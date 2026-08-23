@@ -159,13 +159,13 @@ func main() {
 		}
 		emptyPolls = 0
 		log.Printf("claimed job kind=%s id=%s source=%s", jobKind(*job), job.ChallengeID, job.SourceURL)
-		manifestURL, err := runJob(cfg, *job, *jobTimeout)
+		manifestURL, analysis, err := runJob(cfg, *job, *jobTimeout)
 		if err != nil {
 			log.Printf("process error for %s=%s: %v", jobKind(*job), job.ChallengeID, err)
 			_ = reportFail(cfg, *job, err.Error())
 			continue
 		}
-		if err := reportComplete(cfg, *job, manifestURL); err != nil {
+		if err := reportComplete(cfg, *job, manifestURL, analysis); err != nil {
 			log.Printf("complete report error for %s=%s: %v", jobKind(*job), job.ChallengeID, err)
 			continue
 		}
@@ -245,6 +245,11 @@ type reportPayload struct {
 	ChallengeID string `json:"challengeId"`
 	ManifestURL string `json:"manifestUrl"`
 	Kind        string `json:"kind"`
+	// What the video turned out to be, from looking at it — see analyze.go.
+	// Omitted entirely when no pass produced anything, so a backend that
+	// does not understand the field, or a worker with no optional binaries
+	// installed, both behave exactly as before.
+	Analysis json.RawMessage `json:"analysis,omitempty"`
 }
 
 // ─── HTTP calls to the backend ───────────────────────────────────────
@@ -280,8 +285,13 @@ func jobKind(j pendingJob) string {
 	return "challenge"
 }
 
-func reportComplete(cfg *workerConfig, job pendingJob, manifestURL string) error {
-	body, _ := json.Marshal(reportPayload{ChallengeID: job.ChallengeID, ManifestURL: manifestURL, Kind: jobKind(job)})
+func reportComplete(cfg *workerConfig, job pendingJob, manifestURL string, analysis json.RawMessage) error {
+	body, _ := json.Marshal(reportPayload{
+		ChallengeID: job.ChallengeID,
+		ManifestURL: manifestURL,
+		Kind:        jobKind(job),
+		Analysis:    analysis,
+	})
 	req, _ := http.NewRequest("POST", cfg.BackendURL+"/api/v1/internal/hls/complete", bytes.NewReader(body))
 	req.Header.Set("X-Worker-Token", cfg.WorkerToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -315,42 +325,42 @@ func reportFail(cfg *workerConfig, job pendingJob, reason string) error {
 // runJob wraps processJob in a hard deadline so no single job can outlive
 // the runner window (see the -job-timeout flag). timeout <= 0 disables the
 // bound, preserving the previous unlimited behaviour for local runs.
-func runJob(cfg *workerConfig, job pendingJob, timeout time.Duration) (string, error) {
+func runJob(cfg *workerConfig, job pendingJob, timeout time.Duration) (string, json.RawMessage, error) {
 	if timeout <= 0 {
 		return processJob(context.Background(), cfg, job)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	url, err := processJob(ctx, cfg, job)
+	url, analysis, err := processJob(ctx, cfg, job)
 	// Surface the deadline explicitly — "context deadline exceeded" alone
 	// in the failure reason doesn't say which budget was blown.
 	if err != nil && ctx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("job exceeded -job-timeout %v: %w", timeout, err)
+		return "", nil, fmt.Errorf("job exceeded -job-timeout %v: %w", timeout, err)
 	}
-	return url, err
+	return url, analysis, err
 }
 
-func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (string, error) {
+func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (string, json.RawMessage, error) {
 	work, err := os.MkdirTemp("", "hls-"+job.ChallengeID+"-")
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer os.RemoveAll(work)
 
 	// 1. Download source.
 	srcPath := filepath.Join(work, "source.mp4")
 	if err := downloadTo(ctx, job.SourceURL, srcPath); err != nil {
-		return "", fmt.Errorf("download: %w", err)
+		return "", nil, fmt.Errorf("download: %w", err)
 	}
 
 	// 2. Run ffmpeg → produces master.m3u8 + per-rendition manifests
 	// + .ts segments in `work`.
 	outDir := filepath.Join(work, "out")
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if err := transcodeHLS(ctx, srcPath, outDir); err != nil {
-		return "", fmt.Errorf("transcode: %w", err)
+		return "", nil, fmt.Errorf("transcode: %w", err)
 	}
 
 	// 3. Upload everything in outDir to R2 under hls/<id>/ for
@@ -364,7 +374,7 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (string,
 	}
 	files, err := os.ReadDir(outDir)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	for _, f := range files {
 		if f.IsDir() {
@@ -377,7 +387,7 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (string,
 				local := filepath.Join(outDir, f.Name(), g.Name())
 				key := prefix + "/" + f.Name() + "/" + g.Name()
 				if err := uploadFile(ctx, cfg, local, key); err != nil {
-					return "", fmt.Errorf("upload %s: %w", key, err)
+					return "", nil, fmt.Errorf("upload %s: %w", key, err)
 				}
 			}
 			continue
@@ -385,7 +395,7 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (string,
 		local := filepath.Join(outDir, f.Name())
 		key := prefix + "/" + f.Name()
 		if err := uploadFile(ctx, cfg, local, key); err != nil {
-			return "", fmt.Errorf("upload %s: %w", key, err)
+			return "", nil, fmt.Errorf("upload %s: %w", key, err)
 		}
 	}
 
@@ -397,10 +407,16 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (string,
 		base = strings.TrimRight(strings.TrimSpace(job.PublicBaseURL), "/")
 	}
 	if base == "" {
-		return "", fmt.Errorf("no public base URL: set R2_PUBLIC_BASE_URL or deploy a backend that sends publicBaseUrl")
+		return "", nil, fmt.Errorf("no public base URL: set R2_PUBLIC_BASE_URL or deploy a backend that sends publicBaseUrl")
 	}
 	manifestURL := base + "/" + prefix + "/master.m3u8"
-	return manifestURL, nil
+	// Work out what the video actually is, now that the file is local and
+	// the expensive part (download + transcode) is already paid for. Never
+	// fatal: analyzeVideo returns whatever it managed and the job completes
+	// either way — a missing optional binary must not block an upload.
+	analysis := analysisJSON(analyzeVideo(ctx, srcPath))
+
+	return manifestURL, analysis, nil
 }
 
 // downloadClient bounds source fetches — a stalled external host must
