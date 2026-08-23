@@ -2955,7 +2955,18 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			}
 		}
 
-		json.Unmarshal(tagsJSON, &cs.Tags)
+		var rawTags []string
+		json.Unmarshal(tagsJSON, &rawTags)
+		// Folded on READ as well as on write, so every tag in memory is
+		// comparable no matter how it got into the column. Tags written before
+		// normalization existed — and the ones migration 004 moved across from
+		// the emotion field — are raw creator strings, so "Hip Hop" from an old
+		// video would never match "hip hop" from a new one, and the whole point
+		// of tags is that two videos about the same thing look related.
+		//
+		// Cheap: at most ten short strings, and this runs inside the cached
+		// per-content computation rather than per request.
+		cs.Tags = normalizeTags(rawTags)
 		// Category, best source first: what the creator picked, then what
 		// their tags say, then keyword matching on the subject line. That
 		// last one is a guess and used to be the only input — see
