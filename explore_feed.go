@@ -67,6 +67,14 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	if limit > 50 {
 		limit = 50
 	}
+	// Which tab is asking — see feed_kind_filter.go. The over-fetch is folded
+	// into candidateLimit below, so a single-kind page still fills.
+	kindFilter := feedKindFromRequest(r)
+	clientLimit := limit
+	limit = feedKindFetchLimit(limit, kindFilter)
+	if limit > 50 {
+		limit = 50
+	}
 	// Same TikTok-style refresh signal as SmartFeedHandler. Clears session
 	// dedup; anti-repeat top-3 demotion + ±0.10 score jitter is applied below
 	// before sorting so the same item rarely lands at the head two refreshes
@@ -271,6 +279,10 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// Shared enrichment choke point — same as For You / Following.
 	finalizeFeedItemsScored(composed)
 	composed = spaceOutFeedKindsScored(composed)
+
+	// Single-kind tab, if that is the tab asking.
+	composed = filterFeedKindScored(composed, kindFilter)
+	composed = trimFilteredPage(composed, clientLimit, kindFilter)
 
 	// Make every item playable on the phone that asked. After the enrichment
 	// above, so the adaptive-streaming check sees the manifest URLs.

@@ -5078,6 +5078,15 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > maxPageSize {
 		limit = defaultPageSize
 	}
+	// Which tab is asking: "" is the normal mixed feed, "shorts" and "battles"
+	// are the single-kind tabs. Filtering happens after ranking, so a filtered
+	// page is fetched larger and trimmed back — see feed_kind_filter.go.
+	kindFilter := feedKindFromRequest(r)
+	clientLimit := limit
+	limit = feedKindFetchLimit(limit, kindFilter)
+	if limit > maxPageSize {
+		limit = maxPageSize
+	}
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%s_%d", userID, time.Now().Unix()/1800)
 	}
@@ -5161,6 +5170,11 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		// feed_kind_spacing.go — a brand-new user is exactly the cohort
 		// that was being shown eight shorts before their first battle.
 		items = spaceOutFeedKinds(items)
+
+		// Single-kind tab, if that is the tab asking. After spacing, so the page
+		// it filters is the one the mixed feed would have served.
+		items = filterFeedKind(items, kindFilter)
+		items = trimFilteredPagePlain(items, clientLimit, kindFilter)
 
 		// Last step before encoding: make every item playable on the phone
 		// that asked. AFTER finalizeFeedItems so the adaptive-streaming check
@@ -5613,6 +5627,12 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	finalizeFeedItemsScored(composed)
 	composed = spaceOutFeedKindsScored(composed)
 
+	// Single-kind tab, if that is the tab asking. After spacing so the page it
+	// filters is the one the mixed feed would have served, and before the trim
+	// so the client still gets a full page.
+	composed = filterFeedKindScored(composed, kindFilter)
+	composed = trimFilteredPage(composed, clientLimit, kindFilter)
+
 	// Interleave a "Suggested accounts" card into the feed. TikTok-style:
 	// one card injected at index 4 of page 1, and again every 8 items so
 	// long sessions see a fresh card per page without spam. Building the
@@ -5731,6 +5751,13 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(limitStr)
 	if limit < 1 || limit > maxPageSize {
 		limit = defaultPageSize
+	}
+	// Which tab is asking — see feed_kind_filter.go.
+	kindFilter := feedKindFromRequest(r)
+	clientLimit := limit
+	limit = feedKindFetchLimit(limit, kindFilter)
+	if limit > maxPageSize {
+		limit = maxPageSize
 	}
 
 	// Same pull-to-refresh signal the other two feed surfaces honour.
@@ -5858,6 +5885,10 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 	// kind, and both kinds keep their own newest-first order inside the
 	// page — the same shape as the seen-aware pass just above.
 	items = spaceOutFeedKinds(items)
+
+	// Single-kind tab, if that is the tab asking.
+	items = filterFeedKind(items, kindFilter)
+	items = trimFilteredPagePlain(items, clientLimit, kindFilter)
 
 	// Make every item playable on the phone that asked. After the enrichment
 	// above, so the adaptive-streaming check sees the manifest URLs.
