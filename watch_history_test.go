@@ -19,7 +19,13 @@ func day(n float64) int64 { return int64(n * 24 * 3600) }
 
 func historyAt(secondsAgo int64, strength float64) (watchHistory, int64) {
 	now := time.Now().Unix()
-	return watchHistory{"challenge:v1": {LastAt: now - secondsAgo, Strength: strength}}, now
+	return exactHistory(map[string]watchMemory{
+		"challenge:v1": {LastAt: now - secondsAgo, Strength: strength},
+	}), now
+}
+
+func exactHistory(m map[string]watchMemory) watchHistory {
+	return watchHistory{exact: m}
 }
 
 func TestSuppression_NeverWatchedIsZero(t *testing.T) {
@@ -135,17 +141,17 @@ func TestSuppression_SurvivesNonsenseTimestamps(t *testing.T) {
 	now := time.Now().Unix()
 	// A clock that ran backwards. Clamps to "just watched" — the strongest
 	// handicap — rather than going negative and PROMOTING the repeat.
-	future := watchHistory{"challenge:v1": {LastAt: now + 9999, Strength: 1}}
+	future := exactHistory(map[string]watchMemory{"challenge:v1": {LastAt: now + 9999, Strength: 1}})
 	if got := future.suppression("challenge:v1", now); got < 0 {
 		t.Errorf("a future timestamp produced %v, which would promote a repeat", got)
 	}
 	// A record with no time at all is not evidence of anything.
-	zero := watchHistory{"challenge:v1": {LastAt: 0, Strength: 1}}
+	zero := exactHistory(map[string]watchMemory{"challenge:v1": {LastAt: 0, Strength: 1}})
 	if got := zero.suppression("challenge:v1", now); got != 0 {
 		t.Errorf("a record with no timestamp produced %v", got)
 	}
 	// Strength outside 0..1 cannot escape the ceiling.
-	wild := watchHistory{"challenge:v1": {LastAt: now, Strength: 50}}
+	wild := exactHistory(map[string]watchMemory{"challenge:v1": {LastAt: now, Strength: 50}})
 	if got := wild.suppression("challenge:v1", now); got > rewatchPenaltyMax {
 		t.Errorf("a strength of 50 produced %v, past the ceiling %v",
 			got, rewatchPenaltyMax)
@@ -171,7 +177,7 @@ func TestBuildWatchHistory_NoDatabaseIsEmptyNotAPanic(t *testing.T) {
 	// db is nil under test. Empty reads as never-watched, which hands out the
 	// unseen bonus freely and applies no handicap — wrong in the harmless
 	// direction, and the twelve-hour seen-set still holds regardless.
-	if got := buildWatchHistory("42"); len(got) != 0 {
-		t.Errorf("got %v with no database", got)
+	if got := buildWatchHistory("42"); len(got.exact) != 0 || len(got.buckets) != 0 {
+		t.Errorf("got %v with neither a database nor Redis", got)
 	}
 }

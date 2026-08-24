@@ -95,12 +95,54 @@ type watchMemory struct {
 	Strength float64 // 0..1 — how definitely this was actually consumed
 }
 
-// watchHistory maps "type:id" to what is remembered about it.
-type watchHistory map[string]watchMemory
+// watchHistory answers "have they watched this, and how long ago".
+//
+// Two backings, deliberately behind one type so the callers never branch.
+//
+//	buckets  the scale path: thirteen weekly bitmaps out of Redis
+//	         (watch_bloom.go), about 26 KB for a whole viewer. Storing every
+//	         id exactly would be 2 MB each, which is 9.5 TB at five million
+//	         viewers.
+//	exact    the fallback: the same answer read from feed_events when Redis
+//	         is unavailable. Correct, and too slow to be the main path once
+//	         there are millions of viewers — see buildWatchHistory.
+//
+// The bitmaps are consulted first and the exact map fills in behind them, so
+// a deployment with Redis down keeps working with no change in behaviour
+// beyond the query cost.
+type watchHistory struct {
+	exact    map[string]watchMemory
+	buckets  [][]byte // newest week first; nil entries are weeks with nothing in them
+	loadedAt int64
+}
+
+// lookup finds what is known about one item, from whichever backing has it.
+func (h watchHistory) lookup(key string) (watchMemory, bool) {
+	if len(h.buckets) > 0 {
+		pos := watchBitPositions(key)
+		for w, b := range h.buckets {
+			if len(b) == 0 {
+				continue
+			}
+			if bloomHas(b, pos) {
+				// Aim at the middle of the week rather than its start: the age
+				// is only known to week resolution, so centring halves the
+				// worst-case error instead of always guessing old.
+				week := int64((7 * 24 * time.Hour).Seconds())
+				return watchMemory{
+					LastAt:   h.loadedAt - int64(w)*week - week/2,
+					Strength: 1,
+				}, true
+			}
+		}
+	}
+	m, ok := h.exact[key]
+	return m, ok
+}
 
 // seen reports whether there is any memory of this item at all.
 func (h watchHistory) seen(key string) bool {
-	_, ok := h[key]
+	_, ok := h.lookup(key)
 	return ok
 }
 
@@ -112,7 +154,7 @@ func (h watchHistory) seen(key string) bool {
 // the twelve-hour curve, and two handicaps that behave the same way are two
 // fewer things to hold in your head when a ranking looks wrong.
 func (h watchHistory) suppression(key string, now int64) float64 {
-	m, ok := h[key]
+	m, ok := h.lookup(key)
 	if !ok || m.LastAt <= 0 {
 		return 0
 	}
@@ -160,7 +202,21 @@ func (h watchHistory) suppression(key string, now int64) float64 {
 //	anything else (a bare impression)                    → 0.25, it may only
 //	                                                       have flown past
 func buildWatchHistory(userID string) watchHistory {
-	hist := make(watchHistory)
+	// Redis first. Thirteen small bitmaps, one round trip, and the answer is
+	// the same shape whichever backing produced it.
+	if buckets := loadWatchBuckets(userID); len(buckets) > 0 {
+		return watchHistory{buckets: buckets, loadedAt: time.Now().Unix()}
+	}
+	// Falls through when Redis is down, or genuinely has nothing yet — a new
+	// deployment, or a viewer whose history predates the bitmaps. Correct, and
+	// the reason the switch could be made without a migration or a backfill.
+	return buildWatchHistoryFromDB(userID)
+}
+
+// buildWatchHistoryFromDB is the exact fallback: the same question answered
+// from feed_events.
+func buildWatchHistoryFromDB(userID string) watchHistory {
+	hist := watchHistory{exact: make(map[string]watchMemory)}
 	if db == nil {
 		return hist
 	}
@@ -200,7 +256,7 @@ func buildWatchHistory(userID string) watchHistory {
 		var lastAt int64
 		var strength float64
 		if err := rows.Scan(&key, &lastAt, &strength); err == nil {
-			hist[key] = watchMemory{LastAt: lastAt, Strength: strength}
+			hist.exact[key] = watchMemory{LastAt: lastAt, Strength: strength}
 		}
 	}
 	return hist

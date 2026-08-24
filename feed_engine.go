@@ -546,6 +546,17 @@ func recordFeedEvent(event FeedEvent) error {
 		return nil
 	}
 
+	// Long-term watch memory. Meaningful signals only — a bare impression
+	// is what the twelve-hour seen-set is for, and giving one a ninety-day
+	// memory would shrink the catalogue for content nobody actually watched.
+	//
+	// Deliberately BEFORE the insert and not conditional on it: this is a
+	// bitmap write that cannot fail the request, and if the database insert
+	// fails afterwards the feed is still better off knowing they watched it.
+	if watchWorthRemembering(event) {
+		noteWatched(event.UserID, event.ContentType+":"+event.ContentID)
+	}
+
 	// metadata MUST be a valid JSONB value — passing a nil []byte makes
 	// lib/pq encode it as SQL NULL, and the destination column doesn't
 	// accept NULL on this codepath (DEFAULT is only applied when the
