@@ -546,6 +546,17 @@ func recordFeedEvent(event FeedEvent) error {
 		return nil
 	}
 
+	// Long-term watch memory. Meaningful signals only — a bare impression
+	// is what the twelve-hour seen-set is for, and giving one a ninety-day
+	// memory would shrink the catalogue for content nobody actually watched.
+	//
+	// Deliberately BEFORE the insert and not conditional on it: this is a
+	// bitmap write that cannot fail the request, and if the database insert
+	// fails afterwards the feed is still better off knowing they watched it.
+	if watchWorthRemembering(event) {
+		noteWatched(event.UserID, event.ContentType+":"+event.ContentID)
+	}
+
 	// metadata MUST be a valid JSONB value — passing a nil []byte makes
 	// lib/pq encode it as SQL NULL, and the destination column doesn't
 	// accept NULL on this codepath (DEFAULT is only applied when the
@@ -3198,7 +3209,7 @@ func inferContentEnergy(contentType string, cs *ContentScore) float64 {
 // NOVELTY (10%): Forced exploration. Shows users new categories they haven't tried.
 //   Without this, you get echo chambers. TikTok does ~15-20% exploration.
 
-func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState, followingSet map[string]bool, fofSet map[string]bool, interactedIDs map[string]bool) (float64, map[string]float64) {
+func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState, followingSet map[string]bool, fofSet map[string]bool, watched watchHistory) (float64, map[string]float64) {
 	breakdown := make(map[string]float64)
 
 	// ── COHORT + NEGATIVE SIGNAL CONTEXT ──
@@ -3555,14 +3566,27 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	}
 	breakdown["dopaminePenalty"] = dopaminePenalty
 
-	// ── UNSEEN BONUS ──
-	// Content the user has never interacted with gets a boost
+	// ── UNSEEN BONUS / REWATCH HANDICAP ──
+	//
+	// Two halves of one idea: content nobody has shown this viewer gets a
+	// small lift, and content they have already watched carries a handicap
+	// that fades as the memory ages.
+	//
+	// The bonus alone used to be the whole rule, and it was not enough. Past
+	// the twelve-hour seen window a video watched yesterday competed on level
+	// terms minus 0.15, so a good one beat perfectly fresh content and came
+	// back the next day. The handicap is what closes that gap; see
+	// watch_history.go for why it is a score rather than a filter.
 	unseenBonus := 0.0
+	rewatchPenalty := 0.0
 	contentKey := cs.ContentType + ":" + cs.ContentID
-	if !interactedIDs[contentKey] {
+	if watched.seen(contentKey) {
+		rewatchPenalty = -watched.suppression(contentKey, time.Now().Unix())
+	} else {
 		unseenBonus = 0.15
 	}
 	breakdown["unseenBonus"] = unseenBonus
+	breakdown["rewatchPenalty"] = rewatchPenalty
 
 	// ── COLD CONTENT / AUDITION BONUS ──
 	// New content needs enough impressions before its engagement is a reliable
@@ -4026,7 +4050,7 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 
 	// ── FINAL SCORE ──
 	finalScore := baseScore + egoBonus + fatiguePenalty + creatorFatigue + sequencePenalty + dopaminePenalty +
-		unseenBonus + coldContentBonus + trendingBonus + breakoutBonus +
+		unseenBonus + rewatchPenalty + coldContentBonus + trendingBonus + breakoutBonus +
 		hourBonus + emotionBonus + egoContextBonus + wellbeingBonus +
 		collabBonus + momentumBonus + variableReward + reentryBonus + streakBonus +
 		impressionPenalty + creatorBouncePenalty + scrollBackBonus + completeBonus + loopBonus +
@@ -5206,7 +5230,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Step 4: Build context (following set, interacted IDs)
 	followingSet, fofSet := buildSocialSets(userID)
-	interactedIDs := buildInteractedSet(userID)
+	watched := buildWatchHistory(userID)
 
 	// Step 4.5: Warm signal caches so scoring can read them in O(1)
 	warmUserSignalCaches(userID)
@@ -5285,7 +5309,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		contentType := item.Type
 		cs := getContentScore(contentID, contentType)
 
-		score, breakdown := scoreForUser(cs, profile, session, followingSet, fofSet, interactedIDs)
+		score, breakdown := scoreForUser(cs, profile, session, followingSet, fofSet, watched)
 
 		// Two-tower cosine bonus: ± up to 0.20 for strong matches. Gated on
 		// having a warm user vector; cold users keep base scoring as-is.
@@ -6415,23 +6439,6 @@ func buildSocialSets(userID string) (following map[string]bool, fof map[string]b
 	}
 
 	return following, fof
-}
-
-func buildInteractedSet(userID string) map[string]bool {
-	interacted := make(map[string]bool)
-	rows, err := db.Query(`
-		SELECT DISTINCT content_type || ':' || content_id
-		FROM feed_events WHERE user_id = $1
-		LIMIT 1000`, userID)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var key string
-			rows.Scan(&key)
-			interacted[key] = true
-		}
-	}
-	return interacted
 }
 
 // fetchCandidates is the recency-source backing query. Walks the widening
