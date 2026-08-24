@@ -245,6 +245,22 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	if len(composed) > limit {
 		composed = composed[:limit]
 	}
+	rawCount := len(composed)
+
+	// Shared enrichment choke point — same as For You / Following. Runs
+	// BEFORE the filter because battle-ness is read from TopResponseVideoUrl,
+	// which is what this fills in.
+	finalizeFeedItemsScored(composed)
+	composed = spaceOutFeedKindsScored(composed)
+
+	// Single-kind tab, if that is the tab asking. Before the impression
+	// recording below, not after — see the long note in SmartFeedHandler.
+	// Writing down a pool and then discarding most of it records videos the
+	// viewer never saw as watched, which is the exact harm the server-side
+	// filter exists to avoid.
+	composed = filterFeedKindScored(composed, kindFilter)
+	composed = trimFilteredPage(composed, clientLimit, kindFilter)
+
 	// A FULL page means "ask me again", matching SmartFeedHandler. The old
 	// `> limit` test read as "is there a spare item beyond this page", which
 	// went false the moment the pool happened to land exactly on the page
@@ -254,10 +270,21 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// filled the page and lets the client keep asking. Short of a full page
 	// there is genuinely nothing to page to, which is a fact about the
 	// catalog rather than a ranking decision.
-	hasMore := len(composed) >= limit
+	//
+	// On a filtered tab the same sentence has to be measured against the page
+	// the CLIENT asked for rather than the over-fetch, or a full page comes
+	// back alongside "the feed is over". See feedKindHasMore.
+	hasMore := rawCount >= limit
+	if kindFilter != feedKindAll {
+		hasMore = feedKindHasMore(rawCount, len(composed), clientLimit, limit)
+	}
 
 	// Mark shown + LTR stash (still useful for the "did the user engage with
 	// this trending piece" signal — feeds back into LTR on next For You).
+	//
+	// ONE seen-set for the whole app: whatever is recorded here counts as
+	// watched on every other tab too, and whatever another tab recorded counts
+	// here. Tabs are views onto one history.
 	if len(composed) > 0 {
 		items := make([]HomeFeedItem, 0, len(composed))
 		for _, it := range composed {
@@ -275,14 +302,6 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 			go savePrevRefreshTops(userID, items)
 		}
 	}
-
-	// Shared enrichment choke point — same as For You / Following.
-	finalizeFeedItemsScored(composed)
-	composed = spaceOutFeedKindsScored(composed)
-
-	// Single-kind tab, if that is the tab asking.
-	composed = filterFeedKindScored(composed, kindFilter)
-	composed = trimFilteredPage(composed, clientLimit, kindFilter)
 
 	// Make every item playable on the phone that asked. After the enrichment
 	// above, so the adaptive-streaming check sees the manifest URLs.
