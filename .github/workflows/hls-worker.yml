@@ -33,6 +33,25 @@ concurrency:
   group: hls-worker
   cancel-in-progress: false
 
+env:
+  # Which whisper.cpp to build, and which model to hear with. Both are part
+  # of the cache key, so changing either line rebuilds once and then reuses.
+  #
+  # MODEL SIZE IS THE UPGRADE PATH — not switching to a different program.
+  # base.en is 142MB and transcribes a 30-second clip in a couple of seconds
+  # on these runners. If transcripts are not accurate enough, move UP this
+  # list; nothing else has to change:
+  #
+  #   tiny.en    75MB   fastest, noticeably rougher
+  #   base.en   142MB   what we run now
+  #   small.en  466MB   clearly better, ~3x the time
+  #   medium.en 1.5GB   better still, ~8x the time
+  #
+  # For anything other than English, drop the ".en" (e.g. "small") — the
+  # English-only models ignore the language setting entirely.
+  WHISPER_RELEASE: v1.9.3
+  WHISPER_MODEL_NAME: base.en
+
 jobs:
   drain:
     runs-on: ubuntu-latest
@@ -67,6 +86,69 @@ jobs:
           sudo apt-get install -y -qq ffmpeg tesseract-ocr tesseract-ocr-eng
           ffmpeg -version | head -1
           tesseract --version | head -1
+
+      # ── SPEECH-TO-TEXT ────────────────────────────────────────────────────
+      #
+      # The third thing the worker does with each video: hear it. Reading the
+      # caption on screen catches a lot, but plenty of videos say what they
+      # are out loud and write nothing down.
+      #
+      # whisper.cpp SPECIFICALLY — not OpenAI's Python program of the same
+      # name. The worker passes -m, -f, -nt, -np, -l, which is whisper.cpp's
+      # command line. The Python one takes different arguments, so pointing
+      # WHISPER_BIN at it would fail on every video, silently, looking
+      # exactly like the feature being switched off.
+      #
+      # CACHED, and it has to be. Building it takes ~2 minutes and the model
+      # is 142MB; doing that every 30 minutes forever would spend more time
+      # installing than transcoding. The cache key is the whisper.cpp release
+      # tag, so this rebuilds only when that line changes.
+      - name: cache whisper.cpp
+        id: whisper-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/whisper
+          key: whisper-${{ env.WHISPER_RELEASE }}-${{ env.WHISPER_MODEL_NAME }}-v1
+
+      - name: build whisper.cpp
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$WHISPER_RELEASE" \
+            https://github.com/ggml-org/whisper.cpp.git /tmp/whisper-src
+          cmake -S /tmp/whisper-src -B /tmp/whisper-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWHISPER_BUILD_TESTS=OFF \
+            -DWHISPER_BUILD_SERVER=OFF
+          cmake --build /tmp/whisper-build -j --config Release
+          # The build produces shared libraries next to the binary, so keep
+          # the whole bin directory rather than copying the executable out of
+          # it — on its own it will not start.
+          mkdir -p ~/whisper
+          cp -r /tmp/whisper-build/bin ~/whisper/bin
+          curl -sSL --retry 3 -o ~/whisper/model.bin \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${WHISPER_MODEL_NAME}.bin"
+
+      # A missing or broken install must not take the run down with it: the
+      # worker skips the speech pass when the binary is not where it was told
+      # to look, so the right failure here is to unset the variables and carry
+      # on transcoding. Losing transcripts costs some feed quality. Losing the
+      # run costs every creator their upload.
+      - name: check whisper works
+        id: whisper
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          test -x ~/whisper/bin/whisper-cli
+          test -s ~/whisper/model.bin
+          # Transcribe one second of silence. Cheap, needs no fixture file,
+          # and exercises the real path: the binary starts, finds its shared
+          # libraries, and loads the model.
+          ffmpeg -v error -f lavfi -i anullsrc=r=16000:cl=mono -t 1 /tmp/probe.wav -y
+          ~/whisper/bin/whisper-cli -m ~/whisper/model.bin -f /tmp/probe.wav -nt -np
+          echo "WHISPER_BIN=$HOME/whisper/bin/whisper-cli"  >> "$GITHUB_ENV"
+          echo "WHISPER_MODEL=$HOME/whisper/model.bin"      >> "$GITHUB_ENV"
+          echo "speech-to-text: ON"
 
       # TWO parallel workers: the backend's FOR UPDATE SKIP LOCKED claim
       # makes concurrent workers safe by construction, and the runner's

@@ -147,11 +147,55 @@ func probeDuration(ctx context.Context, src string) float64 {
 	return d
 }
 
+// hasAudioStream reports whether the file has any audio at all.
+//
+// Worth a separate probe because plenty of short video has none — a clip
+// filmed with the phone muted, an export that dropped the track, anything
+// screen-recorded. Handing ffmpeg a filter graph that reads [0:a] on one of
+// those does not degrade gracefully: the whole command fails, and the picture
+// measurements are lost along with the sound ones, for a video where the
+// picture is all there was to measure.
+func hasAudioStream(ctx context.Context, src string) bool {
+	out, err := exec.CommandContext(ctx, "ffprobe",
+		"-v", "error",
+		"-select_streams", "a",
+		"-show_entries", "stream=index",
+		"-of", "csv=p=0",
+		src).Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) != ""
+}
+
+// What ffmpeg actually prints. Every one of these was checked against real
+// ffmpeg output rather than written from memory, because three earlier
+// versions of them looked plausible and matched nothing — see the note on
+// analyzeShape about why that failure is invisible.
 var (
-	reSceneScore = regexp.MustCompile(`lavfi\.scene_score=([0-9.]+)`)
-	reLoudness   = regexp.MustCompile(`"input_i"\s*:\s*"(-?[0-9.]+)"`)
+	// scdet prints a score for EVERY frame and a `time` only for frames it
+	// judges to be a cut. Counting scores would count movement, not cuts: on
+	// continuously-moving footage nearly every frame scores above zero, which
+	// on one 11-second test clip turned 0 real cuts into 327.
+	//
+	// Metadata form (`=`) only. scdet also logs its own line for the same cut
+	// in `key: value` form, and matching both would double every count.
+	reSceneCut = regexp.MustCompile(`lavfi\.scd\.time=`)
+
+	// signalstats namespaces its keys and separates with `=`, not `:`.
+	reYAVG = regexp.MustCompile(`lavfi\.signalstats\.YAVG=([0-9.]+)`)
+
+	// ebur128 prints one indented summary block when the stream ends:
+	//
+	//	Integrated loudness:
+	//	  I:         -15.4 LUFS
+	//
+	// The `"input_i": "-15.4"` JSON shape belongs to the loudnorm filter,
+	// which is a different filter that this pass does not run.
+	reLoudness = regexp.MustCompile(`(?m)^\s*I:\s+(-?[0-9.]+)\s+LUFS`)
+
+	// silencedetect prints this at the END of each silent stretch.
 	reSilenceDur = regexp.MustCompile(`silence_duration:\s*([0-9.]+)`)
-	reYAVG       = regexp.MustCompile(`YAVG:([0-9.]+)`)
 )
 
 // analyzeShape runs one ffmpeg pass that measures several things at once.
@@ -165,15 +209,28 @@ func analyzeShape(ctx context.Context, src string, dur float64, a *videoAnalysis
 	// signalstats — YAVG is average luma, i.e. how bright the picture is
 	// ebur128 — integrated loudness of the audio
 	// silencedetect — how much of the audio is silence
-	cmd := exec.CommandContext(ctx, "ffmpeg",
-		"-hide_banner", "-nostats",
-		"-i", src,
-		"-filter_complex",
-		"[0:v]scdet=threshold=10,signalstats,metadata=print[v];"+
-			"[0:a]ebur128=metadata=1,silencedetect=n=-30dB:d=0.5[a]",
-		"-map", "[v]", "-map", "[a]",
-		"-f", "null", "-",
-	)
+	//
+	// The audio half is added only when there is audio to read. ffmpeg treats
+	// a filter graph referencing a stream that does not exist as a hard error
+	// and gives up on the whole command, so on a silent clip asking for it
+	// would cost the picture measurements too.
+	filter := "[0:v]scdet=threshold=10,signalstats,metadata=print[v]"
+	args := []string{"-hide_banner", "-nostats", "-i", src}
+	maps := []string{"-map", "[v]"}
+	audio := hasAudioStream(ctx, src)
+	if audio {
+		filter += ";[0:a]ebur128=metadata=1,silencedetect=n=-30dB:d=0.5[a]"
+		maps = append(maps, "-map", "[a]")
+	} else {
+		// No audio is a real reading, not a missing one: a video with no
+		// sound is silent, which is exactly what SpeechRatio 0 means.
+		a.SpeechRatio = 0
+	}
+	args = append(args, "-filter_complex", filter)
+	args = append(args, maps...)
+	args = append(args, "-f", "null", "-")
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return false
@@ -193,10 +250,8 @@ func analyzeShape(ctx context.Context, src string, dur float64, a *videoAnalysis
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
 		line := sc.Text()
-		if m := reSceneScore.FindStringSubmatch(line); m != nil {
-			if v, e := strconv.ParseFloat(m[1], 64); e == nil && v > 0 {
-				cuts++
-			}
+		if reSceneCut.MatchString(line) {
+			cuts++
 		}
 		if m := reYAVG.FindStringSubmatch(line); m != nil {
 			if v, e := strconv.ParseFloat(m[1], 64); e == nil {
@@ -217,25 +272,44 @@ func analyzeShape(ctx context.Context, src string, dur float64, a *videoAnalysis
 	}
 	_ = cmd.Wait()
 
-	got := false
+	// Did we understand the output at all?
+	//
+	// signalstats reports on EVERY frame, so a video that decoded produces
+	// hundreds of luma readings. Zero of them means ffmpeg printed something
+	// this code cannot read — a changed key name, a filter that refused to
+	// load — and every number below would be a zero dressed up as a
+	// measurement.
+	//
+	// That distinction is the whole point. Reporting the pass as successful
+	// with zeros in it tells the ranker "this video has no cuts and is pitch
+	// black", which it will believe. Reporting failure tells it "not
+	// measured", which it already knows how to handle. This exact bug shipped
+	// once: three of the four patterns above matched nothing, and because the
+	// pass still declared success on duration alone, every analysed video was
+	// silently recorded as having zero cuts.
+	if lumaN == 0 {
+		return false
+	}
+
+	a.Brightness = clamp01(lumaSum / float64(lumaN) / 255)
+	got := true
+
 	if dur > 0 && cuts > 0 {
 		a.CutsPerMinute = float64(cuts) / (dur / 60)
-		got = true
-	}
-	if lumaN > 0 {
-		a.Brightness = clamp01(lumaSum / float64(lumaN) / 255)
-		got = true
 	}
 	if sawLoudness {
 		a.Loudness = loudness
-		got = true
 	}
-	if dur > 0 {
+	if dur > 0 && audio {
 		// What is left once the silence is taken out. Not speech as such —
 		// music counts — but it separates a video with a soundtrack from one
 		// recorded in a quiet room, which is most of the value.
+		//
+		// Only when there IS audio: with no track at all, silencedetect never
+		// ran, so `silence` is 0 and this would compute a ratio of 1 — reading
+		// a silent video as wall-to-wall sound, the exact opposite of the
+		// truth. The no-audio case is set to 0 up where it is detected.
 		a.SpeechRatio = clamp01((dur - silence) / dur)
-		got = true
 	}
 	// Motion is inferred from cut rate rather than measured directly: a real
 	// motion-vector pass costs another decode for a number that mostly tracks
