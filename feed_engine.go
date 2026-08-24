@@ -5177,8 +5177,16 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Single-kind tab, if that is the tab asking. After spacing, so the page
 		// it filters is the one the mixed feed would have served.
+		rawPage := len(items)
 		items = filterFeedKind(items, kindFilter)
 		items = trimFilteredPagePlain(items, clientLimit, kindFilter)
+
+		// Same correction as the warm path: coldStartFeed answered hasMore
+		// against the over-fetched limit, so a filtered tab ended while there
+		// was plenty left. See feedKindHasMore.
+		if kindFilter != feedKindAll {
+			hasMore = hasMore || feedKindHasMore(rawPage, len(items), clientLimit, limit)
+		}
 
 		// Last step before encoding: make every item playable on the phone
 		// that asked. AFTER finalizeFeedItems so the adaptive-streaming check
@@ -5466,9 +5474,48 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	composed = injectAuditionContent(scored, composed,
 		auditionSlotsForPage(auditionBacklog(), limit))
 
+	// Step 7.4: Enrich, space, and apply the tab filter — BEFORE anything below
+	// writes down what the viewer was shown.
+	//
+	// ════════════════════════════════════════════════════════════════════════
+	// THE ORDER HERE IS THE WHOLE POINT
+	// ════════════════════════════════════════════════════════════════════════
+	//
+	// Everything in Step 7.5 makes a claim about what this person just
+	// watched: the seen-set, the refresh anti-repeat memory, the LTR position
+	// stash, the session category tally. Those claims are only true about the
+	// items that actually reach the phone.
+	//
+	// This used to run the other way round, and on a filtered tab it was a lie
+	// at scale. Opening Battles fetched a mixed pool, wrote down ALL of it as
+	// watched, and then threw the shorts away — so roughly thirty shorts the
+	// viewer never laid eyes on were recorded as seen, every single time they
+	// tapped the tab. Those shorts then sank in For You as "already watched",
+	// and the taste profile learned from videos that were never on screen.
+	//
+	// That is precisely the damage the server-side filter exists to prevent.
+	// The reasoning was right and the ordering undid it.
+	//
+	// finalize must come first regardless: battle-ness is read from
+	// TopResponseVideoUrl, which finalizeFeedItems is what fills in.
+	rawCount := len(composed)
+	finalizeFeedItemsScored(composed)
+	composed = spaceOutFeedKindsScored(composed)
+
+	// Single-kind tab, if that is the tab asking. After spacing so the page it
+	// filters is the one the mixed feed would have served, and before the trim
+	// so the client still gets a full page.
+	composed = filterFeedKindScored(composed, kindFilter)
+	composed = trimFilteredPage(composed, clientLimit, kindFilter)
+
 	// Step 7.5: Remember the tail of what we just served so the NEXT page's
 	// ranker can apply sequence-awareness penalties against it, AND stash the
 	// score breakdown of each served item so LTR can learn from the outcome.
+	//
+	// ONE seen-set for the whole app, not one per tab. A battle watched in For
+	// You is watched when the Battles tab is opened, and vice versa. Tabs are
+	// views onto one feed and one history, which is what makes them feel like
+	// tabs rather than separate apps.
 	if len(composed) > 0 {
 		// Seen-filter: record impressions so subsequent pages don't repeat.
 		items := make([]HomeFeedItem, 0, len(composed))
@@ -5612,20 +5659,22 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 			freshCount++
 		}
 	}
-	hasMore := feedHasMore(len(scored), len(composed), freshCount, limit)
-
-	// Payload enrichment — ONE choke point shared by every feed path
-	// (see finalizeFeedItems). The cold path once skipped this and
-	// every brand-new user saw battles rendered as shorts; a shared
-	// finalizer makes that class of bug structurally impossible.
-	finalizeFeedItemsScored(composed)
-	composed = spaceOutFeedKindsScored(composed)
-
-	// Single-kind tab, if that is the tab asking. After spacing so the page it
-	// filters is the one the mixed feed would have served, and before the trim
-	// so the client still gets a full page.
-	composed = filterFeedKindScored(composed, kindFilter)
-	composed = trimFilteredPage(composed, clientLimit, kindFilter)
+	// Is there a next page worth asking for?
+	//
+	// The mixed feed and a filtered tab are asking different questions, and
+	// answering the tab's question with the mixed feed's numbers is what made
+	// the tabs end early. The mixed rule measures the pool against the limit
+	// it fetched with; on a tab those are the over-fetch, not the page the
+	// client asked for, so a full page of twenty came back saying the feed was
+	// over. See feedKindHasMore.
+	//
+	// Both rules still agree that a page of nothing but repeats is the end:
+	// another page can only bring more of the same.
+	hasMore := feedHasMore(len(scored), rawCount, freshCount, limit)
+	if kindFilter != feedKindAll {
+		hasMore = freshCount > 0 &&
+			feedKindHasMore(rawCount, len(composed), clientLimit, limit)
+	}
 
 	// Interleave a "Suggested accounts" card into the feed. TikTok-style:
 	// one card injected at index 4 of page 1, and again every 8 items so
@@ -5881,8 +5930,26 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 	items = spaceOutFeedKinds(items)
 
 	// Single-kind tab, if that is the tab asking.
+	rawPage := len(items)
 	items = filterFeedKind(items, kindFilter)
 	items = trimFilteredPagePlain(items, clientLimit, kindFilter)
+
+	// A filtered tab needs its own answer on top of the probe above.
+	//
+	// The probe is measured against the OVER-FETCH — it asks "is there
+	// anything beyond the hundred we pulled", when the client asked for
+	// twenty. On a tab that bar is far too high and the feed ends while
+	// plenty is left. Either kind of evidence is enough, so they are ORed:
+	// the probe still proves there is more following content, and
+	// feedKindHasMore proves this page of this kind filled up.
+	//
+	// Note this must stay an OR and not a replacement. A tab page that
+	// filters down to nothing is not the end of Following — there can be
+	// hundreds of the other kind still to page past — and the probe is what
+	// keeps the client walking through them.
+	if kindFilter != feedKindAll {
+		hasMore = hasMore || feedKindHasMore(rawPage, len(items), clientLimit, limit)
+	}
 
 	// Make every item playable on the phone that asked. After the enrichment
 	// above, so the adaptive-streaming check sees the manifest URLs.

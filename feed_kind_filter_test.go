@@ -210,3 +210,87 @@ func TestBothFlavoursOfTheFilterAgree(t *testing.T) {
 		}
 	}
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// "Is there another page?" — the bug that made the tabs feel empty
+// ════════════════════════════════════════════════════════════════════════════
+//
+// A live log showed this exactly:
+//
+//	feed shorts page 1: 20 items  raw=20/20  more=false
+//
+// Twenty of twenty delivered and the tab stopped. Nothing had run out — the
+// question "is there more" was being answered with the over-fetch number
+// instead of the page the client asked for.
+
+func TestHasMore_AFullPageIsNeverTheEnd(t *testing.T) {
+	// The exact shape from the log: the client asked for 20, got 20, and the
+	// pool behind it was short of the 100 we fetched with. There is no
+	// evidence of an end anywhere in that, and saying so stopped the tab.
+	if !feedKindHasMore(60, 20, 20, 100) {
+		t.Error("a full page of 20 reported the feed was over — this is the " +
+			"live bug: the pool not filling 100 says nothing about whether " +
+			"the viewer's page of 20 was the last one")
+	}
+}
+
+func TestHasMore_ShortPageButThePoolWasTheLimit(t *testing.T) {
+	// 100 candidates came back — the fetch was the constraint, not the
+	// catalogue. Only 8 of them were battles, but the ones that did not fit
+	// in this pool are still out there.
+	if !feedKindHasMore(100, 8, 20, 100) {
+		t.Error("a short page off a FULL pool reported the end; the pool " +
+			"was the limit, so there is more of this kind further down")
+	}
+}
+
+func TestHasMore_ShortPageAndTheRankerHadNothingLeft(t *testing.T) {
+	// The genuine end: the ranker offered 42 when asked for 100, so it gave
+	// everything it had, and 8 of those were battles. Claiming more here
+	// sends the client after a page that cannot exist.
+	if feedKindHasMore(42, 8, 20, 100) {
+		t.Error("the catalogue was exhausted and this still claimed more")
+	}
+}
+
+func TestHasMore_NothingServedIsAlwaysTheEnd(t *testing.T) {
+	// A client that stops only on an empty result would spin forever.
+	if feedKindHasMore(100, 0, 20, 100) {
+		t.Error("an empty page claimed there was more")
+	}
+}
+
+// ── Fetching deep enough to actually fill a page ────────────────────────────
+
+func TestFetchLimit_SizedForTheScarceKind(t *testing.T) {
+	// Battles ran at about a quarter of the feed in a live sample (1, 8 and 6
+	// across three pages of twenty). At 2x the tab asked for 40, found 8, and
+	// visibly ran out while plenty of battles remained.
+	got := feedKindFetchLimit(20, feedKindBattles)
+	if got < 80 {
+		t.Errorf("a page of 20 battles fetches %d candidates; at roughly a "+
+			"quarter battles that yields ~%d — not a page", got, got/4)
+	}
+}
+
+func TestFetchLimit_MixedFeedFetchesExactlyWhatItWasAsked(t *testing.T) {
+	// The one that must not move. Over-fetching the mixed feed would change
+	// what every downstream stage sees for every user on the normal feed.
+	for _, n := range []int{1, 20, 50, 500} {
+		if got := feedKindFetchLimit(n, feedKindAll); got != n {
+			t.Errorf("mixed feed asked for %d, fetch limit became %d", n, got)
+		}
+	}
+}
+
+func TestFetchLimit_IsBounded(t *testing.T) {
+	// Scoring is the expensive part of a feed request and cost is close to
+	// linear in candidates. A tab that comes back a little short beats a tab
+	// that takes five seconds.
+	if got := feedKindFetchLimit(500, feedKindBattles); got > feedKindMaxFetch {
+		t.Errorf("a page of 500 asked the ranker for %d candidates", got)
+	}
+	if got := feedKindFetchLimit(0, feedKindBattles); got != 0 {
+		t.Errorf("a zero-item page asked for %d", got)
+	}
+}
