@@ -11,15 +11,14 @@ The Flutter client lives in a separate repo (`Frontend`).
 
 **If you are a person or a model picking this repo up, start here.**
 
-Two things are written, tested and switched OFF. Neither is unfinished. Both
-are off because switching them on is somebody's decision to make, not the
-code's. One of them **must** be dealt with before real users arrive. The other
-can wait as long as you like.
+One thing is written, tested and switched OFF, and it **must** be dealt with
+before real users arrive. It is off because switching it on is somebody's
+decision to make, not the code's.
 
 | | what | before launch? |
 |---|---|---|
-| 1 | uploads can wait up to 30 minutes to become playable | **YES — must fix** |
-| 2 | the worker does not listen to speech | no, whenever you want |
+| 1 | uploads can wait up to 30 minutes to become playable | **YES — one secret to set** |
+| 2 | speech-to-text: running, but on the smallest model | no — upgrade when you want |
 
 ### 1. Uploads can wait up to 30 minutes ⚠ MUST FIX BEFORE LAUNCH
 
@@ -41,55 +40,95 @@ GITHUB_WORKER_TOKEN   a fine-grained personal access token, scoped to THIS
                       nothing else at all
 ```
 
-Set it wherever the backend runs. Nothing else to configure — the repo,
-workflow and branch all have working defaults. Leave it unset and the code
-does nothing, exactly as it does today.
+Nothing else to configure — the repo, workflow and branch all have working
+defaults. Leave it unset and the code does nothing, exactly as it does today.
 
-Do not give this token any other permission, and do not use a classic token
-that carries your whole account. Its one job is to press start on one
-workflow.
+**Making the token** — on github.com, signed in as an account that can push to
+this repo:
+
+1. Profile picture → **Settings** (your account's, not the repo's)
+2. Bottom of the left menu → **Developer settings**
+3. **Personal access tokens** → **Fine-grained tokens** → **Generate new token**
+4. **Repository access** → *Only select repositories* → pick **this one**
+5. **Permissions** → *Repository permissions* → find **Actions** → set to
+   **Read and write**. Leave every other permission alone.
+6. Generate, and copy the token — GitHub shows it once and never again.
+
+**Installing it** — in the Render dashboard, on the backend service:
+**Environment** → **Add Environment Variable** → name `GITHUB_WORKER_TOKEN`,
+value the token → **Save**. Render restarts the service and it is live.
+
+Step 4 is the one that matters. A fine-grained token limited to one repository
+with one permission can start this workflow and do **nothing else anywhere**.
+A classic token carries your whole account, so never use one here.
+
+Fine-grained tokens expire — a year at most, and the default is shorter. When
+it does, uploads quietly go back to waiting for the timer and the backend log
+starts saying the token was refused. Set a calendar reminder, and note the
+expiry date somewhere you will look.
 
 **How to tell it is working.** Post a video and watch the Actions tab. A run
 should appear within seconds, marked as manually triggered rather than
 scheduled. If nothing appears, the backend logs say why — it names the actual
 problem (token rejected, repo not found), never a bare status code.
 
-### 2. Speech-to-text ⚠ TURN ON WHEN THERE IS HARDWARE FOR IT
+**How to tell it is working.** Post a video and watch the Actions tab. A run
+should appear within seconds, marked as manually triggered rather than
+scheduled. If nothing appears, the backend logs say why — it names the actual
+problem (token rejected, repo not found), never a bare status code.
 
-The worker already looks at every video — how fast it cuts, how loud it is,
-how much of it is silence, and the words a creator burns onto the screen. What
-it does not do is listen. Turning what people SAY into text is the single
-biggest remaining improvement to how well this app understands its own
-content, and it is two environment variables away.
+### 2. Speech-to-text — ON, at the smallest useful size
 
-**Use whisper.cpp. Not the Python one.** Two different programs are both
-called "whisper": OpenAI's original in Python, and `whisper.cpp`, a C++
-rewrite. **This code talks to whisper.cpp** — it passes `-m`, `-f`, `-nt`,
-`-np`, `-l`, which is whisper.cpp's command line. Hand it the Python one and
-every video fails silently, which looks exactly like the feature being off.
-whisper.cpp is also the right choice on its own merits here: no Python
-runtime, one small binary, far less memory, and much faster on plain CPU.
+The worker hears every video as well as looking at it. `.github/workflows/
+hls-worker.yml` builds whisper.cpp, caches it, and points the worker at it.
+Nothing to set.
 
-```
-WHISPER_BIN     path to the whisper.cpp binary  (e.g. /usr/local/bin/whisper-cli)
-WHISPER_MODEL   path to a model file            (e.g. /models/ggml-base.en.bin)
+**To make transcripts better, move UP a model size. That is the whole upgrade
+path.** One line in the workflow:
+
+```yaml
+WHISPER_MODEL_NAME: base.en
 ```
 
-Set both, make sure the binary and model are present wherever the worker runs,
-and the speech pass starts on the next video. If either is unset the pass is
-skipped silently and everything else works exactly as it does today — see
-`cmd/hls-worker/analyze.go`.
+|  | size | speed | quality |
+|---|---|---|---|
+| `tiny.en`   | 75MB  | fastest      | rough |
+| `base.en`   | 142MB | **current**  | good enough for tags and categories |
+| `small.en`  | 466MB | ~3× slower   | clearly better |
+| `medium.en` | 1.5GB | ~8× slower   | better still |
 
-**What "enough hardware" means here.** whisper.cpp with the `base.en` model is
-about 150MB and transcribes a 30-second clip in a few seconds on a couple of
-modern CPU cores. The `tiny.en` model is about 75MB and roughly twice as fast
-with noticeably worse accuracy. Neither needs a GPU. So the bar is not high —
-it is a few hundred megabytes of disk and a few CPU-seconds per upload.
+Change the line, and the next run rebuilds the cache once and then reuses it.
+For languages other than English, drop the `.en` (e.g. `small`) — the
+English-only models ignore the language setting.
+
+> ### ⚠ DO NOT "UPGRADE" TO THE PYTHON WHISPER
+>
+> There are two different programs called "whisper": OpenAI's original in
+> Python, and `whisper.cpp`, a C++ rewrite. **They run the same models and
+> produce the same transcripts.** The Python one is not a better version, a
+> newer version, or a production version — it is the same thing in a different
+> language, and here it is strictly worse:
+>
+> - **It would break this code.** The worker passes `-m`, `-f`, `-nt`, `-np`,
+>   `-l` — whisper.cpp's command line. The Python one takes different
+>   arguments, so every video would fail. **Silently**, looking exactly like
+>   the feature being switched off.
+> - It needs Python and PyTorch — gigabytes, versus one small binary.
+> - It is far slower without a graphics card, and the runners do not have one.
+>
+> If somebody wrote down "switch to Python when we go live", that note was
+> based on a misunderstanding. **Upgrade the model, not the program.**
 
 **The real cost is throughput, not hardware.** Listening competes for the same
 cores as transcoding, inside the same 24-minute budget, so fewer videos finish
 per run. Invisible at low upload volume. The first thing to switch back off if
-a backlog ever builds.
+a backlog ever builds — delete the `WHISPER_*` lines from the workflow and the
+worker goes back to looking without listening, with nothing else affected.
+
+**If the build or the model download ever fails, the run still transcodes.**
+The check step is `continue-on-error`, and the worker skips speech when the
+binary is not where it was told to look. Losing transcripts costs some feed
+quality; losing the run costs every creator their upload.
 
 ### Where the worker actually runs
 
@@ -102,15 +141,22 @@ background worker is not.
 production uses. **Adding a tool to the Dockerfile alone changes nothing.**
 Install it in the workflow.
 
-To enable speech there: add a step that fetches a whisper.cpp build and a
-model, cache them with `actions/cache` so they are not re-downloaded every
-run, and set the two variables in the `drain` step's `env:` block. The runners
-have 4 cores and the job already budgets 24 minutes, so there is room.
-
 **How to tell which passes are running.** The worker records them with each
-video, in `challenges.video_analysis` under `passes`. `["shape","text"]` means
-it looked and read but did not listen. `["shape","text","speech"]` is all
-three.
+video, in `challenges.video_analysis` under `passes`:
+
+| `passes` | meaning |
+|---|---|
+| `["shape","text","speech"]` | all three — what a healthy run looks like |
+| `["shape","text"]` | whisper did not load; check the "check whisper works" step |
+| `["shape"]` | no words found, or tesseract missing |
+| `[]` or absent | nothing was measured — see below |
+
+An **empty or missing** reading is not "a silent, still, dark video". It means
+nobody looked. Everything downstream is written to treat those two as
+different, and must stay that way: a video with no reading that got scored as
+if every measurement were zero would be pushed into the same corner of the
+feed as genuinely dull content, for no reason but having been uploaded before
+the worker got to it.
 
 ---
 
