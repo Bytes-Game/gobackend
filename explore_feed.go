@@ -142,7 +142,8 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// Build interacted set + warm signal caches (still needed for negative
 	// signals like blocks/reports — explore must respect those even when
 	// it ignores positive personalization).
-	interactedIDs := buildInteractedSet(userID)
+	watched := buildWatchHistory(userID)
+	nowUnix := time.Now().Unix()
 	warmNegativeSignals(userID)
 	warmUserSignalCaches(userID)
 
@@ -161,7 +162,7 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 		// permanently. Nothing in this handler removes content; the seen
 		// signal below is likewise a handicap, so what the user has watched
 		// changes where things rank, never whether they exist.
-		score, breakdown := exploreScore(cs, ns, interactedIDs[item.Type+":"+id])
+		score, breakdown := exploreScore(cs, ns, watched.suppression(item.Type+":"+id, nowUnix))
 		scored = append(scored, ScoredItem{
 			Item:           item,
 			Score:          score,
@@ -341,7 +342,7 @@ const exploreUnseenBonus = 0.15
 // [interacted] reports whether the user has already engaged with this item
 // (liked, commented, watched to completion — anything in feed_events). It
 // only withholds a small freshness bonus; it never removes anything.
-func exploreScore(cs *ContentScore, ns *negativeSignals, interacted bool) (float64, map[string]float64) {
+func exploreScore(cs *ContentScore, ns *negativeSignals, rewatchPenalty float64) (float64, map[string]float64) {
 	breakdown := make(map[string]float64)
 	if cs == nil {
 		return 0, breakdown
@@ -399,13 +400,20 @@ func exploreScore(cs *ContentScore, ns *negativeSignals, interacted bool) (float
 	// Freshness-to-this-user nudge, mirroring scoreForUser's unseenBonus and
 	// sized the same. Added before the floor + negative multiplier below so a
 	// blocked or bounced item cannot be lifted back over zero by it.
+	//
+	// Its opposite number arrives already computed: a handicap for something
+	// this viewer has watched, fading with age (watch_history.go). Explore is
+	// the surface people open specifically to find things they have not seen,
+	// so serving them yesterday's video here is the most conspicuous version
+	// of the problem.
 	unseenBonus := 0.0
-	if !interacted {
+	if rewatchPenalty == 0 {
 		unseenBonus = exploreUnseenBonus
 	}
 	breakdown["unseenBonus"] = unseenBonus
+	breakdown["rewatchPenalty"] = -rewatchPenalty
 
-	score := 0.4*quality + popularity + recency + battleBoost + unseenBonus
+	score := 0.4*quality + popularity + recency + battleBoost + unseenBonus - rewatchPenalty
 
 	// Negative signals — hard multipliers. Block on creator → 0 score; user
 	// reported the item → 0 score. Same as For You.

@@ -147,8 +147,10 @@ func TestExploreScore_InteractionIsARankingSignalNotADelete(t *testing.T) {
 		ViewCount:    100,
 		LikeCount:    10,
 	}
-	fresh, freshBreak := exploreScore(cs, nil, false)
-	touched, touchedBreak := exploreScore(cs, nil, true)
+	// The handicap arrives as a number now rather than a flag, so this passes
+	// a representative one: what something watched a few days ago carries.
+	fresh, freshBreak := exploreScore(cs, nil, 0)
+	touched, touchedBreak := exploreScore(cs, nil, 0.55)
 
 	if touched <= 0 {
 		t.Fatalf("an interacted item must keep a real score, got %f", touched)

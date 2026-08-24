@@ -80,7 +80,7 @@ func scoreFixture() (*ContentScore, *UserProfile, *SessionState) {
 }
 
 func scoreOnce(cs *ContentScore, p *UserProfile, s *SessionState) (float64, map[string]float64) {
-	return scoreForUser(cs, p, s, map[string]bool{}, map[string]bool{}, map[string]bool{})
+	return scoreForUser(cs, p, s, map[string]bool{}, map[string]bool{}, watchHistory{})
 }
 
 // ── The failure that would never announce itself ────────────────────────────
