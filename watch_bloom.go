@@ -131,52 +131,6 @@ func noteWatched(userID, contentKey string) {
 	_, _ = pipe.Exec(rctx)
 }
 
-// watchedWeeksAgo answers, for a batch of candidates, how long ago each was
-// probably watched — in weeks, or -1 for "no memory of this".
-//
-// Batched on purpose. Scoring a page asks about a hundred or so videos, and
-// asking Redis about them one at a time would be a hundred round trips per
-// feed request. This reads the thirteen buckets once and answers every
-// candidate from them in process.
-func watchedWeeksAgo(userID string, contentKeys []string) map[string]int {
-	out := make(map[string]int, len(contentKeys))
-	if rdb == nil || userID == "" || len(contentKeys) == 0 {
-		return out
-	}
-
-	// Pull the buckets newest-first, as raw bitmaps.
-	now := watchBucketIndex(time.Now())
-	keys := make([]string, 0, watchBucketWeeks)
-	for w := 0; w < watchBucketWeeks; w++ {
-		keys = append(keys, watchBucketKey(userID, now-int64(w)))
-	}
-	vals, err := rdb.MGet(rctx, keys...).Result()
-	if err != nil {
-		return out
-	}
-
-	buckets := make([][]byte, len(vals))
-	for i, v := range vals {
-		if s, ok := v.(string); ok {
-			buckets[i] = []byte(s)
-		}
-	}
-
-	for _, ck := range contentKeys {
-		pos := watchBitPositions(ck)
-		for w, b := range buckets {
-			if len(b) == 0 {
-				continue
-			}
-			if bloomHas(b, pos) {
-				out[ck] = w // w weeks ago; 0 is this week
-				break       // newest hit wins — that is the age we want
-			}
-		}
-	}
-	return out
-}
-
 // bloomHas reports whether every position is set. Absent bytes count as zero,
 // which is what a bucket shorter than the full bitmap means: Redis only
 // allocates up to the highest bit actually set.
