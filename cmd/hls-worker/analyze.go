@@ -47,8 +47,14 @@ package main
 // version of the same worker and is NOT what production uses; installing
 // something there alone does nothing to the live app.
 //
-// To turn speech on: put a whisper binary and a model wherever the worker
+// To turn speech on: put a whisper.cpp binary and a model wherever the worker
 // runs, and set WHISPER_BIN and WHISPER_MODEL. Nothing else changes.
+//
+// It must be whisper.cpp, NOT OpenAI's Python program of the same name. The
+// call below passes -m, -f, -nt, -np and -l, which is whisper.cpp's command
+// line; the Python one takes different arguments, so pointing WHISPER_BIN at
+// it makes every video fail silently — indistinguishable from the feature
+// being switched off.
 
 import (
 	"bufio"

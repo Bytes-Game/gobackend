@@ -5,6 +5,13 @@ name: hls-worker
 # dispatch) this drains the pending-transcode queue and exits — an
 # always-on background worker with ≤30min latency and zero hosting cost.
 #
+# ⚠ THAT ≤30min LATENCY IS A LAUNCH BLOCKER ON ITS OWN. A video is not
+# watchable until this runs, so on the schedule alone a creator can post
+# and see nothing for half an hour. The backend can press start the
+# moment a video lands (workflow_dispatch below is what it calls) —
+# see transcode_wakeup.go and the ⚠ section at the top of README.md.
+# The schedule then becomes the safety net rather than the only path.
+#
 # Required repo secrets (Settings → Secrets and variables → Actions):
 #   HLS_WORKER_TOKEN     — same value as the backend's env var
 #   R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
