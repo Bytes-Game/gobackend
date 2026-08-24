@@ -6417,17 +6417,104 @@ func buildSocialSets(userID string) (following map[string]bool, fof map[string]b
 	return following, fof
 }
 
+// How much of a viewer's history the long-term memory holds, and how far back
+// it reaches.
+//
+// These bound the cost of buildInteractedSet, which runs on every feed
+// request. They are also the honest answer to "how long does this app
+// remember that you watched something" — past the window, a video is treated
+// as new again.
+const (
+	// How many of the most recent events to read back. Distinct items come out
+	// of these, so a viewer who rewatches things remembers slightly fewer
+	// videos than this — which is the right way round, since a rewatched video
+	// is one they clearly do not mind seeing again.
+	interactedMemoryEvents = 15000
+	interactedMemoryDays   = 90 // how far back to look at all
+)
+
+// buildInteractedSet is the LONG-TERM half of "have they already seen this".
+//
+// ════════════════════════════════════════════════════════════════════════════
+// TWO MEMORIES, AND THIS IS THE SLOW ONE
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The seen-set in seen_filter.go is the fast one: everything served in the
+// last 12 hours, carrying a penalty that decays to nothing at the end of that
+// window. It is what stops a video coming back two swipes later.
+//
+// This is the other one. It reaches back months, and what it feeds is the
+// unseen bonus in scoreForUser: content a viewer has NEVER touched scores
+// higher than content they have. That bonus is the only thing standing
+// between a viewer and a video they watched yesterday, once the 12-hour
+// penalty has decayed away.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY THE ORDER BY IS NOT DECORATION
+// ════════════════════════════════════════════════════════════════════════════
+//
+// This query used to be `SELECT DISTINCT … LIMIT 1000` with no ordering at
+// all. SQL makes no promise about which rows an unordered LIMIT returns, and
+// Postgres does not have to answer the same way twice.
+//
+// So for anybody past a thousand items, the memory was an arbitrary slice of
+// their history, and possibly a DIFFERENT arbitrary slice on the next
+// request. Everything outside it read as never-watched and collected the
+// unseen bonus — which is exactly the complaint that led here: a video
+// watched yesterday coming back today and outranking content the viewer has
+// never seen.
+//
+// A thousand is also small. A single session in a real log started 130
+// videos, so a regular viewer crossed that line in about a week and then
+// stopped being remembered properly at all.
+//
+// Ordered by most recent, the memory is the recent past rather than a
+// lottery, and it is the same on every request.
+//
+// The window is what keeps this affordable — the alternative is a scan over a
+// history that grows forever. It also says something true: content from three
+// months ago genuinely can come round again, which is how a small catalogue
+// stays watchable.
 func buildInteractedSet(userID string) map[string]bool {
 	interacted := make(map[string]bool)
+	if db == nil {
+		return interacted
+	}
+	// Shape matters here, because this runs on every feed request.
+	//
+	// The inner query walks idx_feed_events_user (user_id, created_at DESC)
+	// backwards from the newest event and stops after a fixed number of rows,
+	// so the work is bounded no matter how long somebody's history gets. Only
+	// those rows are then deduplicated.
+	//
+	// Grouping the whole history and ordering by MAX(created_at) reads better
+	// and costs four times as much — measured at 51ms against 13ms on a
+	// 50,000-event history — because it has to touch every row the viewer has
+	// ever generated before it can pick a top slice. This way the index does
+	// the ordering and the dedupe only ever sees a fixed number of rows.
 	rows, err := db.Query(`
 		SELECT DISTINCT content_type || ':' || content_id
-		FROM feed_events WHERE user_id = $1
-		LIMIT 1000`, userID)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var key string
-			rows.Scan(&key)
+		  FROM (
+			SELECT content_type, content_id
+			  FROM feed_events
+			 WHERE user_id = $1
+			   AND created_at > NOW() - ($2 || ' days')::interval
+			 ORDER BY created_at DESC
+			 LIMIT $3
+		  ) recent`,
+		userID, interactedMemoryDays, interactedMemoryEvents)
+	if err != nil {
+		// Empty means "nothing known", which reads as never-watched and hands
+		// out the unseen bonus freely. Wrong in the harmless direction: the
+		// 12-hour seen-set still holds, so a failure here cannot resurface
+		// something watched minutes ago.
+		log.Printf("interacted set: could not read history for %s: %v", userID, err)
+		return interacted
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err == nil {
 			interacted[key] = true
 		}
 	}
