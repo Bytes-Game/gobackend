@@ -7,53 +7,109 @@ The Flutter client lives in a separate repo (`Frontend`).
 
 ---
 
-## ⚠ TURN THIS ON WHEN THERE IS HARDWARE FOR IT
+## ⚠ READ THIS BEFORE GOING LIVE
 
-**Read this first if you are a person or a model picking this repo up.**
+**If you are a person or a model picking this repo up, start here.**
 
-One feature is written, tested and switched OFF, waiting for hardware that
-does not exist yet. It is off because it costs money to run, not because it
-is unfinished, and it will stay off until somebody decides to pay for it.
+Two things are written, tested and switched OFF. Neither is unfinished. Both
+are off because switching them on is somebody's decision to make, not the
+code's. One of them **must** be dealt with before real users arrive. The other
+can wait as long as you like.
 
-**Speech-to-text on uploaded videos.** The transcode worker already looks at
-every video — it measures how fast it cuts, how loud it is, how much of it is
-silence, and it reads any words burned onto the screen. What it does not do is
-listen. Turning what people SAY into text is the single biggest remaining
-improvement to how well this app understands its own content, and it is one
-environment variable away.
+| | what | before launch? |
+|---|---|---|
+| 1 | uploads can wait up to 30 minutes to become playable | **YES — must fix** |
+| 2 | the worker does not listen to speech | no, whenever you want |
+
+### 1. Uploads can wait up to 30 minutes ⚠ MUST FIX BEFORE LAUNCH
+
+A video is not watchable until the worker converts it, and the worker runs on
+a timer — every 30 minutes, in `.github/workflows/hls-worker.yml`. Post a
+video a minute after a run finishes and it is invisible for twenty-nine more.
+
+**This is fine for testing and unacceptable in production.** The person who
+just posted does not know what a queue is. They know their video is not there,
+and they will not post a second one.
+
+The fix is written and merged and needs one secret to switch on. The backend
+asks GitHub to start the worker the moment a video lands, instead of waiting
+for the tick. Thirty minutes becomes roughly one. See `transcode_wakeup.go`.
 
 ```
-WHISPER_BIN     path to a whisper binary  (e.g. /usr/local/bin/whisper-cli)
-WHISPER_MODEL   path to a model file      (e.g. /models/ggml-base.en.bin)
+GITHUB_WORKER_TOKEN   a fine-grained personal access token, scoped to THIS
+                      repository only, with Actions: read and write, and
+                      nothing else at all
+```
+
+Set it wherever the backend runs. Nothing else to configure — the repo,
+workflow and branch all have working defaults. Leave it unset and the code
+does nothing, exactly as it does today.
+
+Do not give this token any other permission, and do not use a classic token
+that carries your whole account. Its one job is to press start on one
+workflow.
+
+**How to tell it is working.** Post a video and watch the Actions tab. A run
+should appear within seconds, marked as manually triggered rather than
+scheduled. If nothing appears, the backend logs say why — it names the actual
+problem (token rejected, repo not found), never a bare status code.
+
+### 2. Speech-to-text ⚠ TURN ON WHEN THERE IS HARDWARE FOR IT
+
+The worker already looks at every video — how fast it cuts, how loud it is,
+how much of it is silence, and the words a creator burns onto the screen. What
+it does not do is listen. Turning what people SAY into text is the single
+biggest remaining improvement to how well this app understands its own
+content, and it is two environment variables away.
+
+**Use whisper.cpp. Not the Python one.** Two different programs are both
+called "whisper": OpenAI's original in Python, and `whisper.cpp`, a C++
+rewrite. **This code talks to whisper.cpp** — it passes `-m`, `-f`, `-nt`,
+`-np`, `-l`, which is whisper.cpp's command line. Hand it the Python one and
+every video fails silently, which looks exactly like the feature being off.
+whisper.cpp is also the right choice on its own merits here: no Python
+runtime, one small binary, far less memory, and much faster on plain CPU.
+
+```
+WHISPER_BIN     path to the whisper.cpp binary  (e.g. /usr/local/bin/whisper-cli)
+WHISPER_MODEL   path to a model file            (e.g. /models/ggml-base.en.bin)
 ```
 
 Set both, make sure the binary and model are present wherever the worker runs,
-and the speech pass starts on the next video. Nothing else changes. If either
-is unset the pass is skipped silently and everything else works exactly as it
-does today — see `cmd/hls-worker/analyze.go`.
+and the speech pass starts on the next video. If either is unset the pass is
+skipped silently and everything else works exactly as it does today — see
+`cmd/hls-worker/analyze.go`.
 
 **What "enough hardware" means here.** whisper.cpp with the `base.en` model is
 about 150MB and transcribes a 30-second clip in a few seconds on a couple of
 modern CPU cores. The `tiny.en` model is about 75MB and roughly twice as fast
 with noticeably worse accuracy. Neither needs a GPU. So the bar is not high —
-it is a few hundred megabytes of disk in the worker image and a few CPU-seconds
-per upload.
+it is a few hundred megabytes of disk and a few CPU-seconds per upload.
 
-**Where the worker actually runs** — this is the part that is easy to get
-wrong. Not on a hosting platform. It runs in GitHub Actions, on a schedule, in
-`.github/workflows/hls-worker.yml`, because GitHub-hosted runners are free and
-an always-on background worker is not. `cmd/hls-worker/Dockerfile` describes the
-container version and is NOT what production uses. **Adding a tool to the
-Dockerfile alone changes nothing.** Install it in the workflow.
+**The real cost is throughput, not hardware.** Listening competes for the same
+cores as transcoding, inside the same 24-minute budget, so fewer videos finish
+per run. Invisible at low upload volume. The first thing to switch back off if
+a backlog ever builds.
 
-To enable speech there: add a step that fetches a whisper build and a model,
-cache them with `actions/cache` so it is not re-downloaded every 30 minutes,
-and set the two variables in the `drain` step's `env:` block. The runners have
-4 cores and the job already budgets 24 minutes, so there is room.
+### Where the worker actually runs
 
-**How to tell whether it is on.** The worker stores which passes ran with each
+This is the part that is easiest to get wrong. **Not on a hosting platform.**
+It runs in GitHub Actions, from `.github/workflows/hls-worker.yml`, because
+GitHub-hosted runners are free for public repositories and an always-on
+background worker is not.
+
+`cmd/hls-worker/Dockerfile` describes the container version and is **NOT** what
+production uses. **Adding a tool to the Dockerfile alone changes nothing.**
+Install it in the workflow.
+
+To enable speech there: add a step that fetches a whisper.cpp build and a
+model, cache them with `actions/cache` so they are not re-downloaded every
+run, and set the two variables in the `drain` step's `env:` block. The runners
+have 4 cores and the job already budgets 24 minutes, so there is room.
+
+**How to tell which passes are running.** The worker records them with each
 video, in `challenges.video_analysis` under `passes`. `["shape","text"]` means
-it looked and read but did not listen. `["shape","text","speech"]` means all
+it looked and read but did not listen. `["shape","text","speech"]` is all
 three.
 
 ---

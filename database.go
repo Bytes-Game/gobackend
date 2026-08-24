@@ -1660,6 +1660,14 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 		return Challenge{}, err
 	}
 
+	// The row is now waiting to be converted, so ask the worker to start
+	// rather than leaving it for the next scheduled run up to 30 minutes
+	// away. Returns immediately and cannot fail this upload; does nothing
+	// at all unless it has been switched on. See transcode_wakeup.go.
+	if payload.VideoURL != "" {
+		wakeTranscodeWorker()
+	}
+
 	// If friends visibility with specific users, insert visibility rows.
 	if payload.Visibility == "friends" && len(payload.VisibleTo) > 0 {
 		for _, uidStr := range payload.VisibleTo {
@@ -1953,6 +1961,13 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return ChallengeResponse{}, err
+	}
+
+	// Same as CreateChallenge: this answer is waiting to be converted, so
+	// start the worker now instead of waiting out the timer. See
+	// transcode_wakeup.go.
+	if payload.VideoURL != "" {
+		wakeTranscodeWorker()
 	}
 
 	// Update challenge status to "active".
