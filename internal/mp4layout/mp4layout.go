@@ -1,4 +1,9 @@
-package main
+package mp4layout
+
+import (
+	"io"
+	"os"
+)
 
 // Where an MP4 keeps its index, read from the opening bytes.
 //
@@ -27,26 +32,26 @@ package main
 // about a second, the alternative is every client working around every
 // badly exported source forever, and a source we do not control is exactly
 // the kind of input that should be normalised on the way in.
-type mp4Layout int
+type Layout int
 
 const (
 	// Neither box appeared in the bytes given. Not a verdict: treat it as
 	// fastStart, because remuxing on the strength of a short read would
 	// rewrite files that are already fine.
-	mp4LayoutUnknown mp4Layout = iota
+	Unknown Layout = iota
 
 	// moov comes before mdat. Ready to stream as-is.
-	mp4LayoutFastStart
+	FastStart
 
 	// mdat comes before moov. Needs the faststart remux.
-	mp4LayoutMoovAtEnd
+	MoovAtEnd
 )
 
-func (l mp4Layout) String() string {
+func (l Layout) String() string {
 	switch l {
-	case mp4LayoutFastStart:
+	case FastStart:
 		return "faststart"
-	case mp4LayoutMoovAtEnd:
+	case MoovAtEnd:
 		return "moov-at-end"
 	default:
 		return "unknown"
@@ -54,29 +59,29 @@ func (l mp4Layout) String() string {
 }
 
 // Every box header is at least a 4-byte size and a 4-byte type.
-const mp4HeaderBytes = 8
+const headerBytes = 8
 
-// mp4LayoutProbeBytes is how much of a file's opening readMP4Layout needs.
+// ProbeBytes is how much of a file's opening Read needs.
 //
 // ftyp is a few dozen bytes and any padding before moov is small, so the
 // box that settles the question is normally inside the first hundred.
-const mp4LayoutProbeBytes = 4096
+const ProbeBytes = 4096
 
-// readMP4Layout reports the top-level box order in head, the opening bytes
+// Read reports the top-level box order in head, the opening bytes
 // of a file.
 //
 // Only box headers are walked, never their contents. Returns
-// mp4LayoutUnknown rather than erroring on anything it does not understand
+// Unknown rather than erroring on anything it does not understand
 // — a truncated read, a nonsense size, bytes that are not an MP4 — so a
 // misread can only ever leave a file exactly as it arrived.
-func readMP4Layout(head []byte) mp4Layout {
-	for offset := 0; offset+mp4HeaderBytes <= len(head); {
+func Read(head []byte) Layout {
+	for offset := 0; offset+headerBytes <= len(head); {
 		declared := int(be32(head[offset:]))
 		switch string(head[offset+4 : offset+8]) {
 		case "moov":
-			return mp4LayoutFastStart
+			return FastStart
 		case "mdat":
-			return mp4LayoutMoovAtEnd
+			return MoovAtEnd
 		}
 
 		var size int
@@ -86,12 +91,12 @@ func readMP4Layout(head []byte) mp4Layout {
 			// is set means a file far larger than any reel, which is not
 			// something to reason further about.
 			if offset+16 > len(head) || be32(head[offset+8:]) != 0 {
-				return mp4LayoutUnknown
+				return Unknown
 			}
 			size = int(be32(head[offset+12:]))
 		case 0:
 			// "Extends to end of file", so nothing follows it.
-			return mp4LayoutUnknown
+			return Unknown
 		default:
 			size = declared
 		}
@@ -99,14 +104,37 @@ func readMP4Layout(head []byte) mp4Layout {
 		// A box cannot be smaller than its own header. One that claims to
 		// be would leave the cursor where it was, and the loop would never
 		// end.
-		if size < mp4HeaderBytes {
-			return mp4LayoutUnknown
+		if size < headerBytes {
+			return Unknown
 		}
 		offset += size
 	}
-	return mp4LayoutUnknown
+	return Unknown
 }
 
 func be32(b []byte) uint32 {
 	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+}
+
+// OfFile reads the opening bytes of a file and reports its box order.
+//
+// Anything it cannot interpret comes back as Unknown, which callers must
+// treat as "leave this file alone" rather than "this file is broken" — see
+// the constant's own note.
+func OfFile(path string) (Layout, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return Unknown, err
+	}
+	defer f.Close()
+
+	head := make([]byte, ProbeBytes)
+	// ReadFull over Read: a single Read is allowed to return one byte, and
+	// a short buffer here would report "unknown" for a perfectly good file.
+	// A file shorter than the probe is fine, hence the EOF cases.
+	n, err := io.ReadFull(f, head)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return Unknown, err
+	}
+	return Read(head[:n]), nil
 }
