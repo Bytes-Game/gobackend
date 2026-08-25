@@ -129,3 +129,56 @@ func hasTag(tags []string, want string) bool {
 	}
 	return false
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// "DID IT LISTEN" AND "DID IT HEAR ANYTHING" ARE DIFFERENT QUESTIONS
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Somebody uploads a video and asks whether speech-to-text ran on it. Before
+// these, that question had no answer anywhere: a video nobody spoke in and a
+// worker with no whisper installed produced exactly the same stored result —
+// an empty transcript and no "speech" in Passes.
+//
+// So a pass is now recorded when it RAN. That is what makes the difference
+// visible in the stored analysis and in the workflow log, and it is easy to
+// undo by accident by going back to "record it if it found words".
+
+func TestSpeechPass_OffWhenWhisperIsNotConfigured(t *testing.T) {
+	t.Setenv(whisperBinEnv, "")
+	t.Setenv(whisperModelEnv, "")
+	if _, ran := transcribeSpeech(t.Context(), "nonexistent.mp4"); ran {
+		t.Error("the speech pass claimed to have run with no whisper configured")
+	}
+}
+
+func TestSpeechPass_OffWhenTheBinaryCannotRun(t *testing.T) {
+	// The shape of a real outage: the variables are set, the file is not
+	// there. This has to read as "did not run", never as "ran, heard nothing",
+	// because the second one would hide a broken install forever.
+	t.Setenv(whisperBinEnv, "/definitely/not/here/whisper-cli")
+	t.Setenv(whisperModelEnv, "/definitely/not/here/model.bin")
+	if _, ran := transcribeSpeech(t.Context(), "nonexistent.mp4"); ran {
+		t.Error("a whisper binary that does not exist was reported as having run")
+	}
+}
+
+func TestTextPass_OffWhenThereIsNoFileToRead(t *testing.T) {
+	// tesseract may or may not be installed wherever this runs, so the check
+	// is on the pass never claiming to have read a file that is not there.
+	if _, ran := readScreenText(t.Context(), "nonexistent.mp4", 10); ran {
+		t.Error("the text pass claimed to have read a file that does not exist")
+	}
+}
+
+func TestAnalysisJSON_SentOnlyWhenSomethingActuallyRan(t *testing.T) {
+	if analysisJSON(videoAnalysis{}) != nil {
+		t.Error("an analysis where no pass ran was still sent to the backend; " +
+			"that stores an empty measurement as if it were a measurement")
+	}
+	// "We listened and there were no words" is a real finding and must reach
+	// the backend, even though every string in it is empty.
+	if analysisJSON(videoAnalysis{Passes: []string{"speech"}}) == nil {
+		t.Error("a video that was listened to and had nothing said in it was " +
+			"dropped, so it is indistinguishable from one nothing listened to")
+	}
+}

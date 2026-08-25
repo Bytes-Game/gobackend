@@ -34,18 +34,26 @@ package main
 // an optional binary was missing would take the whole upload path down for a
 // feature nobody asked to be blocking.
 //
+// Silent is not the same as invisible. Passes records which passes RAN, and
+// logAnalysis prints the same thing at the end of every job, so "the video had
+// nothing to say" can be told apart from "nothing listened to it" — from the
+// stored analysis and from the workflow log, without guessing.
+//
 // ════════════════════════════════════════════════════════════════════════════
-// WHICH PASSES ARE ON RIGHT NOW, AND WHERE TO TURN THE LAST ONE ON
+// WHICH PASSES ARE ON RIGHT NOW
 // ════════════════════════════════════════════════════════════════════════════
 //
-// SHAPE and TEXT are on. SPEECH is off, and is waiting for somebody to decide
-// it is worth the hardware — see the ⚠ section at the top of README.md.
+// All three. Speech was the last one on and the workflow installs whisper.cpp
+// and sets its two environment variables; the "check whisper works" step there
+// transcribes a second of silence on every run, so a broken install fails the
+// job instead of quietly turning the feature off.
 //
-// This worker runs in GitHub Actions, from .github/workflows/hls-worker.yml,
-// every 30 minutes. That workflow is where tools are installed and where
-// environment variables are set. cmd/hls-worker/Dockerfile is the container
-// version of the same worker and is NOT what production uses; installing
-// something there alone does nothing to the live app.
+// This worker runs in GitHub Actions, from .github/workflows/hls-worker.yml —
+// every 30 minutes on a schedule, and immediately after an upload because the
+// backend pokes it (transcode_wakeup.go). That workflow is where tools are
+// installed and where environment variables are set. cmd/hls-worker/Dockerfile
+// is the container version of the same worker and is NOT what production uses;
+// installing something there alone does nothing to the live app.
 //
 // To turn speech on: put a whisper.cpp binary and a model wherever the worker
 // runs, and set WHISPER_BIN and WHISPER_MODEL. Nothing else changes.
@@ -117,17 +125,43 @@ func analyzeVideo(ctx context.Context, src string) videoAnalysis {
 	if analyzeShape(ctx, src, dur, &a) {
 		a.Passes = append(a.Passes, "shape")
 	}
-	if txt := readScreenText(ctx, src, dur); txt != "" {
+	// A pass is recorded when it RAN, not when it found something. Those are
+	// different facts and the difference is the whole reason Passes exists:
+	// a video with nobody talking and a worker with no whisper installed both
+	// produce an empty transcript, and only one of them is a problem.
+	if txt, ran := readScreenText(ctx, src, dur); ran {
 		a.ScreenText = txt
 		a.Passes = append(a.Passes, "text")
 	}
-	if sp := transcribeSpeech(ctx, src); sp != "" {
+	if sp, ran := transcribeSpeech(ctx, src); ran {
 		a.Speech = sp
 		a.Passes = append(a.Passes, "speech")
 	}
 
 	a.AutoTags = tagsFromAnalysis(a)
+	logAnalysis(src, a)
 	return a
+}
+
+// logAnalysis prints one line saying what the inspection actually did.
+//
+// It exists because the worker used to be silent about this, and silence is
+// indistinguishable from "it did not run". Somebody uploads a video, wants to
+// know whether the app listened to it, and the only evidence in the whole
+// workflow log is how long the job took.
+//
+// The words themselves are deliberately NOT printed. A transcript is whatever
+// somebody said into their phone, and workflow logs on this repo are readable
+// by anyone who can see the Actions tab. Counts answer the question — "we
+// listened and heard eleven words" — without publishing the sentence.
+func logAnalysis(src string, a videoAnalysis) {
+	passes := "none"
+	if len(a.Passes) > 0 {
+		passes = strings.Join(a.Passes, "+")
+	}
+	log.Printf("analyze: %s passes=%s speechWords=%d screenTextChars=%d tags=%v",
+		filepath.Base(src), passes,
+		len(strings.Fields(a.Speech)), len(a.ScreenText), a.AutoTags)
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -343,16 +377,17 @@ const screenTextFrames = 6
 
 // readScreenText pulls a few frames and runs OCR over them.
 //
-// Returns "" when tesseract is not installed, which is the normal case on a
-// worker nobody has configured for it. The caller treats that as "no text
-// found" and moves on.
-func readScreenText(ctx context.Context, src string, dur float64) string {
+// The second return says whether the pass RAN. False means there was no
+// tesseract to run, or extracting the frames failed — nothing was read, so
+// nothing is known. True with an empty string means the opposite and is a real
+// answer: we looked at six frames and there were no words on them.
+func readScreenText(ctx context.Context, src string, dur float64) (string, bool) {
 	if _, err := exec.LookPath("tesseract"); err != nil {
-		return ""
+		return "", false
 	}
 	dir, err := os.MkdirTemp("", "ocr")
 	if err != nil {
-		return ""
+		return "", false
 	}
 	defer os.RemoveAll(dir)
 
@@ -371,7 +406,7 @@ func readScreenText(ctx context.Context, src string, dur float64) string {
 		pattern,
 	)
 	if err := extract.Run(); err != nil {
-		return ""
+		return "", false
 	}
 
 	frames, _ := filepath.Glob(filepath.Join(dir, "*.png"))
@@ -396,7 +431,7 @@ func readScreenText(ctx context.Context, src string, dur float64) string {
 			words = append(words, line)
 		}
 	}
-	return strings.TrimSpace(strings.Join(words, " "))
+	return strings.TrimSpace(strings.Join(words, " ")), true
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -417,21 +452,30 @@ const (
 
 // transcribeSpeech extracts the audio and runs whisper over it.
 //
-// Returns "" whenever anything is missing or fails — no binary, no model, no
-// audio track, a timeout. Same rule as every other pass.
-func transcribeSpeech(ctx context.Context, src string) string {
+// The second return says whether whisper actually ran. That distinction is the
+// point of this function's signature: "we listened and nobody spoke" and "there
+// was no whisper on this machine" both come back as an empty transcript, and
+// only one of them means the feature is switched off. Without the flag the
+// difference is invisible in the stored analysis and in the logs, which is
+// exactly the question somebody asks after uploading a video.
+//
+// False for: no binary, no model, a binary that will not start, no audio
+// track, a conversion failure, a timeout.
+func transcribeSpeech(ctx context.Context, src string) (string, bool) {
 	bin := strings.TrimSpace(os.Getenv(whisperBinEnv))
 	model := strings.TrimSpace(os.Getenv(whisperModelEnv))
 	if bin == "" || model == "" {
-		return ""
+		return "", false
 	}
 	if _, err := exec.LookPath(bin); err != nil {
-		return ""
+		log.Printf("analyze: %s is set to %q but that will not run: %v",
+			whisperBinEnv, bin, err)
+		return "", false
 	}
 
 	dir, err := os.MkdirTemp("", "stt")
 	if err != nil {
-		return ""
+		return "", false
 	}
 	defer os.RemoveAll(dir)
 
@@ -442,7 +486,9 @@ func transcribeSpeech(ctx context.Context, src string) string {
 		"-hide_banner", "-nostats", "-loglevel", "error",
 		"-i", src, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", wav)
 	if err := conv.Run(); err != nil {
-		return ""
+		// A silent video has no audio stream, so this is the ordinary path for
+		// one — not worth a log line every time.
+		return "", false
 	}
 
 	out, err := exec.CommandContext(ctx, bin,
@@ -454,9 +500,9 @@ func transcribeSpeech(ctx context.Context, src string) string {
 	).Output()
 	if err != nil {
 		log.Printf("analyze: speech pass failed: %v", err)
-		return ""
+		return "", false
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(string(out)), true
 }
 
 // ════════════════════════════════════════════════════════════════════════════
