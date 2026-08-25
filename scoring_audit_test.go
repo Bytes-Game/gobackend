@@ -161,8 +161,12 @@ func TestAudit_NilInputsDoNotPanic(t *testing.T) {
 		p    *UserProfile
 		s    *SessionState
 	}{
+		{"everything nil", nil, nil, nil},
+		{"no profile", &ContentScore{ContentID: "c1", ContentType: "challenge"}, nil, &SessionState{}},
+		{"no session", &ContentScore{ContentID: "c1", ContentType: "challenge"}, &UserProfile{}, nil},
+		{"no content", nil, &UserProfile{}, &SessionState{}},
+		{"no profile, no session", &ContentScore{ContentID: "c1"}, nil, nil},
 		{"all zero", &ContentScore{}, &UserProfile{}, &SessionState{}},
-		{"no category", &ContentScore{ContentID: "c1", ContentType: "challenge"}, &UserProfile{}, &SessionState{}},
 		{"empty everything", &ContentScore{}, &UserProfile{CategoryAffinity: map[string]float64{}}, &SessionState{}},
 	}
 	for _, c := range cases {
@@ -337,61 +341,83 @@ func TestAudit_SpacingNeverLosesOrDuplicatesAnItem(t *testing.T) {
 	}
 }
 
-// ── A precondition worth writing down ───────────────────────────────────────
+// ── The guards, and the promise they make ──────────────────────────────────
 
-// scoreForUser requires a non-nil profile and will crash without one.
-//
-// Not reachable today: SmartFeedHandler is the only caller, and every path
-// into it produces a profile — getOrComputeProfile falls through to
-// computeUserProfile, which builds one before it returns, and the handler
-// substitutes a default on error. Traced all four return paths to confirm it.
-//
-// So this is a landmine rather than a live crash: the first line of the
-// function dereferences profile.UserID with no guard, and classifyCohort
-// immediately above it DOES handle nil, which makes the function look safer
-// than it is. A second caller — a new surface, an admin tool, a backfill —
-// would find out the hard way.
-//
-// The test pins the current contract instead of asserting a crash, so it
-// keeps passing if somebody makes the function nil-safe, and documents why
-// the nil case is absent from the property tests above.
-func TestAudit_ScoreForUserRequiresAProfileAndASession(t *testing.T) {
-	cs := &ContentScore{ContentID: "c1", ContentType: "challenge"}
+func TestAudit_GuardsChangeNoScoreAtAll(t *testing.T) {
+	// The promise the guards have to keep. Every value the system can
+	// currently produce must score EXACTLY as it did before they existed —
+	// clamping a number already in range returns the same number, so a
+	// realistic input has to be bit-identical whether or not it is clamped.
+	//
+	// This compares the scorer against itself with pre-clamped inputs. If a
+	// guard ever starts altering a legitimate value, these diverge.
+	rng := rand.New(rand.NewSource(23))
+	for i := 0; i < 5000; i++ {
+		cs, p, s := auditContent(rng), auditProfile(rng), auditSession(rng)
 
-	// The contract every caller satisfies today.
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Fatalf("a non-nil profile still panicked: %v", r)
-			}
-		}()
-		scoreForUser(cs, &UserProfile{}, &SessionState{}, nil, nil, watchHistory{})
-	}()
+		got, _ := scoreForUser(cs, p, s, nil, nil, watchHistory{})
+		// Pre-clamped: what the guards would have produced, fed in directly.
+		want, _ := scoreForUser(safeContentScore(cs), safeProfile(p), safeSession(s),
+			nil, nil, watchHistory{})
 
-	// And what happens without each. Recorded, not required: making these safe
-	// would be an improvement, and this test does not stand in the way.
-	panicsOn := func(p *UserProfile, s *SessionState) bool {
-		crashed := false
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					crashed = true
-				}
-			}()
-			scoreForUser(cs, p, s, nil, nil, watchHistory{})
-		}()
-		return crashed
+		if math.Abs(got-want) > 1e-9 {
+			t.Fatalf("a guard altered a legitimate input: %v vs %v\n  content=%+v",
+				got, want, cs)
+		}
 	}
-	if panicsOn(nil, &SessionState{}) {
-		t.Log("NOTE: nil profile panics — profile.UserID is dereferenced on the " +
-			"first line of scoreForUser, with no guard. classifyCohort directly " +
-			"above it DOES handle nil, which makes the function look safer than " +
-			"it is.")
+}
+
+func TestAudit_GuardsDoNotMutateTheSharedCache(t *testing.T) {
+	// The ContentScore comes out of contentScoreCache, shared across every
+	// concurrent request in the process. Clamping it in place would be a data
+	// race AND would permanently alter the cached copy for everybody else.
+	//
+	// So the guard copies. This checks the original is untouched even when it
+	// holds values the guard has to correct.
+	original := &ContentScore{
+		ContentID: "c1", ContentType: "challenge",
+		AvgCompletionRate: 5, SkipRate: -2, EnergyLevel: 99,
+		ViewCount: -10, LikeCount: -3,
+		EmotionVector: map[string]float64{"happy": 1},
 	}
-	if panicsOn(&UserProfile{}, nil) {
-		t.Log("NOTE: nil session panics — session.DopamineBudget in the energy-fit " +
-			"block. Same story: not reachable today, because getSessionState " +
-			"returns a default on every path rather than nil.")
+	before := fmt.Sprintf("%+v", *original)
+
+	safe := safeContentScore(original)
+
+	if after := fmt.Sprintf("%+v", *original); after != before {
+		t.Errorf("the shared ContentScore was modified in place:\n  before %s\n  after  %s",
+			before, after)
+	}
+	if safe == original {
+		t.Error("the guard returned the same pointer — any clamping it does " +
+			"would land in the shared cache")
+	}
+	// And it did actually correct the copy.
+	if safe.AvgCompletionRate != 1 || safe.SkipRate != 0 || safe.EnergyLevel != 1 {
+		t.Errorf("the copy was not clamped: %+v", safe)
+	}
+	if safe.ViewCount != 0 || safe.LikeCount != 0 {
+		t.Errorf("negative counts survived: views=%d likes=%d",
+			safe.ViewCount, safe.LikeCount)
+	}
+}
+
+func TestAudit_Clamp01HandlesTheCaseThatCatchesEveryone(t *testing.T) {
+	// NaN is the one. `v < 0` and `v > 1` are BOTH false for NaN, so the
+	// obvious two-branch clamp passes it straight through and achieves
+	// nothing — which is exactly what the copy of this function in the
+	// simulator used to do.
+	if got := clamp01(math.NaN()); got != 0 {
+		t.Errorf("clamp01(NaN) = %v; the two-branch version returns NaN here "+
+			"and the whole guard is pointless", got)
+	}
+	for in, want := range map[float64]float64{
+		-1: 0, 0: 0, 0.5: 0.5, 1: 1, 2: 1,
+		math.Inf(1): 1, math.Inf(-1): 0, math.MaxFloat64: 1,
+	} {
+		if got := clamp01(in); got != want {
+			t.Errorf("clamp01(%v) = %v, want %v", in, got, want)
+		}
 	}
 }
 
@@ -419,7 +445,7 @@ func TestAudit_HostileInputIsRecordedNotRequired(t *testing.T) {
 
 	rng := rand.New(rand.NewSource(2))
 	notReal := map[string]int{}
-	huge := 0
+	big := map[string]float64{}
 	const runs = 20000
 	for i := 0; i < runs; i++ {
 		score, breakdown := scoreForUser(auditContent(rng), auditProfile(rng),
@@ -430,12 +456,12 @@ func TestAudit_HostileInputIsRecordedNotRequired(t *testing.T) {
 		for term, v := range breakdown {
 			if math.IsNaN(v) || math.IsInf(v, 0) {
 				notReal[term]++
-			} else if math.Abs(v) > 1e6 {
-				huge++
+			} else if math.Abs(v) > 1e6 && math.Abs(v) > math.Abs(big[term]) {
+				big[term] = v
 			}
 		}
 	}
-	if len(notReal) == 0 && huge == 0 {
+	if len(notReal) == 0 && len(big) == 0 {
 		t.Log("the scorer survives out-of-range input unchanged — nothing to note")
 		return
 	}
@@ -444,8 +470,11 @@ func TestAudit_HostileInputIsRecordedNotRequired(t *testing.T) {
 	for term, n := range notReal {
 		t.Logf("  %-20s produced NaN or Inf %d times", term, n)
 	}
-	if huge > 0 {
-		t.Logf("  %d terms exceeded 1e6, which would decide a ranking alone", huge)
+	if len(big) > 0 {
+		t.Log("  terms that exceeded 1e6, which would decide a ranking alone:")
+		for term, worst := range big {
+			t.Logf("    %-22s worst %v", term, worst)
+		}
 	}
 	t.Log("Not reachable today: every upstream writer clamps. Recorded because " +
 		"the scorer has no guard of its own, so it depends on all of them " +

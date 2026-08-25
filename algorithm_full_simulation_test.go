@@ -159,18 +159,18 @@ func makeArchetypes() []archetype {
 	}
 	return []archetype{
 		{
-			UserID:  "u-cold",
-			Cohort:  CohortColdStart,
-			Profile: mkProfile("u-cold", 5, 1, 0.50, 0.30, 120),
+			UserID:     "u-cold",
+			Cohort:     CohortColdStart,
+			Profile:    mkProfile("u-cold", 5, 1, 0.50, 0.30, 120),
 			Strategies: []string{strategyStandard, strategyDiscovery, strategyTrending},
-			Events:  stdEvents()[:6], // few events — cold user
+			Events:     stdEvents()[:6], // few events — cold user
 		},
 		{
-			UserID:  "u-new",
-			Cohort:  CohortNew,
-			Profile: mkProfile("u-new", 50, 5, 0.55, 0.25, 150),
+			UserID:     "u-new",
+			Cohort:     CohortNew,
+			Profile:    mkProfile("u-new", 50, 5, 0.55, 0.25, 150),
 			Strategies: []string{strategyStandard, strategyDiscovery, strategyTrending, strategyFreshBlood},
-			Events:  stdEvents(),
+			Events:     stdEvents(),
 		},
 		{
 			UserID:     "u-engaged",
@@ -318,11 +318,11 @@ func simulateUser(t *testing.T, a archetype, content []seedContentItem, rnd *ran
 		// Stash a synthetic breakdown so LTR / watch-ratio can train when
 		// the terminal event fires.
 		breakdown := map[string]float64{
-			"quality":     cs.QualityScore,
-			"freshness":   1.0 - cs.QualityScore*0.1,
-			"social":      0.4,
-			"relevance":   0.6,
-			"energyFit":   0.5,
+			"quality":       cs.QualityScore,
+			"freshness":     1.0 - cs.QualityScore*0.1,
+			"social":        0.4,
+			"relevance":     0.6,
+			"energyFit":     0.5,
 			"trendingBonus": 0.2,
 		}
 		ltrStashBreakdownWithPos(uid, c.Type, c.ID, a.Cohort, breakdown, pos)
@@ -421,7 +421,7 @@ func materializeHomeFeedItem(c seedContentItem) HomeFeedItem {
 		Type: "post",
 		Post: &Post{
 			ID: c.ID, AuthorID: c.CreatorID,
-			Type: "video",
+			Type:      "video",
 			CreatedAt: time.Now().Add(-time.Duration(c.AgeHours) * time.Hour).Format(time.RFC3339),
 			Views:     c.Views, Likes: c.Likes,
 		},
@@ -436,15 +436,9 @@ func appendBounded(xs []string, x string, max int) []string {
 	return xs
 }
 
-func clamp01(x float64) float64 {
-	if x < 0 {
-		return 0
-	}
-	if x > 1 {
-		return 1
-	}
-	return x
-}
+// clamp01 now lives in scoring_guards.go, shared with the ranker. The version
+// that used to be here let NaN straight through — `x < 0` and `x > 1` are both
+// false for NaN — so the simulator gains that fix by using the real one.
 
 // resetPlatt clears the Platt calibrator so simulator runs are reproducible.
 func resetPlatt() {
