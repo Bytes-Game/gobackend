@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -48,7 +49,15 @@ func MarkBlocked(userID, creatorID string) {
 		return
 	}
 	if err := rdb.SAdd(rctx, "blocked_creators:"+userID, creatorID).Err(); err != nil {
-		// non-fatal: user will still be safe because the event is also in feed_events
+		// Non-fatal: the block is also recorded in feed_events, so the ranker
+		// still penalises this creator even without the fast set.
+		//
+		// Logged rather than swallowed silently, because a block that does not
+		// stick is the one failure here somebody would actually want to know
+		// about — it is the difference between "I never see them again" and "I
+		// still do".
+		log.Printf("blocked_creators: could not record %s blocking %s: %v",
+			userID, creatorID, err)
 	}
 	if metricSignalCapture != nil {
 		metricSignalCapture.WithLabelValues("block").Inc()
@@ -132,10 +141,10 @@ func RecordSessionEnd(userID string) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 type negativeSignals struct {
-	blocked       map[string]bool    // creatorId -> true
-	unfollowed    map[string]float64 // creatorId -> unfollow unix time (for decaying penalty)
-	bounces       map[string]bool    // contentKey (type:id) -> true
-	recentQueries []string
+	blocked        map[string]bool    // creatorId -> true
+	unfollowed     map[string]float64 // creatorId -> unfollow unix time (for decaying penalty)
+	bounces        map[string]bool    // contentKey (type:id) -> true
+	recentQueries  []string
 	lastSessionEnd time.Time // zero if unknown
 }
 
@@ -283,4 +292,3 @@ func sessionContinuityFactor(ns *negativeSignals) float64 {
 		return 1.0
 	}
 }
-
