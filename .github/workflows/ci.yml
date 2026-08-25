@@ -39,11 +39,67 @@ jobs:
         run: go test -race -count=1 ./...
         timeout-minutes: 10
 
+      # Every check staticcheck has, not the default subset.
+      #
+      # The default set is what most projects run and it was already clean; the
+      # full set found one more thing — an `if err != nil {}` with an empty
+      # body, swallowing a failed block-list write. That is the shape of check
+      # worth having on: a silently dropped error nobody would ever notice.
+      #
+      # The four exclusions are naming and comment-formatting rules (a field
+      # called Url rather than URL, a doc comment not starting with the
+      # function's own name). Real style points, no bearing on whether the code
+      # is correct, and thirteen of them would train everybody to ignore this
+      # job's output. Correctness checks stay on; typography does not.
       - name: staticcheck
         uses: dominikh/staticcheck-action@v1
         with:
           version: '2025.1'
           install-go: false
+          checks: 'all,-ST1003,-ST1020,-ST1021,-ST1022'
+
+      # NilAway traces where a nil could reach a dereference, across every
+      # line in the module. It is the answer to "how do we know nothing is
+      # broken in fifty thousand lines nobody has read lately".
+      #
+      # ── WHY THIS IS A BASELINE AND NOT A PASS/FAIL ──
+      #
+      # It reports 29 things today, and every one triaged so far is a false
+      # positive: the R2 config can return nil, but only ever alongside an
+      # error the caller checks; the search client can be nil, but all four
+      # uses check first; the mood table's guard checks one map and writes to
+      # two, but both places create them as a pair. NilAway cannot see
+      # correlated globals or a guard in an enclosing scope.
+      #
+      # Demanding zero would mean suppressing 29 warnings by hand, and a wall
+      # of suppressions is worse than no tool — it is the same "ignore this
+      # job" habit, with extra steps.
+      #
+      # So the gate is the COUNT. New nil paths fail the build; the existing
+      # ones are recorded in .nilaway-baseline and stay visible in the log.
+      # When somebody triages one properly, they lower the number and it can
+      # never come back.
+      - name: nilaway
+        run: |
+          set -uo pipefail
+          go install go.uber.org/nilaway/cmd/nilaway@latest
+          "$(go env GOPATH)/bin/nilaway" ./... > /tmp/nilaway.txt 2>&1 || true
+          found=$(grep -c "error:" /tmp/nilaway.txt || true)
+          baseline=$(cat .nilaway-baseline)
+          echo "nilaway: $found potential nil paths (baseline $baseline)"
+          if [ "$found" -gt "$baseline" ]; then
+            echo "::error::nilaway went from $baseline to $found potential nil paths."
+            echo "The new one is in the output below. Either fix it, or — if it"
+            echo "is a false positive like the others — raise .nilaway-baseline"
+            echo "and say in the commit message why it cannot happen."
+            cat /tmp/nilaway.txt
+            exit 1
+          fi
+          if [ "$found" -lt "$baseline" ]; then
+            echo "::notice::nilaway is down to $found from $baseline — lower"
+            echo ".nilaway-baseline to $found so it cannot creep back up."
+          fi
+          cat /tmp/nilaway.txt
 
   load-smoke:
     # Manually dispatched: runs the native Go load harness against a
