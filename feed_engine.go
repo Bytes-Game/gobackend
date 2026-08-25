@@ -3212,6 +3212,17 @@ func inferContentEnergy(contentType string, cs *ContentScore) float64 {
 func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState, followingSet map[string]bool, fofSet map[string]bool, watched watchHistory) (float64, map[string]float64) {
 	breakdown := make(map[string]float64)
 
+	// Everything below reads these three without checking anything, forty
+	// terms deep. That was safe only because every caller happened to satisfy
+	// every assumption — see scoring_guards.go for what happens when one stops.
+	//
+	// Changes no score: clamping a value already in range returns it unchanged,
+	// and cs is COPIED rather than clamped in place because it comes out of a
+	// cache shared with every other concurrent request.
+	cs = safeContentScore(cs)
+	profile = safeProfile(profile)
+	session = safeSession(session)
+
 	// ── COHORT + NEGATIVE SIGNAL CONTEXT ──
 	// Loaded once per user at the top of SmartFeedHandler; fetched from the
 	// per-request caches here. Missing ⇒ safe defaults (engaged cohort, no
@@ -5307,6 +5318,11 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	for _, item := range candidates {
 		contentID := getItemID(item)
 		contentType := item.Type
+		// No nil check: getContentScore always builds a score today, and
+		// scoreForUser substitutes a usable one if that ever changes. Both, so
+		// a row deleted between being listed and being scored — moderation can
+		// do that mid-request — costs one item its personalisation rather than
+		// the whole request.
 		cs := getContentScore(contentID, contentType)
 
 		score, breakdown := scoreForUser(cs, profile, session, followingSet, fofSet, watched)
