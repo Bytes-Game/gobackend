@@ -74,8 +74,8 @@ type hlsCompleteRequest struct {
 	Kind        string `json:"kind"` // "" / "challenge" | "response"
 	// What the worker worked out about the video while it had the file —
 	// see cmd/hls-worker/analyze.go. Absent from workers that predate it,
-	// and from any worker whose optional passes all found nothing, so this
-	// being empty is ordinary rather than an error.
+	// and from any worker where none of the optional passes could run at
+	// all, so this being empty is ordinary rather than an error.
 	Analysis json.RawMessage `json:"analysis,omitempty"`
 }
 
