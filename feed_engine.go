@@ -4548,7 +4548,19 @@ func moodDrivenPattern(mood string) []string {
 
 // composeFeed takes scored items and arranges them into the slot pattern.
 // Each slot is filled with the best available item matching that slot type.
-func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]bool) []ScoredItem {
+// composeFeed returns the page, plus how many items it passed over ONLY
+// because their creator had already filled their share of it.
+//
+// That second number is what makes "is there another page?" honest. The page
+// is capped at maxItemsPerCreator per creator, so with few creators it comes
+// back short even when the catalogue has plenty left — and a short page is
+// otherwise read as "the ranker offered everything it had". On the Battles tab
+// that ended the feed at nine items while more battles sat one page away.
+//
+// The cap is per PAGE: the count resets on every request, so an item held back
+// here is not lost, it is deferred. The next page has a fresh budget and will
+// take it. Saying "no more" is what stops that next page ever being asked for.
+func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]bool) ([]ScoredItem, int) {
 	// Bucket items by their best-fit slot type
 	buckets := map[string][]ScoredItem{
 		slotHook:       {},
@@ -4675,6 +4687,10 @@ func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]
 	// Fill slots from pattern
 	used := make(map[string]bool)        // Track used content IDs
 	creatorCount := make(map[string]int) // Diversity: max items per creator
+	// Items the cap held back, by content key rather than a counter: the same
+	// item is offered from several slot buckets, and counting each offer would
+	// report one deferred video as several.
+	heldForDiversity := make(map[string]bool)
 	result := make([]ScoredItem, 0, len(pattern))
 	bucketIdx := make(map[string]int) // Current index in each bucket
 
@@ -4694,6 +4710,7 @@ func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]
 				continue
 			}
 			if creatorCount[creatorID] >= maxItemsPerCreator {
+				heldForDiversity[contentKey] = true
 				continue
 			}
 
@@ -4714,7 +4731,11 @@ func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]
 				hookIdx++
 				contentKey := item.Item.Type + ":" + getItemID(item.Item)
 				creatorID := getItemCreatorID(item.Item)
-				if used[contentKey] || creatorCount[creatorID] >= maxItemsPerCreator {
+				if used[contentKey] {
+					continue
+				}
+				if creatorCount[creatorID] >= maxItemsPerCreator {
+					heldForDiversity[contentKey] = true
 					continue
 				}
 				item.SlotType = slot
@@ -4727,7 +4748,15 @@ func composeFeed(scored []ScoredItem, pattern []string, followingSet map[string]
 		}
 	}
 
-	return result
+	// An item that made the page is not "held back" — it may have been passed
+	// over for one slot and taken for a later one.
+	held := 0
+	for key := range heldForDiversity {
+		if !used[key] {
+			held++
+		}
+	}
+	return result, held
 }
 
 func getItemID(item HomeFeedItem) string {
@@ -5492,7 +5521,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Step 7: Compose feed with slot pattern
 	pattern := getFeedPattern(profile, session, limit)
-	composed := composeFeed(scored, pattern, followingSet)
+	composed, heldForDiversity := composeFeed(scored, pattern, followingSet)
 
 	// Step 7.0: Cold-start bootstrap mix — sprinkle high-Wilson-score "known
 	// bangers" into the head for users with very few events. Done AFTER composeFeed
@@ -5727,6 +5756,21 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	if kindFilter != feedKindAll {
 		hasMore = freshCount > 0 &&
 			feedKindHasMore(rawCount, len(composed), clientLimit, limit)
+	}
+	// A page shortened by the per-creator cap is not the end of anything.
+	//
+	// Both rules above read a short page as "the ranker offered everything it
+	// had". That is true when the catalogue ran out and false when composition
+	// held items back — and it holds them back constantly on a small creator
+	// roster, because the cap is three per creator per page. The Battles tab
+	// stopped at nine items with more battles one page away, and stopping is
+	// what guaranteed the next page never came: the cap resets per request, so
+	// the deferred items were only ever one more request from being served.
+	//
+	// A page with nothing new on it is still the end, whatever was held back.
+	// Another page can only bring more of the same.
+	if !hasMore && heldForDiversity > 0 && freshCount > 0 {
+		hasMore = true
 	}
 
 	// Interleave a "Suggested accounts" card into the feed. TikTok-style:
@@ -6312,9 +6356,13 @@ func populateChallengeCommentCountsScored(items []ScoredItem) {
 	populateChallengeCommentCounts(plain)
 }
 
-// populateHLSManifestURLs batch-fills Challenge.HLSManifestURL on every
-// challenge in `items` whose row in the DB has a non-empty
-// hls_manifest_url column (i.e. the transcode worker has finished).
+// populateHLSManifestURLs batch-fills what the worker produced for every
+// challenge in `items`: the HLS manifest, and the progressive MP4 renditions
+// the app actually plays (see cmd/hls-worker/progressive.go).
+//
+// Both in one query on purpose. They are written by the same worker at the
+// same moment and read by the same code path, so a second hop would be a
+// second round trip for a column sitting in the row already open.
 //
 // Why it's a separate populate step (vs. just SELECTing the column in
 // every candidate-source query): there are 8+ candidate-source queries
@@ -6356,16 +6404,19 @@ func populateHLSManifestURLs(items []HomeFeedItem) {
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 		args[i] = id
 	}
-	// The <> 'PENDING' leg matters: 'PENDING' is the worker-claim
-	// sentinel, not a URL. Without it, any challenge served during its
-	// transcode window shipped the literal string "PENDING" as
-	// hlsManifestUrl and the client tried to play it as a video.
+	// The 'PENDING' guard matters: it is the worker-claim sentinel, not a
+	// URL. Without it, any challenge served during its transcode window
+	// shipped the literal string "PENDING" as hlsManifestUrl and the client
+	// tried to play it as a video. It is a CASE rather than a WHERE now,
+	// because a row can have variants before it has a manifest and filtering
+	// on the manifest would drop the variants with it.
 	rows, err := db.Query(`
-		SELECT id, COALESCE(hls_manifest_url, '')
+		SELECT id,
+		       CASE WHEN COALESCE(hls_manifest_url, '') = 'PENDING' THEN ''
+		            ELSE COALESCE(hls_manifest_url, '') END,
+		       COALESCE(video_variants, '{}'::jsonb)::text
 		FROM challenges
-		WHERE id IN (`+strings.Join(placeholders, ",")+`)
-		  AND hls_manifest_url <> ''
-		  AND hls_manifest_url <> 'PENDING'`, args...)
+		WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		log.Printf("populateHLSManifestURLs query error: %v", err)
 		return
@@ -6373,16 +6424,33 @@ func populateHLSManifestURLs(items []HomeFeedItem) {
 	defer rows.Close()
 	for rows.Next() {
 		var cid int
-		var url string
-		if err := rows.Scan(&cid, &url); err != nil {
+		var url, variantsJSON string
+		if err := rows.Scan(&cid, &url, &variantsJSON); err != nil {
 			continue
+		}
+		var variants VideoVariants
+		if variantsJSON != "" && variantsJSON != "{}" {
+			if err := json.Unmarshal([]byte(variantsJSON), &variants); err != nil {
+				// Unreadable JSON is not a reason to lose the manifest as
+				// well; the app falls back to videoUrl for playback.
+				log.Printf("populateHLSManifestURLs: bad video_variants on challenge %d: %v", cid, err)
+				variants = nil
+			}
 		}
 		for _, idx := range idToIdx[cid] {
 			ch := items[idx].Challenge
 			if ch == nil {
 				continue
 			}
-			ch.HLSManifestURL = url
+			if url != "" {
+				ch.HLSManifestURL = url
+			}
+			// Only overwrite when the row actually has something. A candidate
+			// source that already filled this in from the upload path should
+			// keep what it had rather than be blanked by a row with none.
+			if len(variants) > 0 {
+				ch.VideoVariants = variants
+			}
 		}
 	}
 }

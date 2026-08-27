@@ -343,26 +343,121 @@ func TestAudit_SpacingNeverLosesOrDuplicatesAnItem(t *testing.T) {
 
 // ── The guards, and the promise they make ──────────────────────────────────
 
+// clockDrivenTerms are the score terms that move on their own between two
+// calls, because the current time is somewhere underneath them.
+//
+// Only one actually reads the clock — freshness, which is exp(-ln2 · age/18h).
+// The other two are running totals that contain it, so they inherit the
+// movement without reading anything themselves.
+//
+// This is an allow-list, so it is checked rather than trusted:
+// TestAudit_OnlyOneTermWatchesTheClock fails if a fourth appears. That test
+// wrote this list — the first version named freshness alone and the roll-ups
+// were the thing it caught.
+var clockDrivenTerms = map[string]bool{
+	"freshness":  true, // the one real clock reader
+	"baseScore":  true, // sum of the weighted terms, freshness among them
+	"finalScore": true, // baseScore after the multipliers
+}
+
 func TestAudit_GuardsChangeNoScoreAtAll(t *testing.T) {
 	// The promise the guards have to keep. Every value the system can
 	// currently produce must score EXACTLY as it did before they existed —
 	// clamping a number already in range returns the same number, so a
-	// realistic input has to be bit-identical whether or not it is clamped.
+	// realistic input has to be identical whether or not it is clamped.
 	//
-	// This compares the scorer against itself with pre-clamped inputs. If a
-	// guard ever starts altering a legitimate value, these diverge.
+	// ════════════════════════════════════════════════════════════════════════
+	// WHY THIS COMPARES TERMS AND NOT THE TOTAL
+	// ════════════════════════════════════════════════════════════════════════
+	//
+	// It used to compare the two final scores and allow 1e-9 of slack. That
+	// test failed on CI at a difference of 1.99e-9 and passed on a rerun of
+	// the same commit, which is the shape of a flake — but the cause is real
+	// and re-running would never have fixed it.
+	//
+	// scoreForUser reads the clock: freshness is exp(-ln2 · age / 18h), so it
+	// falls by about 1e-11 of a point per microsecond. The two calls below
+	// happen at different instants, so their totals ALWAYS differ a little,
+	// and how much depends on whatever the machine was doing in between. A
+	// garbage collection pause between them is enough to blow any fixed
+	// tolerance, so picking a bigger number would only make the flake rarer
+	// and the test weaker.
+	//
+	// Comparing the breakdown instead removes the clock from the question
+	// entirely. Every term that comes from the INPUT is required to be
+	// bit-identical — stricter than the old version, and it names the term
+	// that moved instead of just the total.
 	rng := rand.New(rand.NewSource(23))
 	for i := 0; i < 5000; i++ {
 		cs, p, s := auditContent(rng), auditProfile(rng), auditSession(rng)
 
-		got, _ := scoreForUser(cs, p, s, nil, nil, watchHistory{})
+		got, gotTerms := scoreForUser(cs, p, s, nil, nil, watchHistory{})
 		// Pre-clamped: what the guards would have produced, fed in directly.
-		want, _ := scoreForUser(safeContentScore(cs), safeProfile(p), safeSession(s),
+		want, wantTerms := scoreForUser(safeContentScore(cs), safeProfile(p), safeSession(s),
 			nil, nil, watchHistory{})
 
-		if math.Abs(got-want) > 1e-9 {
-			t.Fatalf("a guard altered a legitimate input: %v vs %v\n  content=%+v",
-				got, want, cs)
+		for name, a := range gotTerms {
+			b, present := wantTerms[name]
+			if !present {
+				t.Fatalf("term %q disappeared once the input was clamped\n  content=%+v",
+					name, cs)
+			}
+			if clockDrivenTerms[name] {
+				// Only this one is allowed to move, and only by the tiny
+				// amount the clock can turn between two calls.
+				if math.Abs(a-b) > 1e-6 {
+					t.Fatalf("clock-driven term %q moved by %v, far more than the "+
+						"time between two calls can explain — something else "+
+						"changed it\n  content=%+v", name, math.Abs(a-b), cs)
+				}
+				continue
+			}
+			if a != b {
+				t.Fatalf("a guard altered the %q term of a legitimate input: "+
+					"%v vs %v\n  content=%+v", name, a, b, cs)
+			}
+		}
+		for name := range wantTerms {
+			if _, present := gotTerms[name]; !present {
+				t.Fatalf("clamping the input invented a %q term\n  content=%+v", name, cs)
+			}
+		}
+		// The totals carry the one moving term, so they get the loose bound.
+		// Kept as a backstop for anything the breakdown does not name.
+		if math.Abs(got-want) > 1e-6 {
+			t.Fatalf("the final score moved by %v with every named term matching, "+
+				"so something not in the breakdown changed\n  content=%+v",
+				math.Abs(got-want), cs)
+		}
+	}
+}
+
+func TestAudit_OnlyOneTermWatchesTheClock(t *testing.T) {
+	// clockDrivenTerms is an allow-list, and an allow-list nobody rechecks is
+	// how a second time-based term would quietly get exempted from the
+	// bit-identical rule above.
+	//
+	// Scoring the same input twice, far enough apart to matter, shows which
+	// terms move on their own.
+	rng := rand.New(rand.NewSource(101))
+	cs, p, s := auditContent(rng), auditProfile(rng), auditSession(rng)
+	// A fresh item: freshness decays fastest near zero age, so this is where
+	// a clock-driven term is easiest to see.
+	cs.CreatedAt = time.Now()
+
+	_, first := scoreForUser(cs, p, s, nil, nil, watchHistory{})
+	time.Sleep(25 * time.Millisecond)
+	_, second := scoreForUser(cs, p, s, nil, nil, watchHistory{})
+
+	for name, a := range first {
+		if a == second[name] {
+			continue
+		}
+		if !clockDrivenTerms[name] {
+			t.Errorf("term %q changed on its own between two calls (%v → %v). "+
+				"It reads the clock, so it has to be listed in "+
+				"clockDrivenTerms — otherwise the guard test above will fail "+
+				"at random and look like a flake.", name, a, second[name])
 		}
 	}
 }
