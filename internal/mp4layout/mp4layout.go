@@ -1,3 +1,11 @@
+// Package mp4layout answers one question about a video file: does its index
+// come before the picture, or after it?
+//
+// That single fact decides whether a player can start on the opening bytes or
+// has to download all the way to the end first, which is the difference
+// between a reel that plays instantly and one that visibly hangs. Both the
+// import tool and the transcode worker normalise uploads on the strength of
+// it, so it lives here rather than being copied into each.
 package mp4layout
 
 import (
