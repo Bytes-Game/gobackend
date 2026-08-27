@@ -1,4 +1,4 @@
-package main
+package mp4layout
 
 import (
 	"encoding/binary"
@@ -45,13 +45,13 @@ func TestReadMP4Layout(t *testing.T) {
 	cases := []struct {
 		name string
 		head []byte
-		want mp4Layout
+		want Layout
 		why  string
 	}{
 		{
 			name: "moov before mdat is faststart",
 			head: join(box("ftyp", 24), box("moov", 900), box("mdat", 64)),
-			want: mp4LayoutFastStart,
+			want: FastStart,
 		},
 		{
 			name: "mdat before moov is not",
@@ -59,7 +59,7 @@ func TestReadMP4Layout(t *testing.T) {
 			// past the probe, which is why the verdict has to come from the
 			// header rather than from finding moov.
 			head: join(box("ftyp", 24), box("mdat", 64, 4*1024*1024)),
-			want: mp4LayoutMoovAtEnd,
+			want: MoovAtEnd,
 			why:  "this is the clip that has to be remuxed",
 		},
 		{
@@ -68,24 +68,24 @@ func TestReadMP4Layout(t *testing.T) {
 			// precisely because a faststart rewrite left a gap behind.
 			head: join(box("ftyp", 24), box("free", 512), box("skip", 8),
 				box("wide", 8), box("moov", 100)),
-			want: mp4LayoutFastStart,
+			want: FastStart,
 		},
 		{
 			name: "neither box in range decides nothing",
 			head: join(box("ftyp", 24), box("free", 0)),
-			want: mp4LayoutUnknown,
+			want: Unknown,
 			why: "must not read as moov-at-end: that would remux a file " +
 				"on the strength of a short read",
 		},
 		{
 			name: "an empty read decides nothing",
 			head: nil,
-			want: mp4LayoutUnknown,
+			want: Unknown,
 		},
 		{
 			name: "a truncated header decides nothing",
 			head: []byte{0, 0, 0, 32, 0x66},
-			want: mp4LayoutUnknown,
+			want: Unknown,
 		},
 		{
 			name: "bytes that are not an mp4 decide nothing",
@@ -96,31 +96,31 @@ func TestReadMP4Layout(t *testing.T) {
 				}
 				return b
 			}(),
-			want: mp4LayoutUnknown,
+			want: Unknown,
 			why:  "a 0xffffffff size walks past the buffer and stops there",
 		},
 		{
 			name: "size 0 means the box runs to EOF, so nothing follows",
 			head: join(box("ftyp", 24, 0), box("moov", 8)),
-			want: mp4LayoutUnknown,
+			want: Unknown,
 		},
 		{
 			name: "a 64-bit size is read from the right place",
 			head: join(large64(32, "free", 16), box("moov", 8)),
-			want: mp4LayoutFastStart,
+			want: FastStart,
 		},
 		{
 			name: "a 64-bit size too large to be a reel decides nothing",
 			head: large64(1<<32, "free", 0),
-			want: mp4LayoutUnknown,
+			want: Unknown,
 		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := readMP4Layout(c.head)
+			got := Read(c.head)
 			if got != c.want {
-				msg := "readMP4Layout(...) = " + got.String() +
+				msg := "Read(...) = " + got.String() +
 					", want " + c.want.String()
 				if c.why != "" {
 					msg += " — " + c.why
@@ -133,12 +133,12 @@ func TestReadMP4Layout(t *testing.T) {
 
 // A box that claims to be smaller than its own header cannot advance the
 // cursor past the header that declared it. Without the floor in
-// readMP4Layout the walk never terminates, so this test hanging IS the
+// Read the walk never terminates, so this test hanging IS the
 // failure — there is no return value to assert on.
 func TestReadMP4LayoutTerminatesOnABoxSmallerThanItsHeader(t *testing.T) {
 	for _, bad := range []int{0, 1, 2, 7} {
 		head := join(box("ftyp", 24, bad), box("moov", 8))
-		if got := readMP4Layout(head); got == mp4LayoutFastStart {
+		if got := Read(head); got == FastStart {
 			t.Errorf("a box declaring size %d was walked through as if valid; "+
 				"its declared size cannot be trusted to move the cursor", bad)
 		}
@@ -149,16 +149,16 @@ func TestReadMP4LayoutTerminatesOnABoxSmallerThanItsHeader(t *testing.T) {
 // it below that and every file reads as unknown, the remux never fires,
 // and the detection is silently dead.
 func TestProbeBudgetClearsRealisticPadding(t *testing.T) {
-	if mp4LayoutProbeBytes < 1024 {
-		t.Errorf("mp4LayoutProbeBytes = %d, too small to reach moov past "+
-			"ordinary ftyp and padding boxes", mp4LayoutProbeBytes)
+	if ProbeBytes < 1024 {
+		t.Errorf("ProbeBytes = %d, too small to reach moov past "+
+			"ordinary ftyp and padding boxes", ProbeBytes)
 	}
 
 	padded := join(box("ftyp", 32), box("free", 800), box("moov", 64))
-	if len(padded) > mp4LayoutProbeBytes {
+	if len(padded) > ProbeBytes {
 		t.Fatalf("fixture is %d bytes, larger than the probe", len(padded))
 	}
-	if got := readMP4Layout(padded); got != mp4LayoutFastStart {
+	if got := Read(padded); got != FastStart {
 		t.Errorf("a file with 800 bytes of padding read as %s", got)
 	}
 }

@@ -69,12 +69,14 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// Which tab is asking — see feed_kind_filter.go. The over-fetch is folded
 	// into candidateLimit below, so a single-kind page still fills.
+	//
+	// The cap above bounds what a client may ASK FOR. The over-fetch is an
+	// internal working size and must not be capped by it, or the tab quietly
+	// gets half the pool it was written to use — see the same note in
+	// SmartFeedHandler.
 	kindFilter := feedKindFromRequest(r)
 	clientLimit := limit
 	limit = feedKindFetchLimit(limit, kindFilter)
-	if limit > 50 {
-		limit = 50
-	}
 	// Same TikTok-style refresh signal as SmartFeedHandler. Clears session
 	// dedup; anti-repeat top-3 demotion + ±0.10 score jitter is applied below
 	// before sorting so the same item rarely lands at the head two refreshes
@@ -138,6 +140,10 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 		// fetchCandidates which has its own ladder.
 		candidates = fetchCandidates(userID, candidateLimit)
 	}
+
+	// Drop what this tab cannot show before scoring it — see
+	// narrowCandidatesToKind.
+	candidates = narrowCandidatesToKind(candidates, kindFilter)
 
 	// Build interacted set + warm signal caches (still needed for negative
 	// signals like blocks/reports — explore must respect those even when

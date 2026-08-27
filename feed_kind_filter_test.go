@@ -294,3 +294,162 @@ func TestFetchLimit_IsBounded(t *testing.T) {
 		t.Errorf("a zero-item page asked for %d", got)
 	}
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// NARROWING THE POOL: WHAT IT IS ACTUALLY FOR
+// ════════════════════════════════════════════════════════════════════════════
+//
+// A live Battles page scored 250 candidates to serve 9 items. The waste was
+// the obvious half; the ceiling was the half that mattered. composeFeed counts
+// its 3-per-creator limit against the MIXED page, so a creator whose slots go
+// to shorts contributes almost nothing to the Battles tab and their other
+// battles are never looked at.
+//
+// These tests pin both halves, because the fix is easy to undo by moving one
+// line back below composition and nothing would fail.
+
+func kindItem(id, creator string, battle bool) HomeFeedItem {
+	ch := &Challenge{ID: id, CreatorID: creator}
+	if battle {
+		ch.TopResponseVideoUrl = "https://x/" + id + ".mp4"
+		ch.ResponseCount = 1
+	}
+	return HomeFeedItem{Type: "challenge", Challenge: ch}
+}
+
+// composeCeiling is the arithmetic composeFeed actually applies: no more than
+// maxItemsPerCreator from any one creator, counted over whatever it is given.
+func composeCeiling(items []HomeFeedItem) []HomeFeedItem {
+	perCreator := map[string]int{}
+	out := make([]HomeFeedItem, 0, len(items))
+	for _, it := range items {
+		c := it.Challenge.CreatorID
+		if perCreator[c] >= maxItemsPerCreator {
+			continue
+		}
+		perCreator[c]++
+		out = append(out, it)
+	}
+	return out
+}
+
+func TestNarrow_TheCreatorCapCountsTheKindBeingServed(t *testing.T) {
+	// Three creators, each with 3 shorts and 3 battles. Shorts rank first,
+	// which is the ordinary case — a challenge is born a short, so the newest
+	// and most numerous things in any pool are shorts.
+	var pool []HomeFeedItem
+	for _, c := range []string{"alice", "bob", "carol"} {
+		for i := 0; i < 3; i++ {
+			pool = append(pool, kindItem(c+"-s"+string(rune('0'+i)), c, false))
+		}
+	}
+	for _, c := range []string{"alice", "bob", "carol"} {
+		for i := 0; i < 3; i++ {
+			pool = append(pool, kindItem(c+"-b"+string(rune('0'+i)), c, true))
+		}
+	}
+
+	// OLD ORDER: compose the mixed page first, then drop the shorts.
+	oldWay := filterFeedKind(composeCeiling(pool), feedKindBattles)
+
+	// NEW ORDER: drop what the tab cannot show, then compose.
+	newWay := composeCeiling(filterFeedKind(pool, feedKindBattles))
+
+	t.Logf("9 battles available — filtering after composition serves %d, "+
+		"filtering before serves %d", len(oldWay), len(newWay))
+
+	if len(oldWay) != 0 {
+		t.Errorf("expected the old order to serve nothing here (every creator "+
+			"spends all three slots on shorts), got %d", len(oldWay))
+	}
+	if len(newWay) != 9 {
+		t.Errorf("filtering first should reach all 9 battles, got %d", len(newWay))
+	}
+}
+
+func TestNarrow_MixedFeedIsUntouchedAndPaysNothing(t *testing.T) {
+	// The ordinary feed must not change at all, and must not pay for the
+	// enrichment query the tabs need. Identity of the returned slice is the
+	// check: narrowing returns the caller's own slice, having done nothing.
+	pool := []HomeFeedItem{
+		kindItem("1", "alice", false),
+		kindItem("2", "bob", true),
+	}
+	got := narrowCandidatesToKind(pool, feedKindAll)
+	if len(got) != len(pool) {
+		t.Fatalf("the mixed feed lost items: %d → %d", len(pool), len(got))
+	}
+	for i := range pool {
+		if got[i].Challenge != pool[i].Challenge {
+			t.Errorf("item %d was rebuilt; the mixed feed should be returned as-is", i)
+		}
+	}
+	// Empty in, empty out, and no database touched.
+	if got := narrowCandidatesToKind(nil, feedKindBattles); len(got) != 0 {
+		t.Errorf("got %d items from an empty pool", len(got))
+	}
+}
+
+func TestNarrow_KeepsWhatTheTabWantsAndDropsTheRest(t *testing.T) {
+	pool := []HomeFeedItem{
+		kindItem("1", "alice", false),
+		kindItem("2", "bob", true),
+		kindItem("3", "carol", false),
+		// Furniture is not content and belongs on every tab.
+		{Type: "suggestedAccounts", SuggestedAccounts: &SuggestedAccountsCard{}},
+	}
+	answered := map[string]bool{"2": true}
+
+	battles := keepKind(pool, answered, feedKindBattles)
+	if len(battles) != 2 {
+		t.Errorf("battles tab kept %d items, expected the 1 battle + the card", len(battles))
+	}
+	shorts := keepKind(pool, answered, feedKindShorts)
+	if len(shorts) != 3 {
+		t.Errorf("shorts tab kept %d items, expected the 2 shorts + the card", len(shorts))
+	}
+}
+
+func TestNarrow_AnUnanswerableQuestionChangesNothing(t *testing.T) {
+	// db is nil here, which is the same shape as a database blip in
+	// production. The wrong move is to guess: guessing "nothing is answered"
+	// empties the Battles tab and lets battles onto the Shorts tab.
+	//
+	// Correctness lives in the filter that runs after composition, on an
+	// enriched page. This step only buys headroom, so when it cannot tell it
+	// hands the pool back exactly as it found it.
+	pool := []HomeFeedItem{
+		kindItem("1", "alice", false),
+		kindItem("2", "bob", true),
+	}
+	for _, kind := range []string{feedKindBattles, feedKindShorts} {
+		got := narrowCandidatesToKind(pool, kind)
+		if len(got) != len(pool) {
+			t.Errorf("%s tab: with no way to tell battles from shorts the pool "+
+				"went %d → %d. It has to be left alone.", kind, len(pool), len(got))
+		}
+	}
+	if _, ok := answeredChallengeIDs(pool); ok {
+		t.Error("claimed to have answered the question with no database")
+	}
+}
+
+func TestNarrow_TheOverfetchIsNotCappedByTheRequestCap(t *testing.T) {
+	// Both handlers used to apply maxPageSize AFTER the over-fetch, which cut
+	// a 5x working pool back to 50 and made feedKindMaxFetch unreachable. The
+	// two caps mean different things and the order is what keeps them apart.
+	const asked = 20
+	if asked > maxPageSize {
+		t.Skip("the default page is larger than the request cap; rewrite this")
+	}
+	fetch := feedKindFetchLimit(asked, feedKindBattles)
+	if fetch <= maxPageSize {
+		t.Errorf("a tab asking for %d works with a pool of %d, which the %d "+
+			"request cap would swallow — the over-fetch has been capped by the "+
+			"wrong number again", asked, fetch, maxPageSize)
+	}
+	if fetch != asked*feedKindOverfetch {
+		t.Errorf("expected the full %dx over-fetch (%d), got %d",
+			feedKindOverfetch, asked*feedKindOverfetch, fetch)
+	}
+}

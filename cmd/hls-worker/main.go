@@ -353,6 +353,15 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (string,
 		return "", nil, fmt.Errorf("download: %w", err)
 	}
 
+	// 1a. Straighten the upload out while we have it here.
+	//
+	// Phones write the video's index at the END of the file, which means no
+	// player can show a frame until it has fetched the last bytes — for
+	// every viewer, forever. One lossless container rewrite fixes it for
+	// good. Never fatal, and it leaves the original alone unless the rewrite
+	// checks out. See faststart.go.
+	fixSourceFastStart(ctx, cfg, job, srcPath)
+
 	// 2. Run ffmpeg → produces master.m3u8 + per-rendition manifests
 	// + .ts segments in `work`.
 	outDir := filepath.Join(work, "out")

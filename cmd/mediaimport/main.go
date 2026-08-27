@@ -51,6 +51,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"mymodule/internal/mp4layout"
 	"net/http"
 	"net/url"
 	"os"
@@ -282,14 +283,14 @@ func extractPoster(ctx context.Context, videoPath, posterPath string) error {
 // churn the bucket, change every object's bytes, and make the "remuxed"
 // line above meaningless as a report of which sources were bad.
 func ensureFastStart(ctx context.Context, videoPath string) (bool, error) {
-	layout, err := layoutOf(videoPath)
+	layout, err := mp4layout.OfFile(videoPath)
 	if err != nil {
 		return false, err
 	}
 	// unknown is deliberately not remuxed — see mp4_layout.go. Rewriting on
 	// the strength of a read we could not interpret would touch files that
 	// are very likely fine.
-	if layout != mp4LayoutMoovAtEnd {
+	if layout != mp4layout.MoovAtEnd {
 		return false, nil
 	}
 
@@ -313,10 +314,10 @@ func ensureFastStart(ctx context.Context, videoPath string) (bool, error) {
 	// are not what was asked for, and an unverified remux would upload a
 	// still-broken file while printing that it had fixed it — the same
 	// class of silent wrongness this whole change is about.
-	switch after, err := layoutOf(remuxed); {
+	switch after, err := mp4layout.OfFile(remuxed); {
 	case err != nil:
 		return false, err
-	case after != mp4LayoutFastStart:
+	case after != mp4layout.FastStart:
 		return false, fmt.Errorf(
 			"remux produced a %s file; refusing to upload it as fixed", after)
 	}
@@ -327,25 +328,7 @@ func ensureFastStart(ctx context.Context, videoPath string) (bool, error) {
 	return true, nil
 }
 
-// layoutOf reads just enough of a file's opening to classify it.
-func layoutOf(path string) (mp4Layout, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return mp4LayoutUnknown, err
-	}
-	defer f.Close()
-
-	head := make([]byte, mp4LayoutProbeBytes)
-	// ReadFull over Read: a single Read is allowed to return one byte, and
-	// a short buffer here would report "unknown" for a perfectly good file.
-	// A file shorter than the probe is fine, hence the EOF cases.
-	n, err := io.ReadFull(f, head)
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return mp4LayoutUnknown, err
-	}
-	return readMP4Layout(head[:n]), nil
-}
-
+// mp4layout.OfFile reads just enough of a file's opening to classify it.
 func runFFmpeg(ctx context.Context, videoPath, posterPath, seekSeconds string) error {
 	// -ss before -i is the fast (keyframe) seek, which is what we want:
 	// exact frame accuracy is irrelevant for a poster and the accurate
