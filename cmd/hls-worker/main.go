@@ -159,17 +159,18 @@ func main() {
 		}
 		emptyPolls = 0
 		log.Printf("claimed job kind=%s id=%s source=%s", jobKind(*job), job.ChallengeID, job.SourceURL)
-		manifestURL, analysis, err := runJob(cfg, *job, *jobTimeout)
+		res, err := runJob(cfg, *job, *jobTimeout)
 		if err != nil {
 			log.Printf("process error for %s=%s: %v", jobKind(*job), job.ChallengeID, err)
 			_ = reportFail(cfg, *job, err.Error())
 			continue
 		}
-		if err := reportComplete(cfg, *job, manifestURL, analysis); err != nil {
+		if err := reportComplete(cfg, *job, res); err != nil {
 			log.Printf("complete report error for %s=%s: %v", jobKind(*job), job.ChallengeID, err)
 			continue
 		}
-		log.Printf("completed %s=%s manifest=%s", jobKind(*job), job.ChallengeID, manifestURL)
+		log.Printf("completed %s=%s manifest=%s mp4=%d", jobKind(*job),
+			job.ChallengeID, res.ManifestURL, len(res.VideoVariants))
 	}
 }
 
@@ -250,6 +251,10 @@ type reportPayload struct {
 	// does not understand the field, or a worker with no optional binaries
 	// installed, both behave exactly as before.
 	Analysis json.RawMessage `json:"analysis,omitempty"`
+	// Our own progressive MP4s, label → public URL — see progressive.go.
+	// Omitted when the encode produced nothing, so an older backend and a
+	// worker that could not encode both behave exactly as before.
+	VideoVariants map[string]string `json:"videoVariants,omitempty"`
 }
 
 // ─── HTTP calls to the backend ───────────────────────────────────────
@@ -285,12 +290,13 @@ func jobKind(j pendingJob) string {
 	return "challenge"
 }
 
-func reportComplete(cfg *workerConfig, job pendingJob, manifestURL string, analysis json.RawMessage) error {
+func reportComplete(cfg *workerConfig, job pendingJob, done jobResult) error {
 	body, _ := json.Marshal(reportPayload{
-		ChallengeID: job.ChallengeID,
-		ManifestURL: manifestURL,
-		Kind:        jobKind(job),
-		Analysis:    analysis,
+		ChallengeID:   job.ChallengeID,
+		ManifestURL:   done.ManifestURL,
+		Kind:          jobKind(job),
+		Analysis:      done.Analysis,
+		VideoVariants: done.VideoVariants,
 	})
 	req, _ := http.NewRequest("POST", cfg.BackendURL+"/api/v1/internal/hls/complete", bytes.NewReader(body))
 	req.Header.Set("X-Worker-Token", cfg.WorkerToken)
@@ -325,32 +331,41 @@ func reportFail(cfg *workerConfig, job pendingJob, reason string) error {
 // runJob wraps processJob in a hard deadline so no single job can outlive
 // the runner window (see the -job-timeout flag). timeout <= 0 disables the
 // bound, preserving the previous unlimited behaviour for local runs.
-func runJob(cfg *workerConfig, job pendingJob, timeout time.Duration) (string, json.RawMessage, error) {
+// jobResult is everything one finished transcode has to tell the backend.
+// A struct rather than a widening tuple: three of these are optional and
+// positional returns stop saying which is which somewhere around the third.
+type jobResult struct {
+	ManifestURL   string
+	Analysis      json.RawMessage
+	VideoVariants map[string]string
+}
+
+func runJob(cfg *workerConfig, job pendingJob, timeout time.Duration) (jobResult, error) {
 	if timeout <= 0 {
 		return processJob(context.Background(), cfg, job)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	url, analysis, err := processJob(ctx, cfg, job)
+	res, err := processJob(ctx, cfg, job)
 	// Surface the deadline explicitly — "context deadline exceeded" alone
 	// in the failure reason doesn't say which budget was blown.
 	if err != nil && ctx.Err() == context.DeadlineExceeded {
-		return "", nil, fmt.Errorf("job exceeded -job-timeout %v: %w", timeout, err)
+		return jobResult{}, fmt.Errorf("job exceeded -job-timeout %v: %w", timeout, err)
 	}
-	return url, analysis, err
+	return res, err
 }
 
-func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (string, json.RawMessage, error) {
+func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (jobResult, error) {
 	work, err := os.MkdirTemp("", "hls-"+job.ChallengeID+"-")
 	if err != nil {
-		return "", nil, err
+		return jobResult{}, err
 	}
 	defer os.RemoveAll(work)
 
 	// 1. Download source.
 	srcPath := filepath.Join(work, "source.mp4")
 	if err := downloadTo(ctx, job.SourceURL, srcPath); err != nil {
-		return "", nil, fmt.Errorf("download: %w", err)
+		return jobResult{}, fmt.Errorf("download: %w", err)
 	}
 
 	// 1a. Straighten the upload out while we have it here.
@@ -366,11 +381,19 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (string,
 	// + .ts segments in `work`.
 	outDir := filepath.Join(work, "out")
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return "", nil, err
+		return jobResult{}, err
 	}
 	if err := transcodeHLS(ctx, srcPath, outDir); err != nil {
-		return "", nil, fmt.Errorf("transcode: %w", err)
+		return jobResult{}, fmt.Errorf("transcode: %w", err)
 	}
+
+	// 2a. Our own progressive MP4s, written into the same output directory so
+	// the upload loop below carries them without knowing about them.
+	//
+	// This is what the app actually plays — see progressive.go. Never fatal:
+	// an empty map means the app keeps playing the uploaded file, exactly as
+	// it did before this existed.
+	localMP4s := buildProgressiveMP4s(ctx, srcPath, outDir)
 
 	// 3. Upload everything in outDir to R2 under hls/<id>/ for
 	// challenges, hls/resp/<id>/ for battle responses — the two tables
@@ -383,7 +406,7 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (string,
 	}
 	files, err := os.ReadDir(outDir)
 	if err != nil {
-		return "", nil, err
+		return jobResult{}, err
 	}
 	for _, f := range files {
 		if f.IsDir() {
@@ -396,7 +419,7 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (string,
 				local := filepath.Join(outDir, f.Name(), g.Name())
 				key := prefix + "/" + f.Name() + "/" + g.Name()
 				if err := uploadFile(ctx, cfg, local, key); err != nil {
-					return "", nil, fmt.Errorf("upload %s: %w", key, err)
+					return jobResult{}, fmt.Errorf("upload %s: %w", key, err)
 				}
 			}
 			continue
@@ -404,7 +427,7 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (string,
 		local := filepath.Join(outDir, f.Name())
 		key := prefix + "/" + f.Name()
 		if err := uploadFile(ctx, cfg, local, key); err != nil {
-			return "", nil, fmt.Errorf("upload %s: %w", key, err)
+			return jobResult{}, fmt.Errorf("upload %s: %w", key, err)
 		}
 	}
 
@@ -416,16 +439,28 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (string,
 		base = strings.TrimRight(strings.TrimSpace(job.PublicBaseURL), "/")
 	}
 	if base == "" {
-		return "", nil, fmt.Errorf("no public base URL: set R2_PUBLIC_BASE_URL or deploy a backend that sends publicBaseUrl")
+		return jobResult{}, fmt.Errorf("no public base URL: set R2_PUBLIC_BASE_URL or deploy a backend that sends publicBaseUrl")
 	}
 	manifestURL := base + "/" + prefix + "/master.m3u8"
+
+	// Turn the encoded files into the label → URL map the app already knows
+	// how to choose from. Built from the same prefix the upload loop used, so
+	// a URL here can only name a file that was just written.
+	variants := make(map[string]string, len(localMP4s))
+	for label := range localMP4s {
+		variants[label] = base + "/" + prefix + "/" + label + ".mp4"
+	}
 	// Work out what the video actually is, now that the file is local and
 	// the expensive part (download + transcode) is already paid for. Never
 	// fatal: analyzeVideo returns whatever it managed and the job completes
 	// either way — a missing optional binary must not block an upload.
 	analysis := analysisJSON(analyzeVideo(ctx, srcPath))
 
-	return manifestURL, analysis, nil
+	return jobResult{
+		ManifestURL:   manifestURL,
+		Analysis:      analysis,
+		VideoVariants: variants,
+	}, nil
 }
 
 // downloadClient bounds source fetches — a stalled external host must

@@ -6312,9 +6312,13 @@ func populateChallengeCommentCountsScored(items []ScoredItem) {
 	populateChallengeCommentCounts(plain)
 }
 
-// populateHLSManifestURLs batch-fills Challenge.HLSManifestURL on every
-// challenge in `items` whose row in the DB has a non-empty
-// hls_manifest_url column (i.e. the transcode worker has finished).
+// populateHLSManifestURLs batch-fills what the worker produced for every
+// challenge in `items`: the HLS manifest, and the progressive MP4 renditions
+// the app actually plays (see cmd/hls-worker/progressive.go).
+//
+// Both in one query on purpose. They are written by the same worker at the
+// same moment and read by the same code path, so a second hop would be a
+// second round trip for a column sitting in the row already open.
 //
 // Why it's a separate populate step (vs. just SELECTing the column in
 // every candidate-source query): there are 8+ candidate-source queries
@@ -6356,16 +6360,19 @@ func populateHLSManifestURLs(items []HomeFeedItem) {
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 		args[i] = id
 	}
-	// The <> 'PENDING' leg matters: 'PENDING' is the worker-claim
-	// sentinel, not a URL. Without it, any challenge served during its
-	// transcode window shipped the literal string "PENDING" as
-	// hlsManifestUrl and the client tried to play it as a video.
+	// The 'PENDING' guard matters: it is the worker-claim sentinel, not a
+	// URL. Without it, any challenge served during its transcode window
+	// shipped the literal string "PENDING" as hlsManifestUrl and the client
+	// tried to play it as a video. It is a CASE rather than a WHERE now,
+	// because a row can have variants before it has a manifest and filtering
+	// on the manifest would drop the variants with it.
 	rows, err := db.Query(`
-		SELECT id, COALESCE(hls_manifest_url, '')
+		SELECT id,
+		       CASE WHEN COALESCE(hls_manifest_url, '') = 'PENDING' THEN ''
+		            ELSE COALESCE(hls_manifest_url, '') END,
+		       COALESCE(video_variants, '{}'::jsonb)::text
 		FROM challenges
-		WHERE id IN (`+strings.Join(placeholders, ",")+`)
-		  AND hls_manifest_url <> ''
-		  AND hls_manifest_url <> 'PENDING'`, args...)
+		WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		log.Printf("populateHLSManifestURLs query error: %v", err)
 		return
@@ -6373,16 +6380,33 @@ func populateHLSManifestURLs(items []HomeFeedItem) {
 	defer rows.Close()
 	for rows.Next() {
 		var cid int
-		var url string
-		if err := rows.Scan(&cid, &url); err != nil {
+		var url, variantsJSON string
+		if err := rows.Scan(&cid, &url, &variantsJSON); err != nil {
 			continue
+		}
+		var variants VideoVariants
+		if variantsJSON != "" && variantsJSON != "{}" {
+			if err := json.Unmarshal([]byte(variantsJSON), &variants); err != nil {
+				// Unreadable JSON is not a reason to lose the manifest as
+				// well; the app falls back to videoUrl for playback.
+				log.Printf("populateHLSManifestURLs: bad video_variants on challenge %d: %v", cid, err)
+				variants = nil
+			}
 		}
 		for _, idx := range idToIdx[cid] {
 			ch := items[idx].Challenge
 			if ch == nil {
 				continue
 			}
-			ch.HLSManifestURL = url
+			if url != "" {
+				ch.HLSManifestURL = url
+			}
+			// Only overwrite when the row actually has something. A candidate
+			// source that already filled this in from the upload path should
+			// keep what it had rather than be blanked by a row with none.
+			if len(variants) > 0 {
+				ch.VideoVariants = variants
+			}
 		}
 	}
 }

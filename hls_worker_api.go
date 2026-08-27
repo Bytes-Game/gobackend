@@ -77,6 +77,12 @@ type hlsCompleteRequest struct {
 	// and from any worker where none of the optional passes could run at
 	// all, so this being empty is ordinary rather than an error.
 	Analysis json.RawMessage `json:"analysis,omitempty"`
+	// Our own progressive MP4s, label ("480p"/"720p") → public URL. The app
+	// already picks from this map by network and device, so filling it in is
+	// all that is needed for it to play our encode instead of the phone's
+	// upload. Absent from older workers, which is why nothing here requires
+	// it. See cmd/hls-worker/progressive.go.
+	VideoVariants map[string]string `json:"videoVariants,omitempty"`
 }
 
 // hlsTableForKind maps the wire kind to the table whose
@@ -227,12 +233,68 @@ func HLSCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	// re-transcoding a video that is already done, to re-save a signal that is
 	// a bonus. Losing one reading is much cheaper than that.
 	storeVideoAnalysis(table, cid, req.Analysis)
+	storeVideoVariants(table, cid, req.VideoVariants)
 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// videoVariantLabels are the only labels that may be stored.
+//
+// The app's chooser understands exactly these three and ignores anything else,
+// so an unrecognised label would be a file nobody ever plays taking up a row.
+// More to the point, this map is written from a worker request and read back
+// as a playback URL — an allow-list is how "the worker sends what it sends"
+// stops being the same thing as "whatever arrives gets served".
+var videoVariantLabels = map[string]bool{"480p": true, "720p": true, "1080p": true}
+
+// storeVideoVariants records the worker's own MP4 renditions.
+//
+// Failure is logged, never returned, for the same reason storeVideoAnalysis
+// does it: the manifest is what the worker must be told landed. A 500 here
+// makes it retry the whole job — re-downloading and re-encoding a video that
+// is already done — to re-save something the app degrades gracefully without.
+//
+// Nothing is written for an empty map, so a worker that could not encode
+// leaves whatever is already there alone rather than clearing it.
+func storeVideoVariants(table string, id int, variants map[string]string) {
+	if db == nil || len(variants) == 0 {
+		return
+	}
+	clean := make(map[string]string, len(variants))
+	for label, url := range variants {
+		if !videoVariantLabels[label] {
+			log.Printf("storeVideoVariants: ignoring unknown label %q for %s=%d", label, table, id)
+			continue
+		}
+		// Only our own bucket. This URL is handed to every viewer's player,
+		// so a worker that has been misconfigured — or a request that did not
+		// come from one — must not be able to point playback somewhere else.
+		if !strings.HasPrefix(url, "https://") {
+			log.Printf("storeVideoVariants: refusing a non-https %s url for %s=%d", label, table, id)
+			continue
+		}
+		clean[label] = url
+	}
+	if len(clean) == 0 {
+		return
+	}
+	blob, err := json.Marshal(clean)
+	if err != nil {
+		log.Printf("storeVideoVariants: could not encode for %s=%d: %v", table, id, err)
+		return
+	}
+	// Merged rather than replaced: the upload path writes its own entry here
+	// and a later re-transcode should add to that, not wipe it.
+	if _, err := db.Exec(
+		`UPDATE `+table+`
+		    SET video_variants = COALESCE(video_variants, '{}'::jsonb) || $2::jsonb
+		  WHERE id = $1`, id, string(blob)); err != nil {
+		log.Printf("storeVideoVariants: could not save for %s=%d: %v", table, id, err)
+	}
+}
+
 // HLSFailHandler lets the worker mark a job as failed. We reset
-// hls_manifest_url back to '' so another attempt can claim it — but
+// hls_manifest_url back to ” so another attempt can claim it — but
 // only while hls_attempts stays under maxHLSAttempts (counted at claim
 // time in HLSNextPendingHandler), so a genuinely broken source stops
 // being retried after the cap instead of looping forever.
@@ -308,7 +370,7 @@ func healHLSManifestURLs() {
 // the duplicate transcode is idempotent (last complete wins, R2 keys
 // are random-prefixed per attempt).
 //
-// Rows that already burned maxHLSAttempts stay reset-to-'' but are
+// Rows that already burned maxHLSAttempts stay reset-to-” but are
 // never re-offered by the claim query's attempts filter.
 func startHLSReaper() {
 	go func() {
