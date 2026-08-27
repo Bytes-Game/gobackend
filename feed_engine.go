@@ -5121,11 +5121,18 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// are the single-kind tabs. Filtering happens after ranking, so a filtered
 	// page is fetched larger and trimmed back — see feed_kind_filter.go.
 	kindFilter := feedKindFromRequest(r)
-	clientLimit := limit
-	limit = feedKindFetchLimit(limit, kindFilter)
 	if limit > maxPageSize {
 		limit = maxPageSize
 	}
+	clientLimit := limit
+	// The over-fetch comes AFTER the page-size cap, and the order is the whole
+	// point. maxPageSize bounds what a client may ASK FOR; feedKindFetchLimit
+	// is an internal working size for a tab, and has its own ceiling in
+	// feedKindMaxFetch. Capping the working size with the request cap made the
+	// 5x over-fetch deliver 2.5x on a page of twenty and put feedKindMaxFetch
+	// out of reach entirely — the raise from 2x to 5x did about half of what
+	// its own comment claimed.
+	limit = feedKindFetchLimit(limit, kindFilter)
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%s_%d", userID, time.Now().Unix()/1800)
 	}
@@ -5279,6 +5286,12 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		candidates = fetchCandidates(userID, candidateLimit)
 		candidateSourceMap = nil
 	}
+
+	// On a single-kind tab, drop what the tab cannot show BEFORE anything
+	// expensive happens to it. See narrowCandidatesToKind — this is what stops
+	// the Battles tab scoring hundreds of shorts in order to serve nine
+	// battles, and what lets the per-creator cap count the kind being served.
+	candidates = narrowCandidatesToKind(candidates, kindFilter)
 
 	// Batch-load the feed_events aggregates for the WHOLE pool in two
 	// GROUP BY queries — replaces ~2 queries × N candidates inside the

@@ -138,3 +138,65 @@ func indexOfAny(text string, needles ...string) int {
 	}
 	return -1
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE TAB MUST BE NARROWED BEFORE THE EXPENSIVE PART, NOT AFTER
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Another source-order test, for the same reason as the ones above: both
+// orderings compile, both return a correct-looking page, and the difference
+// only shows up as a tab that quietly offers a quarter of what it has.
+//
+// What went wrong before: the Battles tab scored 250 candidates to serve 9.
+// The waste was the lesser half. composeFeed will not take more than
+// maxItemsPerCreator from one creator and it counted that against the MIXED
+// page — so a creator whose three slots went to shorts contributed nothing to
+// the tab, and their other battles were never looked at.
+//
+// narrowCandidatesToKind has to run before warmContentAggregates, because that
+// is the batch load feeding the scoring loop. Once it is below that line, the
+// pool being scored is the mixed one again and the ceiling is back.
+func TestTabIsNarrowedBeforeScoring(t *testing.T) {
+	// Each handler has its own first-expensive-thing, so each names the line
+	// the narrowing has to stay above.
+	for _, c := range []struct {
+		file, handler, mustPrecede string
+	}{
+		// The batch aggregate load that feeds the scoring loop.
+		{"feed_engine.go", "SmartFeedHandler (For You)", "warmContentAggregates(candidates)"},
+		// Explore scores with exploreScore and has no batch warm; the loop
+		// itself is where the cost starts.
+		{"explore_feed.go", "ExploreFeedHandler", "scored := make([]ScoredItem, 0, len(candidates))"},
+	} {
+		src, err := os.ReadFile(c.file)
+		if err != nil {
+			t.Fatalf("%s: %v", c.file, err)
+		}
+		text := string(src)
+
+		narrow := strings.Index(text, "narrowCandidatesToKind(candidates, kindFilter)")
+		if narrow < 0 {
+			t.Errorf(`%s — %s: the candidate pool is not narrowed to the tab at all.
+
+Every short is then scored so a Battles page can throw it away, and the
+per-creator diversity cap is spent on items the viewer will never see —
+which is what held the tab to about a quarter of the battles it had.`,
+				c.file, c.handler)
+			continue
+		}
+		spend := strings.Index(text, c.mustPrecede)
+		if spend < 0 {
+			t.Fatalf("%s: could not find %q. If the scoring path moved, this "+
+				"test has to move with it — do not just delete it",
+				c.file, c.mustPrecede)
+		}
+		if narrow > spend {
+			t.Errorf(`%s — %s: the tab is narrowed AFTER %s.
+
+That is where the cost starts, so everything the tab is about to discard
+gets paid for anyway, and composeFeed still spends its per-creator budget
+on items the viewer will never see. Move narrowCandidatesToKind above it.`,
+				c.file, c.handler, c.mustPrecede)
+		}
+	}
+}
