@@ -102,8 +102,12 @@ func TestBattleShare_ABattleOpensAMixedPage(t *testing.T) {
 		battle bool
 		score  float64
 	}
-	var pool []scored
-	for i := 0; i < 40; i++ {
+	// Allocated up front rather than grown from nil: the slice is indexed by
+	// range below, and a nil start is a nil-panic path the CI checker will not
+	// let past even though the loop always fills it.
+	const poolSize = 40
+	pool := make([]scored, 0, poolSize)
+	for i := 0; i < poolSize; i++ {
 		isBattle := i%4 == 0 // 10 of 40
 		responses := 0
 		if isBattle {
