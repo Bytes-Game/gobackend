@@ -126,7 +126,7 @@ func TestForYouPageIsNotDeclaredFinalWhenTheCreatorCapTruncatedIt(t *testing.T) 
 	for i := range pattern {
 		pattern[i] = slotHook
 	}
-	composed := composeFeed(scored, pattern, map[string]bool{})
+	composed, held := composeFeed(scored, pattern, map[string]bool{})
 
 	wantComposed := len(perCreator) * maxItemsPerCreator
 	if len(composed) != wantComposed {
@@ -137,6 +137,22 @@ func TestForYouPageIsNotDeclaredFinalWhenTheCreatorCapTruncatedIt(t *testing.T) 
 	if len(composed) >= limit {
 		t.Fatalf("composed %d of a %d-item page; the whole point is that "+
 			"this page cannot fill", len(composed), limit)
+	}
+
+	// The mixed feed already gets this right, because feedHasMore is handed
+	// the whole scored pool and can see that composition left items on the
+	// table. A single-kind tab is not — it never sees that number — so
+	// composeFeed reports what it held back and the tab uses that instead.
+	if held <= 0 {
+		t.Errorf("composition held nothing back, with %d of %d candidates "+
+			"unplaced. The tab has no other way to tell a page shortened by "+
+			"the creator cap from a catalogue that ran out.",
+			len(scored)-len(composed), len(scored))
+	}
+	if held != len(scored)-len(composed) {
+		t.Errorf("held %d but %d candidates went unplaced; every one of them "+
+			"was skipped for the creator cap in this fixture", held,
+			len(scored)-len(composed))
 	}
 
 	if !feedHasMore(len(scored), len(composed), len(composed), limit) {

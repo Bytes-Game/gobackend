@@ -453,3 +453,82 @@ func TestNarrow_TheOverfetchIsNotCappedByTheRequestCap(t *testing.T) {
 			feedKindOverfetch, asked*feedKindOverfetch, fetch)
 	}
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// EVERY BATTLE HAS TO BE REACHABLE
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The requirement, stated plainly: a creator held to three slots on page 1
+// gets three more on page 2, so everything they made is reachable eventually.
+//
+// That reasoning has one dependency nobody notices — the app has to ASK for
+// page 2. It only asks when the server says there is more, and the server was
+// reading a short page as "that is everything the ranker had". On a small
+// creator roster the page is ALWAYS short, because three-per-creator is a
+// ceiling long before the catalogue is. So the tab said the feed was over,
+// page 2 was never requested, and the deferred battles were never reached.
+//
+// The mixed feed never had this problem: feedHasMore is handed the whole
+// scored pool and can see items left on the table. A single-kind tab is not,
+// which is why composeFeed now reports what the cap held back.
+
+// tabHasMore is the decision the handler makes, in one place, so these cases
+// exercise the real combination rather than one function of it.
+func tabHasMore(rawCount, served, clientLimit, fetchLimit, fresh, held int) bool {
+	more := fresh > 0 && feedKindHasMore(rawCount, served, clientLimit, fetchLimit)
+	if !more && held > 0 && fresh > 0 {
+		more = true
+	}
+	return more
+}
+
+func TestTabPaging_AShortPageFromTheCreatorCapIsNotTheEnd(t *testing.T) {
+	// The live shape: five creators, three battles each on this page, forty
+	// more battles behind them. Twenty asked for, fifteen served.
+	const clientLimit, fetchLimit = 20, 100
+	served, raw, held, fresh := 15, 15, 40, 15
+
+	if !tabHasMore(raw, served, clientLimit, fetchLimit, fresh, held) {
+		t.Error("the tab reported the end of the feed with 40 battles held " +
+			"back by the per-creator cap. Those battles are one request away " +
+			"— the cap resets every page — but the request never happens.")
+	}
+	// Without the held count this is exactly the old behaviour, which is the
+	// bug. Stated so the fix cannot be quietly removed as redundant.
+	if feedKindHasMore(raw, served, clientLimit, fetchLimit) {
+		t.Error("feedKindHasMore alone now claims more; if that is genuinely " +
+			"true the held-back count is redundant and this test is stale")
+	}
+}
+
+func TestTabPaging_NothingNewIsStillTheEnd(t *testing.T) {
+	// The line the fix must not cross. A page of nothing but repeats is the
+	// end whatever the cap held back — another page can only bring more of
+	// the same, and this codebase has emptied its own feed three times by
+	// getting the end-of-feed rule wrong in the other direction.
+	const clientLimit, fetchLimit = 20, 100
+	if tabHasMore(15, 15, clientLimit, fetchLimit, 0 /*fresh*/, 40 /*held*/) {
+		t.Error("a page with nothing new on it claimed more because items " +
+			"were held back; those held-back items are repeats too")
+	}
+}
+
+func TestTabPaging_AnEmptyPageNeverClaimsMore(t *testing.T) {
+	// A client that stops only on an empty result would spin forever.
+	const clientLimit, fetchLimit = 20, 100
+	if tabHasMore(0, 0, clientLimit, fetchLimit, 0, 0) {
+		t.Error("an empty page claimed there was more")
+	}
+	if tabHasMore(0, 0, clientLimit, fetchLimit, 0, 5) {
+		t.Error("an empty page claimed more because something was held back")
+	}
+}
+
+func TestTabPaging_AFullPageStillSaysMore(t *testing.T) {
+	// The ordinary case has to keep working — the fix only adds a reason to
+	// continue, it must never take one away.
+	const clientLimit, fetchLimit = 20, 100
+	if !tabHasMore(45, 20, clientLimit, fetchLimit, 20, 0) {
+		t.Error("a full page of new battles said the feed was over")
+	}
+}
