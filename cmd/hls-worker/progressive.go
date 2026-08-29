@@ -57,6 +57,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"mymodule/internal/mp4layout"
@@ -81,6 +82,28 @@ var progressiveLadder = []progressiveRendition{
 	{label: "720p", maxLongSide: 1280, crf: 22, audioBps: 128_000},
 }
 
+// progressiveSkipBps is the bitrate at or below which a source is already
+// lean enough to leave alone.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY SKIP AT ALL
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Re-encoding is lossy. It is worth it on a file that is carrying far more
+// bits than its picture needs — an imported clip measured at 853x480 and
+// 2.68 Mbps, which is roughly four times what that size wants, came out of
+// our encoder at 0.74 Mbps and 72% smaller with the same picture. All of that
+// saving was waste, not detail.
+//
+// Run the same pass over a file that is ALREADY at 0.7 Mbps and the trade
+// inverts: there is almost nothing left to squeeze out, so the generation
+// loss is most of what changes. Better to serve the original.
+//
+// One megabit is the line. Comfortably above what 480p needs and below what
+// an over-encoded file carries, so the two cases land on opposite sides of it
+// without needing to guess per video.
+const progressiveSkipBps = 1_000_000
+
 type progressiveRendition struct {
 	label       string
 	maxLongSide int
@@ -98,12 +121,16 @@ type progressiveRendition struct {
 // did work — down to nothing at all, which is exactly today's behaviour.
 func buildProgressiveMP4s(ctx context.Context, src, outDir string) map[string]string {
 	made := map[string]string{}
-	longSide, ok := sourceLongSide(ctx, src)
+	longSide, bitrate, ok := sourceShape(ctx, src)
 	if !ok {
 		log.Printf("progressive: could not measure %s, skipping our own encode", src)
 		return made
 	}
 	hasAudio := probeHasAudio(src)
+	// A source already at or under the threshold is left alone unless a rung
+	// would genuinely shrink its picture — see progressiveSkipBps and the
+	// check inside the loop.
+	alreadyLean := bitrate > 0 && bitrate <= progressiveSkipBps
 
 	// Boxes already encoded, so a rung that would repeat one is skipped. See
 	// the loop below.
@@ -132,6 +159,21 @@ func buildProgressiveMP4s(ctx context.Context, src, outDir string) map[string]st
 		// two names — identical bytes, twice the CPU, twice the storage, and
 		// a chooser picking between things that do not differ.
 		if done[box] {
+			continue
+		}
+
+		// Already lean, and this rung would not make the picture smaller
+		// either — so there is nothing left for an encode to win, and it
+		// would spend a lossy generation to find that out. See
+		// progressiveSkipBps.
+		//
+		// A rung that DOES shrink the picture still earns its place at any
+		// bitrate: fewer pixels is less to decode on a weak phone as well as
+		// fewer bytes on the wire.
+		if alreadyLean && box >= longSide {
+			log.Printf("progressive: %s already at %.2f Mbps for its size, "+
+				"leaving %s alone", filepath.Base(src),
+				float64(bitrate)/1e6, r.label)
 			continue
 		}
 		done[box] = true
@@ -276,8 +318,15 @@ func progressiveLooksRight(ctx context.Context, path string) error {
 	return nil
 }
 
-// sourceLongSide measures the source so we never upscale it.
-func sourceLongSide(ctx context.Context, src string) (int, bool) {
+// sourceShape measures the two things the ladder decides from: how big the
+// picture is, so a rung never enlarges it, and how many bits it is spending,
+// so an already-lean file can be left alone.
+//
+// The bitrate comes back as 0 when the container does not declare one. That
+// reads as "not known" rather than "zero", and the caller treats an unknown
+// bitrate as worth encoding — the same direction the code took before this
+// existed, so a container we cannot read never silently stops being processed.
+func sourceShape(ctx context.Context, src string) (longSide int, bitrate int, ok bool) {
 	out, err := exec.CommandContext(ctx, "ffprobe",
 		"-v", "error",
 		"-select_streams", "v:0",
@@ -285,17 +334,30 @@ func sourceLongSide(ctx context.Context, src string) (int, bool) {
 		"-of", "csv=p=0:s=x", src,
 	).Output()
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	var w, h int
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%dx%d", &w, &h); err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	if w <= 0 || h <= 0 {
-		return 0, false
+		return 0, 0, false
 	}
-	if w > h {
-		return w, true
+	longSide = w
+	if h > w {
+		longSide = h
 	}
-	return h, true
+
+	// Whole-file bitrate rather than the video stream's, because the whole
+	// file is what a viewer downloads — the audio track is bytes on the wire
+	// too. ffprobe leaves it empty on some containers; that is the 0 case.
+	br, err := exec.CommandContext(ctx, "ffprobe",
+		"-v", "error",
+		"-show_entries", "format=bit_rate",
+		"-of", "csv=p=0", src,
+	).Output()
+	if err == nil {
+		bitrate, _ = strconv.Atoi(strings.TrimSpace(string(br)))
+	}
+	return longSide, bitrate, true
 }
