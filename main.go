@@ -611,6 +611,9 @@ func main() {
 	api.HandleFunc("/admin/golden_hour", adminOnly(AdminGoldenHourHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/online", adminOnly(AdminOnlineUsersHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/diagnostics", adminOnly(AdminDiagnosticsHandler)).Methods("GET", "OPTIONS")
+	// Put already-transcoded videos back through the worker so they pick up
+	// what it has learned since — see media_requeue.go.
+	api.HandleFunc("/admin/media/requeue", adminOnly(AdminRequeueMediaHandler)).Methods("POST", "OPTIONS")
 	// Global "is the ranking working?" KPI snapshot (completion/skip/engagement/
 	// session length, new-content discovery, catalog coverage) with good/watch/bad
 	// verdicts. See admin_feed_health.go.
