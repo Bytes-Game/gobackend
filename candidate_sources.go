@@ -136,6 +136,15 @@ func multiSourceFetchForCohort(userID string, totalLimit int, cohort Cohort) ([]
 			if id == "" {
 				continue
 			}
+			// Nobody is shown their own upload — see isOwnContent. Checked
+			// here, where every lane's output passes through, rather than
+			// trusting nine retrievers to each remember.
+			if isOwnContent(it, userID) {
+				if metricCandidateSource != nil {
+					metricCandidateSource.WithLabelValues(src.name, "own_content").Inc()
+				}
+				continue
+			}
 			key := it.Type + ":" + id
 			if seen[key] {
 				continue
@@ -617,4 +626,47 @@ func sourceSearchAffinity(userID string, limit int) []HomeFeedItem {
 		}
 	}
 	return out
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// NOBODY IS SHOWN THEIR OWN UPLOAD
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The rule the big apps follow, and the one people expect: your own videos
+// live on your profile, not in your feed. Scrolling past yourself is jarring,
+// and the taste profile learns nothing from a creator watching themselves.
+//
+// It was enforced nine separate times — once inside each retriever, six as an
+// SQL predicate and three as a Go check. Which is eight opportunities to
+// forget, and one of them had been taken: sourceSearchAffinity builds its
+// candidates out of Meilisearch hits rather than SQL and had no check at all,
+// so anything a creator had searched for could bring their own upload back.
+// Two follow-graph queries have no predicate either; those only leak to
+// somebody who follows themselves, which is a smaller hole but the same hole.
+//
+// A creator reported exactly this: their own video, in their own Shorts tab,
+// coming back repeatedly.
+//
+// So the rule lives at the one place every lane's output passes through. The
+// per-lane SQL stays — filtering in the database is cheaper than fetching a
+// row to throw it away — but nothing depends on it any more, and a lane added
+// next year is covered without anybody remembering to.
+//
+// # WHAT IT DELIBERATELY DOES NOT DROP
+//
+// A battle you answered. The challenge belongs to whoever set it, and it is
+// their video on the front of the card — you are the opponent behind the
+// flip. Dropping those would hide half the battles from anybody who takes
+// part in them, which is the opposite of what this app is for.
+func isOwnContent(it HomeFeedItem, userID string) bool {
+	if userID == "" {
+		return false
+	}
+	if it.Challenge != nil {
+		return it.Challenge.CreatorID == userID
+	}
+	if it.Post != nil {
+		return it.Post.AuthorID == userID
+	}
+	return false
 }
