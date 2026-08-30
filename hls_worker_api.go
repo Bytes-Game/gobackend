@@ -245,7 +245,9 @@ func HLSCompleteHandler(w http.ResponseWriter, r *http.Request) {
 // More to the point, this map is written from a worker request and read back
 // as a playback URL — an allow-list is how "the worker sends what it sends"
 // stops being the same thing as "whatever arrives gets served".
-var videoVariantLabels = map[string]bool{"480p": true, "720p": true, "1080p": true}
+var videoVariantLabels = map[string]bool{
+	"480p": true, "720p": true, "720p_hq": true, "1080p": true,
+}
 
 // storeVideoVariants records the worker's own MP4 renditions.
 //

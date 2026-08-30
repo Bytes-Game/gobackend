@@ -46,9 +46,14 @@ package main
 // THE APP NEEDS NO CHANGES
 // ════════════════════════════════════════════════════════════════════════════
 //
-// It already reads a videoVariants map keyed by "480p"/"720p" and picks one
-// from the network and the phone's memory — that path predates this and has
-// simply had nothing to pick from. Filling it in is enough.
+// It already reads a videoVariants map and picks one from the network and the
+// phone's memory — that path predates this and had simply had nothing to pick
+// from. Filling it in is enough.
+//
+// The one exception is a NEW label. The app's chooser has to know a label's
+// rank and what speed it needs, so adding a rung here means adding it there
+// too — see NetworkQualityService.bitrateNeededFor. A label the app does not
+// know is a file nobody ever plays.
 
 import (
 	"context"
@@ -65,21 +70,47 @@ import (
 
 // progressiveLadder is what we serve as plain MP4.
 //
-// Two rungs, not four. The HLS ladder can afford 240p and 360p because a
+// Three rungs, not six. The HLS ladder can afford 240p and 360p because a
 // player switches between them mid-video; a progressive file is chosen once,
 // before playback, so a rung nobody would deliberately pick is a rung nobody
-// picks. The app's own chooser only knows 480p, 720p and 1080p.
+// picks.
 //
-// 1080p is absent for the same reason it is absent from the HLS ladder: on a
-// phone, full-screen, under ninety seconds, it is not distinguishable from
-// 720p, and device logs showed 1080p decoder sessions stalling for seconds on
-// a mid-range chip.
+// The three cover the range of connections rather than the range of screen
+// sizes, because that is what actually varies here — every viewer is holding
+// a phone, and their links are not alike. Two of them are the same 1280-wide
+// picture at different bitrates for exactly that reason.
+//
+// 1080p is absent: on a phone, full-screen, under ninety seconds, it is not
+// distinguishable from 720p, and device logs showed 1080p decoder sessions
+// stalling for seconds on a mid-range chip.
 var progressiveLadder = []progressiveRendition{
 	// Cellular and older phones. Small enough to arrive before somebody
 	// gives up, large enough not to look broken.
 	{label: "480p", maxLongSide: 854, crf: 24, maxBps: 1_500_000, audioBps: 96_000},
-	// The default almost everybody gets.
+	// The default almost everybody gets. Full picture size at a rate a
+	// middling connection can actually sustain.
 	{label: "720p", maxLongSide: 1280, crf: 22, maxBps: 2_500_000, audioBps: 128_000},
+	// ════════════════════════════════════════════════════════════════════════
+	// SAME PICTURE SIZE, MORE BITS, FOR CONNECTIONS THAT CAN TAKE THEM
+	// ════════════════════════════════════════════════════════════════════════
+	//
+	// The rung above exists because one measured phone dipped to 3.5 Mbps and
+	// a 3.5 Mbps file has nothing spare there. That was the right fix for that
+	// phone and the wrong way to decide it for everybody: the encoding ceiling
+	// is a single global number, so tuning it to one link hands everyone else
+	// the same compromise whether they need it or not.
+	//
+	// A ladder is how that gets decided per viewer instead. This is the same
+	// 1280-wide picture with the bits a good connection can carry — 0.990
+	// against the source where 2.5 Mbps scores 0.978 — and the app serves it
+	// only to links it has measured as fast enough. A slow link never sees it
+	// and a fast one is no longer capped by somebody else's dip.
+	//
+	// It is deliberately NOT 1080p. On a phone, full-screen, under ninety
+	// seconds, the extra pixels are not visible and cost roughly double the
+	// decode; device logs showed 1920x1080 sessions with render intervals in
+	// the seconds. What a fast link is short of here is bits, not pixels.
+	{label: "720p_hq", maxLongSide: 1280, crf: 20, maxBps: 3_500_000, audioBps: 128_000},
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -196,7 +227,17 @@ func rungForSize(longSide int) (progressiveRendition, bool) {
 		if r.maxLongSide < longSide {
 			continue
 		}
-		if !found || r.maxLongSide < best.maxLongSide {
+		// Smallest picture that still does not shrink this source, and among
+		// rungs of that size the LOWEST ceiling.
+		//
+		// The lowest, because this answers "is the original already as lean as
+		// anything we would make". If a source is under even our smallest
+		// option at its size, every rung would just re-encode it to roughly
+		// what it already is and lose a generation doing it. Comparing against
+		// the highest ceiling instead would leave fat sources untouched.
+		if !found ||
+			r.maxLongSide < best.maxLongSide ||
+			(r.maxLongSide == best.maxLongSide && r.maxBps < best.maxBps) {
 			best, found = r, true
 		}
 	}
@@ -240,9 +281,20 @@ func buildProgressiveMP4s(ctx context.Context, src, outDir string) map[string]st
 		return made
 	}
 
-	// Boxes already encoded, so a rung that would repeat one is skipped. See
-	// the loop below.
-	done := map[int]bool{}
+	// Renditions already made, so a rung that would repeat one is skipped.
+	//
+	// Keyed on picture size AND ceiling, not size alone. Two rungs now share
+	// 1280 on purpose — the same picture at different bitrates, which is the
+	// whole point of having a fast-connection rung — and keying on size alone
+	// would have silently dropped the second one. See the loop below.
+	type rendition struct {
+		box    int
+		maxBps int
+	}
+	// Exactly this picture size at exactly this ceiling.
+	madeExact := map[rendition]bool{}
+	// Any rendition at this picture size, whatever its ceiling.
+	madeAtBox := map[int]bool{}
 
 	for _, r := range progressiveLadder {
 		// ════════════════════════════════════════════════════════════════════
@@ -263,14 +315,29 @@ func buildProgressiveMP4s(ctx context.Context, src, outDir string) map[string]st
 		if longSide < box {
 			box = longSide
 		}
-		// Two rungs that landed on the same box would be the same file under
-		// two names — identical bytes, twice the CPU, twice the storage, and
-		// a chooser picking between things that do not differ.
-		if done[box] {
+		// Two rungs that landed on the same box AND the same ceiling would be
+		// the same file under two names — identical bytes, twice the CPU,
+		// twice the storage, and a chooser picking between things that do not
+		// differ. Same box at a different ceiling is a real choice and is
+		// kept.
+		key := rendition{box: box, maxBps: r.maxBps}
+		if box < r.maxLongSide {
+			// Clamped: this rung is reaching DOWN to a source smaller than
+			// itself, so a rung below it already covers this size. Its higher
+			// ceiling buys nothing either — the source has fewer bits than
+			// that to begin with, so crf lands in the same place and we would
+			// be storing the same video twice.
+			if madeAtBox[box] {
+				continue
+			}
+		} else if madeExact[key] {
+			// Not clamped, and something already made this exact size at this
+			// exact ceiling. Same file under two names.
 			continue
 		}
 
-		done[box] = true
+		madeExact[key] = true
+		madeAtBox[box] = true
 
 		out := filepath.Join(outDir, r.label+".mp4")
 		if err := encodeProgressive(ctx, src, out, r, box, hasAudio); err != nil {
