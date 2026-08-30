@@ -18,38 +18,77 @@ import (
 // Run against real ffmpeg, because every question worth asking here is about
 // what ffmpeg actually produced. A fixture would only test the test.
 
+// aboveEveryCeiling is the bitrate makeSource aims for: half again as much as
+// the most generous rung on the ladder.
+//
+// Derived rather than written down, because a hard-coded number here has now
+// disarmed these tests twice. The fixture only exercises the encoder if the
+// encoder judges it worth encoding, and that judgement is "is this above the
+// ceiling for its size" — so a fixture pinned at 2.5 Mbps tested the code
+// while the 720p ceiling was 2 Mbps and quietly stopped the day it became
+// 3.5 Mbps. Every affected test still passed on the way past, because
+// "produced nothing" only fails the ones that check for output.
+//
+// Reading the ladder means raising a ceiling drags the fixture up with it.
+func aboveEveryCeiling() int {
+	highest := 0
+	for _, r := range progressiveLadder {
+		if r.maxBps > highest {
+			highest = r.maxBps
+		}
+	}
+	return highest + highest/2
+}
+
 // makeSource writes a clip that is worth re-encoding.
 //
-// The bitrate is forced, and that is not incidental. ffmpeg's test pattern is
-// a synthetic image that compresses to about 0.3 Mbps whatever size you ask
-// for — below every ladder ceiling, so an unforced fixture is correctly LEFT
-// ALONE and every test about the encode silently stops testing it.
-//
-// 2.5 Mbps is what these tests are about: the real imported clip that started
-// all this measured 2.68 Mbps at 853x480, roughly four times what that picture
-// needs. Tests that want the opposite case build their own lean clip.
+// The picture is NOISE rather than ffmpeg's test pattern. The pattern is a
+// flat synthetic image that x264 compresses to a fraction of whatever target
+// it is given — a 640x480 clip landed at 0.75 Mbps however high the target was
+// set — so hitting a realistic bitrate with it meant forcing constant bitrate
+// and padding the file with nothing. Noise has no structure to predict, so it
+// costs what it says it costs, which is also what a real camera upload does.
 func makeSource(t *testing.T, dir, name string, w, h int) string {
 	t.Helper()
 	needFFmpeg(t)
 	path := filepath.Join(dir, name)
+	target := itoa(aboveEveryCeiling()/1000) + "k"
 	out, err := exec.Command("ffmpeg", "-y",
 		"-f", "lavfi", "-i",
-		"testsrc=size="+itoa(w)+"x"+itoa(h)+":rate=30:duration=2",
+		"color=c=black:s="+itoa(w)+"x"+itoa(h)+
+			":r=30:d=2,noise=alls=80:allf=t+u",
 		"-f", "lavfi", "-i", "sine=frequency=440:duration=2",
 		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-		// nal-hrd=cbr pads to the target instead of undershooting it. Without
-		// it x264 finds the test pattern so compressible that a 640x480 clip
-		// lands at 0.75 Mbps however high the target is set, which puts the
-		// fixture back below the skip threshold.
-		"-b:v", "2500k", "-maxrate", "2500k", "-bufsize", "5000k",
-		"-x264-params", "nal-hrd=cbr:force-cfr=1",
+		"-b:v", target, "-maxrate", target, "-bufsize", target,
 		"-c:a", "aac", "-shortest",
 		path,
 	).CombinedOutput()
 	if err != nil {
 		t.Skipf("could not build a source clip: %v: %s", err, lastLine(string(out)))
 	}
+	// The fixture is only useful above the ceiling; below it the encoder is
+	// right to leave it alone and the test would be asserting on a file
+	// nobody made. Say so here rather than in each caller's failure.
+	if _, bps, ok := sourceShape(context.Background(), path); ok && bps > 0 {
+		if smallest := smallestCeiling(); bps <= smallest {
+			t.Skipf("fixture came out at %d bps, at or under the lowest "+
+				"ceiling (%d) — it would correctly be served as-is",
+				bps, smallest)
+		}
+	}
 	return path
+}
+
+// smallestCeiling is the lowest rung's ceiling — the bar a fixture has to
+// clear before any rung would re-encode it.
+func smallestCeiling() int {
+	lowest := 0
+	for _, r := range progressiveLadder {
+		if lowest == 0 || r.maxBps < lowest {
+			lowest = r.maxBps
+		}
+	}
+	return lowest
 }
 
 func itoa(n int) string {
@@ -168,17 +207,15 @@ func TestProgressive_ASilentVideoKeepsItsPicture(t *testing.T) {
 	needFFmpeg(t)
 	dir := t.TempDir()
 	src := filepath.Join(dir, "silent.mp4")
-	// Fat on purpose — see makeSource. A lean clip would be skipped by the
-	// bitrate rule and this test would pass without encoding anything.
+	// Noise, and a target read off the ladder — see makeSource, which this is
+	// the audio-less twin of. A clip under the ceiling would be served as-is
+	// and this test would pass without encoding anything.
+	target := itoa(aboveEveryCeiling()/1000) + "k"
 	if out, err := exec.Command("ffmpeg", "-y",
-		"-f", "lavfi", "-i", "testsrc=size=1280x720:rate=30:duration=2",
+		"-f", "lavfi", "-i",
+		"color=c=black:s=1280x720:r=30:d=2,noise=alls=80:allf=t+u",
 		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-		// nal-hrd=cbr pads to the target instead of undershooting it. Without
-		// it x264 finds the test pattern so compressible that a 640x480 clip
-		// lands at 0.75 Mbps however high the target is set, which puts the
-		// fixture back below the skip threshold.
-		"-b:v", "2500k", "-maxrate", "2500k", "-bufsize", "5000k",
-		"-x264-params", "nal-hrd=cbr:force-cfr=1",
+		"-b:v", target, "-maxrate", target, "-bufsize", target,
 		src,
 	).CombinedOutput(); err != nil {
 		t.Skipf("could not build the silent source: %v: %s", err, lastLine(string(out)))
