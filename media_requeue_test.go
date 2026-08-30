@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -147,5 +149,78 @@ func TestRequeue_ReportsWhatItDid(t *testing.T) {
 	}
 	if resp.Requeued != 7 || resp.Kind != "challenges" {
 		t.Errorf("the response does not round-trip: %+v", resp)
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SAYING WHETHER THE WORKER ACTUALLY STARTED
+// ════════════════════════════════════════════════════════════════════════════
+//
+// An upload pokes the worker in the background and swallows every error into a
+// log line, because an upload must never fail or wait on GitHub. Correct, and
+// it makes the feature untestable from outside: a token that is missing,
+// expired or scoped wrong behaves exactly like one that works, and the only
+// visible difference is how long a new video takes to become watchable.
+//
+// So the admin path answers the question out loud. These pin that it keeps
+// doing so, because a diagnostic that quietly stops diagnosing is worse than
+// none — it reads as a clean bill of health.
+
+func TestRequeue_SaysWhenTheTokenIsMissing(t *testing.T) {
+	t.Setenv(githubWorkerTokenEnv, "")
+
+	started, note := startWorkerNow(context.Background())
+	if started {
+		t.Error("claimed the worker started with no token set")
+	}
+	if !strings.Contains(note, githubWorkerTokenEnv) {
+		t.Errorf("the note does not name the variable to set, so nobody "+
+			"reading it knows what to do: %q", note)
+	}
+	// The reason this matters is the wait, so the note has to say that much.
+	if !strings.Contains(note, "scheduled run") {
+		t.Errorf("the note does not say what the cost is: %q", note)
+	}
+}
+
+func TestRequeue_SaysWhenGitHubRefusesTheToken(t *testing.T) {
+	// The failure that looks most like success from the outside: the variable
+	// is set, so every "is it configured?" check passes, and uploads are
+	// silently falling back to the timer anyway.
+	t.Setenv(githubWorkerTokenEnv, "a-token-that-will-not-work")
+	t.Setenv(githubWorkerRepoEnv, "Bytes-Game/does-not-exist-"+t.Name())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	started, note := startWorkerNow(ctx)
+	if started {
+		t.Fatal("claimed success against a repo that does not exist")
+	}
+	// Whatever GitHub said, the note has to carry enough to act on: what was
+	// tried, and that uploads have the same problem.
+	for _, want := range []string{"does-not-exist", "Uploads"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("the note is missing %q, so it does not say what to "+
+				"check: %q", want, note)
+		}
+	}
+}
+
+func TestRequeue_TheWorkerPokeIsPartOfTheAnswer(t *testing.T) {
+	// Re-queueing without starting the worker leaves the videos sitting for
+	// the timer, which is the thing this whole endpoint exists to avoid.
+	src := readSourceFile(t, "media_requeue.go")
+	if !strings.Contains(src, "startWorkerNow(r.Context())") {
+		t.Error("the re-queue no longer starts the worker, so everything it " +
+			"queues waits for the next scheduled run")
+	}
+	var resp requeueResponse
+	if err := json.Unmarshal([]byte(
+		`{"requeued":1,"kind":"challenges","note":"x",`+
+			`"workerStarted":true,"workerNote":"y"}`), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.WorkerStarted || resp.WorkerNote != "y" {
+		t.Errorf("the worker outcome does not round-trip: %+v", resp)
 	}
 }

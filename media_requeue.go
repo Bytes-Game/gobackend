@@ -54,9 +54,12 @@ package main
 // progressiveSkipBps, which leaves an already-lean source alone.
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 )
 
 // requeueMaxBatch bounds one call.
@@ -83,6 +86,54 @@ type requeueResponse struct {
 	Requeued int    `json:"requeued"`
 	Kind     string `json:"kind"`
 	Note     string `json:"note"`
+	// Whether the worker was started immediately, and what happened if not.
+	// See startWorkerNow.
+	WorkerStarted bool   `json:"workerStarted"`
+	WorkerNote    string `json:"workerNote"`
+}
+
+// startWorkerNow asks the transcode worker to begin, and says what happened.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY THIS REPORTS INSTEAD OF JUST TRYING
+// ════════════════════════════════════════════════════════════════════════════
+//
+// An upload already does this, through wakeTranscodeWorker — but deliberately
+// in the background, swallowing every error into a log line, because an upload
+// must never fail or wait because GitHub is slow. That is the right trade for
+// an upload and it leaves the feature impossible to check: a token that is
+// missing, expired, or scoped wrong behaves EXACTLY like a token that works,
+// and the only difference is how long a new video waits to become watchable.
+//
+// Which is not a small difference. Without it a video waits for the scheduled
+// run — nominally half an hour, in practice longer, because GitHub throttles
+// cron on repositories with little activity. With it, about a minute.
+//
+// So this call is synchronous and its result is part of the answer. Re-queuing
+// is an admin action nobody is waiting on, so it can afford the fifteen
+// seconds an upload cannot, and in exchange the wiring becomes checkable
+// without having to post a video and watch the Actions tab.
+//
+// It is also just correct on its own terms: putting videos in the queue and
+// then not starting the worker leaves them sitting there for the timer.
+func startWorkerNow(ctx context.Context) (bool, string) {
+	token := strings.TrimSpace(os.Getenv(githubWorkerTokenEnv))
+	if token == "" {
+		return false, githubWorkerTokenEnv + " is not set, so the worker was " +
+			"not started early — these will wait for the next scheduled run. " +
+			"Uploads wait the same way. Set a fine-grained token with " +
+			"Actions: read and write on " +
+			envOrDefault(githubWorkerRepoEnv, defaultWorkerRepo) + "."
+	}
+	if err := dispatchWorkerRun(ctx, token); err != nil {
+		return false, "the worker could not be started: " + err.Error() +
+			" (repo " + envOrDefault(githubWorkerRepoEnv, defaultWorkerRepo) +
+			", workflow " + envOrDefault(githubWorkerWorkflowEnv, defaultWorkerWorkflow) +
+			", ref " + envOrDefault(githubWorkerRefEnv, defaultWorkerRef) +
+			"). Uploads are failing to start it the same way, silently."
+	}
+	return true, "the worker was started immediately, so these do not wait " +
+		"for the scheduled run — which also confirms uploads can start it."
 }
 
 // AdminRequeueMediaHandler puts finished videos back in the transcode queue.
@@ -142,11 +193,16 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 	n, _ := res.RowsAffected()
 	log.Printf("admin requeue: %d %s rows put back in the transcode queue", n, table)
 
+	started, workerNote := startWorkerNow(r.Context())
+	log.Printf("admin requeue: worker started=%v: %s", started, workerNote)
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(requeueResponse{
 		Requeued: int(n),
 		Kind:     table,
-		Note: "the next worker run picks these up; nothing was deleted and " +
-			"the current files keep serving until each one is replaced",
+		Note: "nothing was deleted and the current files keep serving until " +
+			"each one is replaced",
+		WorkerStarted: started,
+		WorkerNote:    workerNote,
 	})
 }
