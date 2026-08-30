@@ -77,41 +77,62 @@ import (
 var progressiveLadder = []progressiveRendition{
 	// Cellular and older phones. Small enough to arrive before somebody
 	// gives up, large enough not to look broken.
-	{label: "480p", maxLongSide: 854, crf: 24, audioBps: 96_000},
+	{label: "480p", maxLongSide: 854, crf: 24, maxBps: 1_000_000, audioBps: 96_000},
 	// The default almost everybody gets.
-	{label: "720p", maxLongSide: 1280, crf: 22, audioBps: 128_000},
+	{label: "720p", maxLongSide: 1280, crf: 22, maxBps: 2_000_000, audioBps: 128_000},
 }
 
-// progressiveSkipBps is the bitrate at or below which a source is already
-// lean enough to leave alone.
-//
 // ════════════════════════════════════════════════════════════════════════════
-// WHY SKIP AT ALL
+// WHEN NOT TO ENCODE AT ALL
 // ════════════════════════════════════════════════════════════════════════════
 //
-// Re-encoding is lossy. It is worth it on a file that is carrying far more
-// bits than its picture needs — an imported clip measured at 853x480 and
-// 2.68 Mbps, which is roughly four times what that size wants, came out of
-// our encoder at 0.74 Mbps and 72% smaller with the same picture. All of that
-// saving was waste, not detail.
+// Re-encoding is lossy. It is worth it on a file carrying far more bits than
+// its picture needs, because nearly everything it strips out is waste. Run the
+// same pass over a file that is already lean and the trade inverts: there is
+// almost nothing left to strip, so the generation loss is most of what
+// changes. Better to serve the original.
 //
-// Run the same pass over a file that is ALREADY at 0.7 Mbps and the trade
-// inverts: there is almost nothing left to squeeze out, so the generation
-// loss is most of what changes. Better to serve the original.
+// The line is each rung's OWN ceiling — see maxBps on progressiveRendition —
+// not one number for the whole ladder. A single global threshold was the first
+// attempt and it was incoherent: with the 720p ceiling at 2 Mbps, a 1.8 Mbps
+// source is already where we would put it, and encoding it anyway spent a
+// lossy generation to arrive back at 1.8 Mbps.
 //
-// One megabit is the line. Comfortably above what 480p needs and below what
-// an over-encoded file carries, so the two cases land on opposite sides of it
-// without needing to guess per video.
-const progressiveSkipBps = 1_000_000
+// Keying the skip to the ceiling makes the two rules one rule — "get every
+// video to at most this rate, and do nothing to one that is already there" —
+// so they cannot drift apart when a ceiling is next tuned.
 
 type progressiveRendition struct {
 	label       string
 	maxLongSide int
 	// crf is constant-quality encoding: pick a quality, let the bitrate land
 	// wherever the content needs it. See encodeProgressive for why this is
-	// not a fixed bitrate.
-	crf      int
+	// not a fixed bitrate — and why it is not crf on its own either.
+	crf int
+	// maxBps is the ceiling crf is NOT allowed to spend past. See
+	// encodeProgressive.
+	maxBps   int
 	audioBps int
+}
+
+// rungForSize returns the rung a source of this size naturally sits at: the
+// smallest one whose box would not shrink the picture.
+//
+// It reports false when the source is larger than every rung — a 1080p upload,
+// say. That is not "no opinion", it is the answer: something that big is going
+// to be scaled down whatever its bitrate, because every viewer decoding four
+// times the pixels is a cost of its own.
+func rungForSize(longSide int) (progressiveRendition, bool) {
+	best, found := progressiveRendition{}, false
+	for _, r := range progressiveLadder {
+		if r.maxLongSide < longSide {
+			continue
+		}
+		if !found || r.maxLongSide < best.maxLongSide {
+			best, found = r, true
+		}
+	}
+	return best, found
 }
 
 // buildProgressiveMP4s encodes our renditions and returns label → local path.
@@ -127,10 +148,29 @@ func buildProgressiveMP4s(ctx context.Context, src, outDir string) map[string]st
 		return made
 	}
 	hasAudio := probeHasAudio(src)
-	// A source already at or under the threshold is left alone unless a rung
-	// would genuinely shrink its picture — see progressiveSkipBps and the
-	// check inside the loop.
-	alreadyLean := bitrate > 0 && bitrate <= progressiveSkipBps
+
+	// ════════════════════════════════════════════════════════════════════════
+	// LEAVE A SOURCE THAT IS ALREADY RIGHT COMPLETELY ALONE
+	// ════════════════════════════════════════════════════════════════════════
+	//
+	// All or nothing, deliberately. Skipping rung by rung looks tidier and is
+	// a trap: a 1280x720 source already at 1.5 Mbps would have the 720p rung
+	// skipped (it is under that ceiling) while the 480p rung still ran, so the
+	// only rendition on offer would be the 480p one — and the app, which picks
+	// the best label present, would serve 480p to everybody on good wifi. A
+	// downgrade, caused by the source being GOOD.
+	//
+	// So when no rung would shrink the picture and the source is already at or
+	// under the ceiling for its size, we produce nothing at all. An empty map
+	// leaves video_variants untouched and the app keeps playing the upload
+	// itself, which in this case is exactly the file we would have made.
+	if r, ok := rungForSize(longSide); ok && bitrate > 0 && bitrate <= r.maxBps {
+		log.Printf("progressive: %s is %d-tall-side at %.2f Mbps, already "+
+			"inside the %s ceiling of %.2f Mbps — serving it as it is",
+			filepath.Base(src), longSide, float64(bitrate)/1e6,
+			r.label, float64(r.maxBps)/1e6)
+		return made
+	}
 
 	// Boxes already encoded, so a rung that would repeat one is skipped. See
 	// the loop below.
@@ -162,20 +202,6 @@ func buildProgressiveMP4s(ctx context.Context, src, outDir string) map[string]st
 			continue
 		}
 
-		// Already lean, and this rung would not make the picture smaller
-		// either — so there is nothing left for an encode to win, and it
-		// would spend a lossy generation to find that out. See
-		// progressiveSkipBps.
-		//
-		// A rung that DOES shrink the picture still earns its place at any
-		// bitrate: fewer pixels is less to decode on a weak phone as well as
-		// fewer bytes on the wire.
-		if alreadyLean && box >= longSide {
-			log.Printf("progressive: %s already at %.2f Mbps for its size, "+
-				"leaving %s alone", filepath.Base(src),
-				float64(bitrate)/1e6, r.label)
-			continue
-		}
 		done[box] = true
 
 		out := filepath.Join(outDir, r.label+".mp4")
@@ -227,6 +253,47 @@ func encodeProgressive(ctx context.Context, src, out string, r progressiveRendit
 	args = append(args,
 		"-c:v", "libx264",
 		"-crf", fmt.Sprintf("%d", r.crf),
+		// ════════════════════════════════════════════════════════════════════
+		// THE CEILING, AND WHY CRF ALONE WAS NOT ENOUGH
+		// ════════════════════════════════════════════════════════════════════
+		//
+		// -crf says "hold this quality, spend whatever it takes". On easy
+		// video that is exactly right and the file comes out small. On hard
+		// video — fast cuts, grain, heavy motion — "whatever it takes" is a
+		// lot, and nothing was stopping it.
+		//
+		// Measured on files this encoder actually produced and served:
+		//
+		//	video 251   720p   4.48 Mbps
+		//	video 248   720p   4.64 Mbps
+		//	video 247   720p   4.14 Mbps
+		//	video 241   720p   0.97 Mbps   ← easy content, crf behaving
+		//
+		// The app downloads 768 KB before it starts playing. At 4.5 Mbps that
+		// is 1.4 seconds of video; the player then has to keep pace with a
+		// 4.5 Mbps stream live, and any dip in the connection is a stall.
+		// That was worse than the untouched sources this was meant to fix.
+		//
+		// -maxrate with -bufsize is the standard pairing for this: quality
+		// stays the target, but a stretch of hard video cannot buy its way
+		// past the ceiling.
+		//
+		// bufsize is the window the limit is measured over, and it is one
+		// second's worth rather than the more usual two. Measured by
+		// re-encoding the 4.14 Mbps file this bug shipped:
+		//
+		//	bufsize 2s   2.15 Mbps    768 KB covers 2.9s
+		//	bufsize 1s   2.04 Mbps    768 KB covers 3.1s
+		//	bufsize 0.5s 1.72 Mbps    768 KB covers 3.7s
+		//
+		// A wider window lets the opening seconds run over the ceiling and
+		// pay it back later. Normally that is a good trade. Here it is the
+		// worst place to spend it: the opening is precisely the part the app
+		// pre-downloads, so an overspend there is a shorter head start, which
+		// is the whole problem. Half a second holds the rate tighter still,
+		// at a real cost to quality on scene cuts — reels are all scene cuts.
+		"-maxrate", fmt.Sprintf("%d", r.maxBps),
+		"-bufsize", fmt.Sprintf("%d", r.maxBps),
 		"-preset", "medium",
 		// A square box, so the same setting works on a portrait reel and a
 		// landscape one — whichever side is longer is the one that meets the
