@@ -77,11 +77,45 @@ import (
 var progressiveLadder = []progressiveRendition{
 	// Cellular and older phones. Small enough to arrive before somebody
 	// gives up, large enough not to look broken.
-	{label: "480p", maxLongSide: 854, crf: 24, maxBps: 1_000_000, audioBps: 96_000},
+	{label: "480p", maxLongSide: 854, crf: 24, maxBps: 1_500_000, audioBps: 96_000},
 	// The default almost everybody gets.
-	{label: "720p", maxLongSide: 1280, crf: 22, maxBps: 2_000_000, audioBps: 128_000},
+	{label: "720p", maxLongSide: 1280, crf: 22, maxBps: 3_500_000, audioBps: 128_000},
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// pickingTheCeiling — where the numbers above come from
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The first ceiling was 2 Mbps at 720p, and it was too low. Measured on a real
+// feed video (a 4.14 Mbps source), re-encoding at each ceiling and comparing
+// the picture against that source with SSIM:
+//
+//	ceiling      SSIM      768 KB covers
+//	2.0 Mbps     0.970     3.1s
+//	2.5 Mbps     0.978     2.5s
+//	3.0 Mbps     0.985     2.1s
+//	3.5 Mbps     0.990     1.8s
+//
+// SSIM around 0.97 is where compression starts being visible on motion, and
+// it was: the change was reported as the picture getting noticeably worse.
+// 0.99 is close enough to the source that there is nothing to see.
+//
+// The awkward part is the right-hand column. The app pre-downloads a fixed
+// number of BYTES before playing, so a better picture buys a shorter head
+// start and the two goals fight — at a fixed prefix, every gain on one side is
+// a loss on the other.
+//
+// So the prefix moved too, from 768 KB to 2 MB, in the app. That is what makes
+// 3.5 Mbps affordable: 2 MB at 3.5 Mbps is 4.8 seconds of runway, better than
+// the 3.1 seconds the 2 Mbps ceiling bought AND better than the 1.5 seconds
+// the uncapped files gave. Both numbers have to move together; changing this
+// ceiling without looking at VideoCacheService.prefixBytes will trade one
+// complaint for the other.
+//
+// A slower x264 preset was measured too, since it would have been free
+// quality. It is not worth it here: preset slow scored 0.9851 against medium's
+// 0.9847 at the same ceiling, for 50% more encode time.
+//
 // ════════════════════════════════════════════════════════════════════════════
 // WHEN NOT TO ENCODE AT ALL
 // ════════════════════════════════════════════════════════════════════════════
@@ -110,7 +144,8 @@ type progressiveRendition struct {
 	// not a fixed bitrate — and why it is not crf on its own either.
 	crf int
 	// maxBps is the ceiling crf is NOT allowed to spend past. See
-	// encodeProgressive.
+	// encodeProgressive for how it is enforced, and pickingTheCeiling below
+	// for how these particular numbers were chosen.
 	maxBps   int
 	audioBps int
 }
