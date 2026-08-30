@@ -253,10 +253,21 @@ func TestProgressive_RubbishInProducesNothingRatherThanRubbishOut(t *testing.T) 
 }
 
 func TestProgressive_TheLadderMatchesWhatTheAppCanChoose(t *testing.T) {
-	// The app picks from labels it knows: 480p, 720p, 1080p. A rendition
-	// under any other name is a file nobody ever plays, and the backend's
-	// allow-list would drop it on the way in anyway.
-	known := map[string]bool{"480p": true, "720p": true, "1080p": true}
+	// The app picks from labels it knows. A rendition under any other name is
+	// a file nobody ever plays: the backend's allow-list drops it on the way
+	// in, and even past that the app's chooser has no rank or speed
+	// requirement for it and would never select it.
+	//
+	// So adding a rung is a change in three places, not one. This list is the
+	// third, and it fails loudly rather than letting a rung be encoded,
+	// uploaded, and silently ignored.
+	//
+	// Keep in step with:
+	//   - videoVariantLabels in hls_worker_api.go   (what may be stored)
+	//   - bitrateNeededFor in the app's NetworkQualityService (what it needs)
+	known := map[string]bool{
+		"480p": true, "720p": true, "720p_hq": true, "1080p": true,
+	}
 	for _, r := range progressiveLadder {
 		if !known[r.label] {
 			t.Errorf("rendition %q is not a label the app chooses from", r.label)
@@ -493,5 +504,86 @@ func TestProgressive_HoldsTheCeilingOnHardContent(t *testing.T) {
 				label, float64(got)/1e6, float64(want)/1e6,
 				768*1024*8/float64(got), 768*1024*8/float64(want))
 		}
+	}
+}
+
+// TestProgressive_TwoRungsShareASizeAtDifferentRates is the point of the
+// fast-connection rung, and the thing the de-duplication has to stop
+// swallowing.
+//
+// The ladder now carries two 1280-wide entries on purpose: the same picture
+// at 2.5 and 3.5 Mbps, so a viewer's own measured connection decides which
+// they get rather than one global number decided from somebody else's link.
+// De-duplication used to key on picture size alone, which would silently drop
+// the second — the encode would simply not happen and nothing would say so.
+func TestProgressive_TwoRungsShareASizeAtDifferentRates(t *testing.T) {
+	needFFmpeg(t)
+	dir := t.TempDir()
+	src := makeSource(t, dir, "wide.mp4", 1280, 720)
+
+	made := buildProgressiveMP4s(context.Background(), src, dir)
+
+	for _, want := range []string{"480p", "720p", "720p_hq"} {
+		if _, ok := made[want]; !ok {
+			t.Fatalf("a 1280-wide source produced no %s; got %v", want, made)
+		}
+	}
+
+	// Same picture size, different bitrate. That is the whole distinction.
+	loSide, loBps, ok1 := sourceShape(context.Background(), made["720p"])
+	hiSide, hiBps, ok2 := sourceShape(context.Background(), made["720p_hq"])
+	if !ok1 || !ok2 {
+		t.Fatal("could not measure the two renditions")
+	}
+	if loSide != hiSide {
+		t.Errorf("the two 720p rungs came out %d and %d wide; they are meant "+
+			"to differ in bitrate, not size", loSide, hiSide)
+	}
+	t.Logf("720p %.2f Mbps, 720p_hq %.2f Mbps",
+		float64(loBps)/1e6, float64(hiBps)/1e6)
+	if hiBps <= loBps {
+		t.Errorf("720p_hq came out at %d bps against 720p's %d. The higher "+
+			"rung is supposed to spend more bits; if it does not, it is a "+
+			"second copy of the same file and should not be on the ladder.",
+			hiBps, loBps)
+	}
+
+	// ...different files. If the ceiling is not actually binding, these are
+	// the same video stored twice and the extra encode buys nothing.
+	loInfo, err := os.Stat(made["720p"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	hiInfo, err := os.Stat(made["720p_hq"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("720p %d KB, 720p_hq %d KB", loInfo.Size()/1024, hiInfo.Size()/1024)
+	if hiInfo.Size() <= loInfo.Size() {
+		t.Errorf("720p_hq is %d bytes against 720p's %d. The higher rung is "+
+			"supposed to spend more bits; if it does not, it is a second copy "+
+			"of the same file and should not be on the ladder.",
+			hiInfo.Size(), loInfo.Size())
+	}
+}
+
+// TestProgressive_ASmallSourceStillGetsOneRendition guards the other side of
+// that de-duplication change.
+//
+// When a source is smaller than a rung, that rung clamps down to the source
+// size — and then several rungs land on the same picture with nothing to tell
+// them apart, because a source with few bits to begin with cannot spend the
+// higher ceiling. Keying on size AND ceiling would make three copies of one
+// video.
+func TestProgressive_ASmallSourceStillGetsOneRendition(t *testing.T) {
+	needFFmpeg(t)
+	dir := t.TempDir()
+	src := makeSource(t, dir, "small.mp4", 640, 360)
+
+	made := buildProgressiveMP4s(context.Background(), src, dir)
+	if len(made) != 1 {
+		t.Errorf("a 640-wide source produced %d renditions (%v); every rung "+
+			"clamps to 640 there, so they would be the same video stored "+
+			"repeatedly", len(made), made)
 	}
 }
