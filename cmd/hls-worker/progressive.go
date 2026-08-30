@@ -79,7 +79,7 @@ var progressiveLadder = []progressiveRendition{
 	// gives up, large enough not to look broken.
 	{label: "480p", maxLongSide: 854, crf: 24, maxBps: 1_500_000, audioBps: 96_000},
 	// The default almost everybody gets.
-	{label: "720p", maxLongSide: 1280, crf: 22, maxBps: 3_500_000, audioBps: 128_000},
+	{label: "720p", maxLongSide: 1280, crf: 22, maxBps: 2_500_000, audioBps: 128_000},
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -115,6 +115,39 @@ var progressiveLadder = []progressiveRendition{
 // A slower x264 preset was measured too, since it would have been free
 // quality. It is not worth it here: preset slow scored 0.9851 against medium's
 // 0.9847 at the same ceiling, for 50% more encode time.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY 720p CAME BACK DOWN TO 2.5
+// ════════════════════════════════════════════════════════════════════════════
+//
+// 3.5 Mbps was chosen on picture quality alone, against the source. It looked
+// right and it was, on that axis. What it left out is whether a phone can
+// actually pull 3.5 Mbps for the length of a reel.
+//
+// The app now measures its own downloads and reports the answer. On the
+// connection this was tuned for:
+//
+//	link=6.1 Mbps    link=5.5    link=5.2    link=3.5
+//
+// Typically fine, and it drops to 3.5. A 3.5 Mbps file on a 3.5 Mbps link has
+// nothing to spare, and these are progressive MP4s: a reel that is already
+// playing cannot switch down when the link dips, the way an adaptive stream
+// would. It just stops. The device log carried 296 of those stops across 110
+// reels.
+//
+// So the ceiling has to fit under the WORST the connection does, not the
+// typical. At 2.5 Mbps a reel needs about 3.25 Mbps to stream comfortably,
+// which fits under that 3.5 floor with room left.
+//
+// The cost is real and was weighed: 0.978 SSIM against the source, where 3.5
+// scored 0.990. The alternative was letting the app fall back to 480p on every
+// dip, and 480p is 854 pixels wide against 1280 — a much bigger visible loss
+// than the step from 0.990 to 0.978, which is why this is the better trade
+// rather than simply a more cautious one.
+//
+// If the app ever gains adaptive switching mid-reel, this can go back up:
+// the constraint here is the inability to change quality once playback has
+// started, not the picture.
 //
 // ════════════════════════════════════════════════════════════════════════════
 // WHEN NOT TO ENCODE AT ALL
