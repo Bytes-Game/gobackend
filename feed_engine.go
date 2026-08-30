@@ -5731,16 +5731,13 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// the page filled — a For You page is capped at (eligible creators × 3)
 	// by maxItemsPerCreator, so a short page is usually a diversity
 	// decision rather than an empty catalog. See feed_pagination.go.
-	// Count what the viewer has not already been shown. A page that is entirely
-	// repeats means the catalogue is exhausted for them right now, and telling
-	// them otherwise sends the client after a page that cannot exist — see
-	// feedHasMore.
-	freshCount := 0
-	for _, si := range composed {
-		if si.Item.Challenge == nil || !si.Item.Challenge.Repeat {
-			freshCount++
-		}
-	}
+	//
+	// This used to also count how many items the viewer had not already been
+	// shown and end the feed when that hit zero. It no longer does: someone who
+	// has worked through the catalogue gets it again in least-recently-seen
+	// order rather than a dead end. Items are still LABELLED as repeats on the
+	// wire, so the app can say so if it wants to — what changed is only whether
+	// the feed admits there is a next page.
 	// Is there a next page worth asking for?
 	//
 	// The mixed feed and a filtered tab are asking different questions, and
@@ -5752,10 +5749,13 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	//
 	// Both rules still agree that a page of nothing but repeats is the end:
 	// another page can only bring more of the same.
-	hasMore := feedHasMore(len(scored), rawCount, freshCount, limit)
+	hasMore := feedHasMore(len(scored), rawCount, limit)
 	if kindFilter != feedKindAll {
-		hasMore = freshCount > 0 &&
-			feedKindHasMore(rawCount, len(composed), clientLimit, limit)
+		// No freshCount gate here either — same reasoning as feedHasMore. A
+		// tab that has shown you every battle keeps going round them rather
+		// than dead-ending, and the least-recently-seen ordering makes that a
+		// rotation instead of a stutter.
+		hasMore = feedKindHasMore(rawCount, len(composed), clientLimit, limit)
 	}
 	// A page shortened by the per-creator cap is not the end of anything.
 	//
@@ -5767,9 +5767,9 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// what guaranteed the next page never came: the cap resets per request, so
 	// the deferred items were only ever one more request from being served.
 	//
-	// A page with nothing new on it is still the end, whatever was held back.
-	// Another page can only bring more of the same.
-	if !hasMore && heldForDiversity > 0 && freshCount > 0 {
+	// Held-back items are held back whether or not the page had anything new
+	// on it, so this no longer asks about freshCount either.
+	if !hasMore && heldForDiversity > 0 {
 		hasMore = true
 	}
 

@@ -30,50 +30,67 @@ package main
 // WHAT STOPS THE CLIENT
 //
 // Handing paging authority to the client only works if the client can
-// actually stop, so this is deliberately paired with two things it already
-// does. It de-duplicates by content id and treats a page that yielded zero
-// NEW items as the end, whatever the server claimed; and it stops the
-// moment hasMore is false. So the terminating case is a page of pure
-// repeats, which is exactly what the catalog produces once every unseen
-// item has been served — the seen penalty sinks them but never hides them,
-// so they come back as repeats rather than as an empty page.
+// actually stop, and its stopping condition is an EMPTY page: it drops
+// duplicates within a single response and treats a page that parsed to
+// nothing as the end, whatever the server claimed. It does not de-duplicate
+// against what it already has on screen, deliberately — see the long note in
+// the app's _loadNextPage — so a repeat the server chose to send is rendered
+// rather than silently deleted.
+//
+// That is what makes the feed able to loop rather than end. The pair of rules
+// is: this function keeps saying yes while there is anything to serve, and the
+// client stops when a page comes back with nothing in it.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // feedHasMore reports whether the client should request another page.
 //
 // candidates is the size of the scored pool the page was composed FROM;
-// composed is what actually made it onto the page; limit is what the
-// client asked for.
-// feedHasMore answers "is it worth asking for another page".
+// composed is what actually made it onto the page; limit is what the client
+// asked for.
 //
-// fresh is how many of the composed items the viewer has NOT already been
-// shown. It is the difference between a feed with more to give and a feed that
-// has started going round in circles, and without it this function cannot tell
-// those apart — a page of twenty repeats looks exactly like a page of twenty
-// new videos from in here.
-//
-// That gap had a cost. A device run walked six pages: the first three were
-// almost entirely fresh, the fourth yielded seven new items out of twenty-one,
-// the fifth sixteen, and the sixth nothing at all — and this function said
-// "keep going" every time, because the pages were full. The client asked again
-// and again for content that was not there.
-func feedHasMore(candidates, composed, fresh, limit int) bool {
+// It used to take a fourth number, how many of the composed items were unseen,
+// and answer false when that was zero. That made the feed announce an ending
+// as soon as a viewer had worked through the catalogue once. Removed — see the
+// note on the repeat case below for why looping is both safe and wanted.
+func feedHasMore(candidates, composed, limit int) bool {
 	// Nothing was served. There is no next page to ask for, and claiming
 	// otherwise would spin a client that stops only on an empty result.
 	if composed == 0 {
 		return false
 	}
-	// Everything on this page has been seen before. The catalogue is exhausted
-	// for this viewer right now, and another page can only bring more of the
-	// same — so say so instead of sending them after it.
+	// A page of nothing but repeats used to end the feed here. It no longer
+	// does, because "you have seen all of these" is not the same claim as
+	// "there is nothing left to show you".
 	//
-	// This is NOT the old hard filter coming back. Repeats are still served;
-	// the viewer keeps scrolling through them and the seen-handicap fades over
-	// twelve hours so they return properly later. What stops is the pretence
-	// that there is something new one page further on.
-	if fresh == 0 {
-		return false
-	}
+	// ════════════════════════════════════════════════════════════════════════
+	// WHY LOOPING IS SAFE, AND WHY IT SERVES SOMETHING DIFFERENT EACH TIME
+	// ════════════════════════════════════════════════════════════════════════
+	//
+	// The worry with never ending is a feed that hands back the same twenty
+	// videos forever. It does not, and the reason is that the seen record is a
+	// TIMESTAMP, restamped by markShownBatch every time an item is served,
+	// and seenPenalty is largest when that timestamp is newest.
+	//
+	// So serving page 1 is what pushes page 1's items to the back. Page 2 is
+	// then composed from what has been waiting longest, page 3 from what has
+	// been waiting longest after that, and the feed walks the catalogue in
+	// least-recently-seen order instead of stopping at the end of it.
+	//
+	// Two properties fall out of that, both wanted:
+	//
+	//   - Unseen content still leads. It carries no handicap at all, so as
+	//     soon as anything new is uploaded it outranks the whole backlog.
+	//   - A strong video can still come back early. The handicap is a score
+	//     penalty, not a filter, so something the ranker rates highly enough
+	//     can beat an unwatched item — which is the behaviour on every feed
+	//     worth copying.
+	//
+	// The catalogue is 108 videos today, so a viewer reaches the end of it in
+	// one sitting. That is a fact about the library, not a reason to stop.
+	//
+	// What still ends the feed is composed == 0 above: nothing was served, so
+	// there is genuinely nothing to ask for. That is the honest terminator and
+	// it is the only one.
 	// Composition left candidates on the table. Whatever the reason —
 	// per-creator cap, an exhausted slot bucket — those items exist and
 	// the next page's fresh cap can reach them.

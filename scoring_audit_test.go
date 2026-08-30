@@ -291,17 +291,19 @@ func TestAudit_HasMoreNeverSpinsOrStopsEarly(t *testing.T) {
 	for _, limit := range []int{1, 20, 100} {
 		for cand := 0; cand <= limit*2; cand++ {
 			for composed := 0; composed <= limit; composed++ {
-				for _, fresh := range []int{0, 1, composed} {
-					got := feedHasMore(cand, composed, fresh, limit)
-					if composed == 0 && got {
-						t.Fatalf("empty page claimed more (cand=%d fresh=%d limit=%d)",
-							cand, fresh, limit)
-					}
-					if composed >= limit && fresh > 0 && cand >= composed && !got {
-						t.Fatalf("a FULL page of fresh items said the feed was over "+
-							"(cand=%d composed=%d fresh=%d limit=%d)",
-							cand, composed, fresh, limit)
-					}
+				got := feedHasMore(cand, composed, limit)
+				if composed == 0 && got {
+					t.Fatalf("empty page claimed more (cand=%d limit=%d)",
+						cand, limit)
+				}
+				// No "fresh" qualifier any more. A full page ends the feed
+				// under no circumstances — whether the viewer has seen those
+				// items before is not this question, because the next page
+				// comes from whatever they saw longest ago.
+				if composed >= limit && cand >= composed && !got {
+					t.Fatalf("a FULL page said the feed was over "+
+						"(cand=%d composed=%d limit=%d)",
+						cand, composed, limit)
 				}
 			}
 		}

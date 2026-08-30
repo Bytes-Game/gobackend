@@ -57,7 +57,7 @@ func TestFeedHasMore(t *testing.T) {
 			// These cases predate repeat-marking, when every served item was
 			// by definition fresh. Passing composed as fresh keeps them
 			// asserting exactly what they always did.
-			got := feedHasMore(c.candidates, c.composed, c.composed, c.limit)
+			got := feedHasMore(c.candidates, c.composed, c.limit)
 			if got != c.want {
 				msg := fmt.Sprintf(
 					"feedHasMore(candidates=%d, composed=%d, fresh=%d, limit=%d) = %v, want %v",
@@ -155,7 +155,7 @@ func TestForYouPageIsNotDeclaredFinalWhenTheCreatorCapTruncatedIt(t *testing.T) 
 			len(scored)-len(composed))
 	}
 
-	if !feedHasMore(len(scored), len(composed), len(composed), limit) {
+	if !feedHasMore(len(scored), len(composed), limit) {
 		t.Errorf("hasMore = false with %d of %d candidates unplaced. The "+
 			"page is short because %d creators × %d is %d, not because the "+
 			"catalog ran out — and since that ceiling is structural, "+
@@ -175,48 +175,67 @@ func TestForYouPageIsNotDeclaredFinalWhenTheCreatorCapTruncatedIt(t *testing.T) 
 // yielded 7, 16 and 0 new items out of 21 sent, and every one of them reported
 // "keep going" — because a full page of repeats is indistinguishable from a
 // full page of new videos unless somebody counts.
-func TestFeedHasMore_StopsWhenEverythingIsARepeat(t *testing.T) {
+func TestFeedHasMore_KeepsGoingWhenEverythingIsARepeat(t *testing.T) {
+	// The inverse of what this file used to assert.
+	//
+	// The old rule ended the feed the moment a page contained nothing unseen.
+	// On a 108-video catalogue a viewer reaches that in one sitting, and the
+	// app showed "you have reached the end" while the whole library sat there
+	// ready to be shown again.
+	//
+	// Repeats are not an empty catalogue. The seen record is a timestamp that
+	// is restamped every time an item is served, and the penalty is largest
+	// when that timestamp is newest — so serving a page is exactly what pushes
+	// it to the back, and the next page comes from whatever has been waiting
+	// longest. The feed walks the catalogue in least-recently-seen order
+	// instead of stopping at the end of it.
+	//
+	// The only honest terminator left is a page with nothing on it.
 	cases := []struct {
-		name                               string
-		candidates, composed, fresh, limit int
-		want                               bool
-		why                                string
+		name                        string
+		candidates, composed, limit int
+		want                        bool
+		why                         string
 	}{
 		{
-			name:       "full page, nothing new in it",
-			candidates: 60, composed: 20, fresh: 0, limit: 20, want: false,
-			why: "a full page of repeats is the catalogue running out, not a reason to ask again",
+			name:       "nothing was served",
+			candidates: 60, composed: 0, limit: 20, want: false,
+			why: "an empty page is the one real ending; claiming otherwise " +
+				"spins a client that stops only on an empty result",
 		},
 		{
-			name:       "full page, one new item",
-			candidates: 60, composed: 20, fresh: 1, limit: 20, want: true,
-			why: "one fresh item means the pool has not run dry",
+			name:       "full page, every item already seen",
+			candidates: 60, composed: 20, limit: 20, want: true,
+			why: "this is the case that used to end the feed. A full page of " +
+				"repeats means the catalogue is being cycled, not that it is gone",
 		},
 		{
-			name:       "short page, nothing new",
-			candidates: 20, composed: 8, fresh: 0, limit: 20, want: false,
+			name:       "short page with candidates left over",
+			candidates: 60, composed: 8, limit: 20, want: true,
+			why: "the per-creator cap deferred those items; the next page has " +
+				"a fresh budget and can reach them",
 		},
 		{
-			name: "short page with unplaced candidates, but nothing new",
-			// The per-creator cap left candidates on the table, which normally
-			// means "ask again". It does not help when everything left over is
-			// something this viewer has already been shown.
-			candidates: 60, composed: 8, fresh: 0, limit: 20, want: false,
-			why: "unplaced candidates are only worth another page if any of them are new",
+			name:       "short page, pool was the constraint",
+			candidates: 8, composed: 8, limit: 20, want: false,
+			why: "everything scored was used and it did not fill a page, so " +
+				"the pool really is all there was",
 		},
 		{
-			name:       "short page, some new",
-			candidates: 60, composed: 8, fresh: 3, limit: 20, want: true,
+			name:       "exactly a full page, pool exhausted",
+			candidates: 20, composed: 20, limit: 20, want: true,
+			why: "landing exactly on the page size says the fetch was the " +
+				"constraint, not the catalogue",
 		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := feedHasMore(c.candidates, c.composed, c.fresh, c.limit)
+			got := feedHasMore(c.candidates, c.composed, c.limit)
 			if got != c.want {
 				msg := fmt.Sprintf(
-					"feedHasMore(candidates=%d, composed=%d, fresh=%d, limit=%d) = %v, want %v",
-					c.candidates, c.composed, c.fresh, c.limit, got, c.want)
+					"feedHasMore(candidates=%d, composed=%d, limit=%d) = %v, want %v",
+					c.candidates, c.composed, c.limit, got, c.want)
 				if c.why != "" {
 					msg += " — " + c.why
 				}
