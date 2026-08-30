@@ -22,7 +22,7 @@ import (
 //
 // The bitrate is forced, and that is not incidental. ffmpeg's test pattern is
 // a synthetic image that compresses to about 0.3 Mbps whatever size you ask
-// for — below progressiveSkipBps, so an unforced fixture is correctly LEFT
+// for — below every ladder ceiling, so an unforced fixture is correctly LEFT
 // ALONE and every test about the encode silently stops testing it.
 //
 // 2.5 Mbps is what these tests are about: the real imported clip that started
@@ -106,11 +106,15 @@ func TestProgressive_SmallerThanTheThingItReplaces(t *testing.T) {
 	// strangers; ours is chosen for the feed.
 	needFFmpeg(t)
 	dir := t.TempDir()
-	// -qp 0 is lossless, which is the extreme version of "whatever the camera
-	// felt like" and makes the comparison unambiguous.
+	// Noise, not testsrc. testsrc is a flat synthetic pattern that compresses
+	// so well it comes out at 1.9 Mbps even at -qp 0 — under the 720p ceiling,
+	// so the encoder would rightly decline to touch it and this test would be
+	// asserting on a file nobody made. Noise has no structure to predict, so
+	// it lands where a real generously-encoded upload lands: far above.
 	src := filepath.Join(dir, "fat.mp4")
 	if out, err := exec.Command("ffmpeg", "-y",
-		"-f", "lavfi", "-i", "testsrc=size=1280x720:rate=30:duration=2",
+		"-f", "lavfi", "-i",
+		"color=c=black:s=1280x720:r=30:d=2,noise=alls=80:allf=t+u",
 		"-c:v", "libx264", "-preset", "ultrafast", "-qp", "0",
 		"-pix_fmt", "yuv420p", src,
 	).CombinedOutput(); err != nil {
@@ -301,9 +305,13 @@ func TestProgressive_LeavesAnAlreadyLeanFileAlone(t *testing.T) {
 	if !ok || bitrate == 0 {
 		t.Skip("could not measure the clip's bitrate here")
 	}
-	if bitrate > progressiveSkipBps {
-		t.Skipf("the fixture came out at %d bps, above the %d threshold — "+
-			"it does not exercise the case", bitrate, progressiveSkipBps)
+	r, ok := rungForSize(854)
+	if !ok {
+		t.Fatal("no ladder rung covers an 854-wide source")
+	}
+	if bitrate > r.maxBps {
+		t.Skipf("the fixture came out at %d bps, above the %s ceiling of %d — "+
+			"it does not exercise the case", bitrate, r.label, r.maxBps)
 	}
 
 	made := buildProgressiveMP4s(context.Background(), src, dir)
@@ -329,8 +337,8 @@ func TestProgressive_StillShrinksABigPictureAtALowBitrate(t *testing.T) {
 		t.Skipf("could not build the clip: %v: %s", err, lastLine(string(out)))
 	}
 	_, bitrate, ok := sourceShape(context.Background(), src)
-	if !ok || bitrate == 0 || bitrate > progressiveSkipBps {
-		t.Skipf("fixture is not below the threshold here (%d bps)", bitrate)
+	if !ok || bitrate == 0 {
+		t.Skip("could not measure the clip's bitrate here")
 	}
 
 	made := buildProgressiveMP4s(context.Background(), src, dir)
@@ -374,5 +382,79 @@ func TestSourceShape_UnknownBitrateStillEncodes(t *testing.T) {
 	made := buildProgressiveMP4s(context.Background(), src, dir)
 	if len(made) == 0 {
 		t.Error("an ordinary 720p clip produced no renditions at all")
+	}
+}
+
+// TestProgressive_HoldsTheCeilingOnHardContent is the regression for the bug
+// that made this ceiling necessary.
+//
+// The encoder ran on production video with -crf and no -maxrate. On easy
+// content that behaved; on hard content it did not, and hard content is what
+// imported clips are. Files it produced and served, measured:
+//
+//	video 251   720p   4.48 Mbps
+//	video 248   720p   4.64 Mbps
+//	video 247   720p   4.14 Mbps
+//
+// The app downloads 768 KB before playing. At 4.5 Mbps that is 1.4 seconds,
+// so the player was streaming live almost immediately — worse than the
+// untouched sources this was supposed to fix.
+//
+// The fixture is noise, which is the hardest thing to encode there is: it has
+// no structure to predict, so every frame costs almost as much as a still
+// image. A crf-only encode of it runs far past any sane rate. If this test
+// fails, the ceiling has stopped being enforced.
+func TestProgressive_HoldsTheCeilingOnHardContent(t *testing.T) {
+	needFFmpeg(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "hard.mp4")
+	// High-motion noise at 720p, encoded near-losslessly so the SOURCE is
+	// well above every ceiling and the skip rule cannot claim it.
+	if out, err := exec.Command("ffmpeg", "-y",
+		"-f", "lavfi", "-i",
+		"color=c=black:s=1280x720:r=30:d=3,noise=alls=100:allf=t+u",
+		"-c:v", "libx264", "-preset", "ultrafast", "-qp", "10",
+		"-pix_fmt", "yuv420p", src,
+	).CombinedOutput(); err != nil {
+		t.Skipf("could not build the hard clip: %v: %s", err, lastLine(string(out)))
+	}
+
+	_, srcBps, ok := sourceShape(context.Background(), src)
+	if !ok {
+		t.Skip("could not measure the fixture here")
+	}
+	t.Logf("source is %.2f Mbps", float64(srcBps)/1e6)
+
+	made := buildProgressiveMP4s(context.Background(), src, dir)
+	if len(made) == 0 {
+		t.Fatal("nothing was encoded, so the ceiling was never exercised")
+	}
+
+	for label, path := range made {
+		var want int
+		for _, r := range progressiveLadder {
+			if r.label == label {
+				want = r.maxBps
+			}
+		}
+		if want == 0 {
+			t.Fatalf("%s is not a ladder rung", label)
+		}
+		_, got, ok := sourceShape(context.Background(), path)
+		if !ok || got == 0 {
+			t.Errorf("%s: could not measure the output", label)
+			continue
+		}
+		t.Logf("%s came out at %.2f Mbps (ceiling %.2f)",
+			label, float64(got)/1e6, float64(want)/1e6)
+		// Whole-file rate, so the audio track and container overhead ride on
+		// top of the video ceiling. A little headroom, not a lot.
+		if limit := want + want/4; got > limit {
+			t.Errorf("%s came out at %.2f Mbps against a ceiling of %.2f.\n\n"+
+				"The 768 KB the app pre-downloads now covers %.1f seconds "+
+				"instead of %.1f, which is what makes a reel stall.",
+				label, float64(got)/1e6, float64(want)/1e6,
+				768*1024*8/float64(got), 768*1024*8/float64(want))
+		}
 	}
 }
