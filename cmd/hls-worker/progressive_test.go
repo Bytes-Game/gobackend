@@ -324,7 +324,7 @@ func TestProgressive_NoTwoRenditionsAreTheSameFile(t *testing.T) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// LEAVING AN ALREADY-LEAN FILE ALONE
+// A LEAN FILE IS HELD AT ITS OWN RATE, NOT SKIPPED AND NOT SQUEEZED
 // ════════════════════════════════════════════════════════════════════════════
 //
 // Re-encoding is lossy, so it has to be worth something. On a file carrying
@@ -332,23 +332,47 @@ func TestProgressive_NoTwoRenditionsAreTheSameFile(t *testing.T) {
 // 853x480 and 2.68 Mbps came out 72% smaller at the same size, and all of that
 // was waste rather than detail.
 //
-// On a file already at 0.7 Mbps the trade inverts: almost nothing left to
-// squeeze, so the generation loss is most of what changes.
+// On a file already at 0.7 Mbps there is almost nothing left to squeeze, and
+// this used to encode nothing at all and serve the upload untouched. That is
+// the behaviour these two tests replace: serving an unexamined file cost more
+// than the generation it saved — the app got no rungs to drop to, and what a
+// phone camera writes can be expensive to decode however small it is.
+//
+// The rule now is one line: aim no higher than what the source already spends.
+// Encode it, hold it there, and let the rungs below it exist.
 
-func TestProgressive_LeavesAnAlreadyLeanFileAlone(t *testing.T) {
+// makeLeanSource writes a clip that is already inside every ceiling.
+//
+// Noise, for the same reason makeSource uses it: a flat picture compresses to
+// far under whatever target it is given, so the fixture would not actually be
+// AT the rate it claims and nothing measured against it would mean anything.
+func makeLeanSource(t *testing.T, dir, name string, w, h int) string {
+	t.Helper()
+	needFFmpeg(t)
+	path := filepath.Join(dir, name)
+	// Comfortably under the lowest rung, so every rung has to clamp.
+	target := itoa(smallestCeiling()/1000*6/10) + "k"
+	out, err := exec.Command("ffmpeg", "-y",
+		"-f", "lavfi", "-i",
+		"color=c=black:s="+itoa(w)+"x"+itoa(h)+
+			":r=30:d=2,noise=alls=80:allf=t+u",
+		"-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+		"-b:v", target, "-maxrate", target, "-bufsize", target,
+		"-c:a", "aac", "-shortest",
+		path,
+	).CombinedOutput()
+	if err != nil {
+		t.Skipf("could not build a lean clip: %v: %s", err, lastLine(string(out)))
+	}
+	return path
+}
+
+func TestProgressive_EncodesALeanFileInsteadOfServingItUntouched(t *testing.T) {
 	needFFmpeg(t)
 	dir := t.TempDir()
-	// A 480p source encoded modestly — the shape of a clip that was already
-	// prepared for streaming by whoever made it.
-	src := filepath.Join(dir, "lean.mp4")
-	if out, err := exec.Command("ffmpeg", "-y",
-		"-f", "lavfi", "-i", "color=c=gray:size=854x480:rate=30:duration=3",
-		"-f", "lavfi", "-i", "sine=frequency=440:duration=3",
-		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", "400k",
-		"-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "64k", "-shortest", src,
-	).CombinedOutput(); err != nil {
-		t.Skipf("could not build the lean clip: %v: %s", err, lastLine(string(out)))
-	}
+	src := makeLeanSource(t, dir, "lean.mp4", 854, 480)
+
 	_, bitrate, ok := sourceShape(context.Background(), src)
 	if !ok || bitrate == 0 {
 		t.Skip("could not measure the clip's bitrate here")
@@ -363,10 +387,66 @@ func TestProgressive_LeavesAnAlreadyLeanFileAlone(t *testing.T) {
 	}
 
 	made := buildProgressiveMP4s(context.Background(), src, dir)
-	if len(made) != 0 {
-		t.Errorf("a source already at %.2f Mbps for its size was re-encoded "+
-			"into %v — that spends a lossy generation to save almost nothing",
-			float64(bitrate)/1e6, made)
+	if len(made) == 0 {
+		t.Fatalf("a lean source at %.2f Mbps produced no renditions. Serving "+
+			"the upload untouched is what this replaced: it leaves the app "+
+			"with nothing to drop to on a weak connection, and hands every "+
+			"viewer a file in whatever format the camera happened to choose.",
+			float64(bitrate)/1e6)
+	}
+	// Every rung clamps to the source's 854 box, and to its rate underneath
+	// every ceiling, so they would all be the same file. One is correct.
+	if len(made) != 1 {
+		t.Errorf("a lean 854-wide source produced %d renditions (%v); every "+
+			"rung clamps to the same size AND the same rate there, so they "+
+			"would be one video stored repeatedly", len(made), made)
+	}
+}
+
+func TestProgressive_ALeanFileKeepsItsBitrate(t *testing.T) {
+	// The point of encoding a lean file is to change its FORMAT, not its
+	// size. Squeezing it to the rung's ceiling would be the lossy generation
+	// the old skip existed to avoid — so the ceiling follows the source down
+	// and the quality target rises to match (preserveCRF).
+	//
+	// Measured on the rate, not on the crf. On noise both crf values saturate
+	// the ceiling, so a bitrate check is the honest thing this fixture can
+	// actually tell apart; the crf is what makes the same rate look like the
+	// source rather than like a second squeeze.
+	needFFmpeg(t)
+	dir := t.TempDir()
+	src := makeLeanSource(t, dir, "lean.mp4", 854, 480)
+
+	_, srcBps, ok := sourceShape(context.Background(), src)
+	if !ok || srcBps == 0 {
+		t.Skip("could not measure the clip's bitrate here")
+	}
+	made := buildProgressiveMP4s(context.Background(), src, dir)
+	out, ok := made["480p"]
+	if !ok {
+		t.Fatalf("no 480p rendition for an 854-wide lean source; got %v", made)
+	}
+	_, outBps, ok := sourceShape(context.Background(), out)
+	if !ok || outBps == 0 {
+		t.Skip("could not measure the rendition's bitrate here")
+	}
+	t.Logf("source %.2f Mbps → 480p %.2f Mbps",
+		float64(srcBps)/1e6, float64(outBps)/1e6)
+
+	if outBps < srcBps/2 {
+		t.Errorf("a lean source at %.2f Mbps came back at %.2f Mbps. The "+
+			"ceiling is supposed to follow the source down, not squeeze it "+
+			"to the rung's own — check the clamp in buildProgressiveMP4s.",
+			float64(srcBps)/1e6, float64(outBps)/1e6)
+	}
+	// Audio is re-encoded at the rung's own rate, so the total can sit a
+	// little above the source. Well above it would mean the clamp is not
+	// binding at all.
+	if outBps > srcBps*135/100 {
+		t.Errorf("a lean source at %.2f Mbps came back at %.2f Mbps. Bits the "+
+			"source never spent cannot be recovered by spending them now; the "+
+			"rung should have been clamped to the source's own rate.",
+			float64(srcBps)/1e6, float64(outBps)/1e6)
 	}
 }
 
