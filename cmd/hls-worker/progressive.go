@@ -83,6 +83,21 @@ import (
 // 1080p is absent: on a phone, full-screen, under ninety seconds, it is not
 // distinguishable from 720p, and device logs showed 1080p decoder sessions
 // stalling for seconds on a mid-range chip.
+// preserveCRF is the quality target for a rung whose ceiling has been pulled
+// down to the source's own rate — see the clamp in buildProgressiveMP4s.
+//
+// Lower means "spend more to stay closer to what you were given", and 18 is
+// the usual point at which an x264 re-encode stops being tellable from its
+// input by eye. It is deliberately far below the ladder's own 22/24: those
+// exist to bring a fat source DOWN, and reusing them on a lean one is the
+// double-squeeze this whole path is built to avoid.
+//
+// In practice the ceiling does most of the work — held at the source's own
+// rate, an encode at this quality target spends right up to it — so this is
+// less "aim for CRF 18" than "do not throw anything away that the ceiling
+// would have paid for".
+const preserveCRF = 18
+
 var progressiveLadder = []progressiveRendition{
 	// Cellular and older phones. Small enough to arrive before somebody
 	// gives up, large enough not to look broken.
@@ -181,24 +196,43 @@ var progressiveLadder = []progressiveRendition{
 // started, not the picture.
 //
 // ════════════════════════════════════════════════════════════════════════════
-// WHEN NOT TO ENCODE AT ALL
+// A LEAN SOURCE IS HELD, NOT SQUEEZED — AND NOT SKIPPED
 // ════════════════════════════════════════════════════════════════════════════
 //
-// Re-encoding is lossy. It is worth it on a file carrying far more bits than
-// its picture needs, because nearly everything it strips out is waste. Run the
-// same pass over a file that is already lean and the trade inverts: there is
-// almost nothing left to strip, so the generation loss is most of what
-// changes. Better to serve the original.
+// Re-encoding is lossy, so a file already carrying no more bits than its
+// picture needs has nothing left to strip: squeezing it to a rung's ceiling
+// spends a generation to arrive back where it started. That much was right,
+// and this used to answer it by encoding nothing at all and serving the
+// upload as it arrived.
 //
-// The line is each rung's OWN ceiling — see maxBps on progressiveRendition —
-// not one number for the whole ladder. A single global threshold was the first
-// attempt and it was incoherent: with the 720p ceiling at 2 Mbps, a 1.8 Mbps
-// source is already where we would put it, and encoding it anyway spent a
-// lossy generation to arrive back at 1.8 Mbps.
+// Serving the upload turned out to be the expensive half of that trade. What
+// comes off a phone is whatever its camera chose — any frame rate, any
+// profile, any structure — and "small enough" is not the same question as
+// "cheap to play". A file can sit well inside a ceiling and still be harder
+// for a mid-range phone to decode than anything this encoder produces. On top
+// of that a skipped video had no rungs at all, so a viewer whose connection
+// dipped had nothing to drop to, and the one file on offer was one nobody
+// here had ever inspected.
 //
-// Keying the skip to the ceiling makes the two rules one rule — "get every
-// video to at most this rate, and do nothing to one that is already there" —
-// so they cannot drift apart when a ceiling is next tuned.
+// So: encode every video, and let a lean one keep its own rate.
+//
+//	ceiling = min(rung ceiling, what the source already spends)
+//
+// Where that clamp bites, the quality target goes up too (preserveCRF), which
+// turns the pass from "squeeze this to the ceiling" into "hold this picture at
+// the size it already is". A 1.6 Mbps upload comes back about 1.6 Mbps.
+//
+// The generation loss that argument was built on is real but small here, and
+// it is paid against a gain: x264 at -preset medium is a better encoder than
+// the fixed-function one in a phone, so the same bitrate buys a bit more
+// picture. Held at the source's own rate, the two roughly cancel.
+//
+// The clamp also settles which rungs are worth making without a second rule.
+// Nothing above what the source already spends can add information back, so
+// two rungs that share a picture size collapse to one for a lean source — the
+// dedup below sees the same box at the same (clamped) ceiling and drops the
+// repeat. A fat source is untouched by any of this and still gets the full
+// ladder at each rung's own ceiling.
 
 type progressiveRendition struct {
 	label       string
@@ -259,26 +293,22 @@ func buildProgressiveMP4s(ctx context.Context, src, outDir string) map[string]st
 	hasAudio := probeHasAudio(src)
 
 	// ════════════════════════════════════════════════════════════════════════
-	// LEAVE A SOURCE THAT IS ALREADY RIGHT COMPLETELY ALONE
+	// HOW LEAN THE SOURCE ALREADY IS
 	// ════════════════════════════════════════════════════════════════════════
 	//
-	// All or nothing, deliberately. Skipping rung by rung looks tidier and is
-	// a trap: a 1280x720 source already at 1.5 Mbps would have the 720p rung
-	// skipped (it is under that ceiling) while the 480p rung still ran, so the
-	// only rendition on offer would be the 480p one — and the app, which picks
-	// the best label present, would serve 480p to everybody on good wifi. A
-	// downgrade, caused by the source being GOOD.
+	// A rung must never aim above this, because bits the source never spent
+	// cannot be recovered by spending them now. Zero means the container did
+	// not declare a bitrate, which is not "zero bits" — it is "unknown", so no
+	// rung gets clamped and every one runs at its own ceiling.
 	//
-	// So when no rung would shrink the picture and the source is already at or
-	// under the ceiling for its size, we produce nothing at all. An empty map
-	// leaves video_variants untouched and the app keeps playing the upload
-	// itself, which in this case is exactly the file we would have made.
+	// The old rule read the same measurement and returned here with nothing
+	// encoded. See the section comment above for why serving the upload
+	// untouched turned out to cost more than the generation it saved.
 	if r, ok := rungForSize(longSide); ok && bitrate > 0 && bitrate <= r.maxBps {
 		log.Printf("progressive: %s is %d-tall-side at %.2f Mbps, already "+
-			"inside the %s ceiling of %.2f Mbps — serving it as it is",
+			"inside the %s ceiling of %.2f Mbps — holding it at its own rate",
 			filepath.Base(src), longSide, float64(bitrate)/1e6,
 			r.label, float64(r.maxBps)/1e6)
-		return made
 	}
 
 	// Renditions already made, so a rung that would repeat one is skipped.
@@ -315,11 +345,34 @@ func buildProgressiveMP4s(ctx context.Context, src, outDir string) map[string]st
 		if longSide < box {
 			box = longSide
 		}
+		// ════════════════════════════════════════════════════════════════════
+		// NEVER AIM ABOVE WHAT THE SOURCE ALREADY SPENDS
+		// ════════════════════════════════════════════════════════════════════
+		//
+		// Encoding a 1.6 Mbps upload with a 3.5 Mbps ceiling does not make it
+		// a 3.5 Mbps video. The detail is not there to find; the encoder just
+		// spends longer describing the same picture. So the ceiling is the
+		// lower of what this rung allows and what the source actually has.
+		//
+		// And where the clamp bites, the quality target rises with it. The
+		// rung's own crf is chosen to squeeze a fat source DOWN to its
+		// ceiling; applied to a source already at that rate it would squeeze
+		// again, which is the generation loss the old skip existed to avoid.
+		// preserveCRF asks the encoder to hold what is there instead, and the
+		// ceiling stops it running long on hard content.
+		if bitrate > 0 && bitrate < r.maxBps {
+			r.maxBps = bitrate
+			r.crf = preserveCRF
+		}
 		// Two rungs that landed on the same box AND the same ceiling would be
 		// the same file under two names — identical bytes, twice the CPU,
 		// twice the storage, and a chooser picking between things that do not
 		// differ. Same box at a different ceiling is a real choice and is
 		// kept.
+		//
+		// Read AFTER the clamp above, so two rungs sharing a picture size
+		// collapse into one whenever the source is leaner than both of their
+		// ceilings — they would otherwise be the same file twice.
 		key := rendition{box: box, maxBps: r.maxBps}
 		if box < r.maxLongSide {
 			// Clamped: this rung is reaching DOWN to a source smaller than
