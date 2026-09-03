@@ -38,19 +38,39 @@ env:
   # of the cache key, so changing either line rebuilds once and then reuses.
   #
   # MODEL SIZE IS THE UPGRADE PATH — not switching to a different program.
-  # base.en is 142MB and transcribes a 30-second clip in a couple of seconds
-  # on these runners. If transcripts are not accurate enough, move UP this
-  # list; nothing else has to change:
+  # Move up or down this list; nothing else has to change. The name goes
+  # straight into the download url below, and into the cache key above it,
+  # so a change re-fetches once and then reuses.
   #
-  #   tiny.en    75MB   fastest, noticeably rougher
-  #   base.en   142MB   what we run now
-  #   small.en  466MB   clearly better, ~3x the time
-  #   medium.en 1.5GB   better still, ~8x the time
+  #   tiny    75MB   fastest, noticeably rougher
+  #   base   142MB   quick, weak on anything but English
+  #   small  466MB   what we run now, ~3x base
+  #   medium 1.5GB   better still, ~8x base
   #
-  # For anything other than English, drop the ".en" (e.g. "small") — the
-  # English-only models ignore the language setting entirely.
+  # A ".en" suffix (base.en, small.en) picks the English-ONLY build of the
+  # same size. Those ignore the -l language setting entirely.
+  #
+  # ══════════════════════════════════════════════════════════════════════
+  # WHY THIS IS NOT base.en ANY MORE
+  # ══════════════════════════════════════════════════════════════════════
+  #
+  # It was, and the worker was already asking for language auto-detection
+  # (-l auto in analyze.go) that an English-only model cannot do. So every
+  # video was heard as though it were English, whatever was actually said.
+  #
+  # Measured over 190 videos: 126 had no audio at all and were correctly
+  # skipped. Every one of the remaining 64 transcribed to SOMETHING — but
+  # mostly one, two or four words. That is not people saying very little;
+  # that is an English listener catching fragments of speech it does not
+  # know. Only 12 of the 190 ever earned a content tag.
+  #
+  # small rather than base, because the point of this change is to find out
+  # what people actually say. Multilingual base is thin enough on Indian
+  # languages that a poor transcript would leave that question open and we
+  # would be doing this again. If ~3x the analysis time turns out to hurt
+  # throughput, `base` is a one-word step back that keeps every language.
   WHISPER_RELEASE: v1.9.3
-  WHISPER_MODEL_NAME: base.en
+  WHISPER_MODEL_NAME: small
 
 jobs:
   drain:

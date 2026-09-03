@@ -494,8 +494,23 @@ func transcribeSpeech(ctx context.Context, src string) (string, bool) {
 	out, err := exec.CommandContext(ctx, bin,
 		"-m", model,
 		"-f", wav,
-		"-nt",    // no timestamps — we want the words, not a subtitle file
-		"-np",    // no progress spam on stderr
+		"-nt", // no timestamps — we want the words, not a subtitle file
+		"-np", // no progress spam on stderr
+		// Work out the language from the audio rather than assuming one.
+		//
+		// This line was here before the model could honour it. The workflow
+		// ran base.en, and an English-only model ignores -l entirely, so
+		// every video was heard as though it were English whatever was
+		// actually said. It showed: of 190 videos, 126 had no audio and were
+		// correctly skipped, and every one of the remaining 64 came back with
+		// something — but usually one, two or four words. Not people saying
+		// little; an English listener catching fragments of speech it does
+		// not know.
+		//
+		// The workflow now installs a multilingual model, so this does what
+		// it says. See WHISPER_MODEL_NAME in .github/workflows/hls-worker.yml
+		// — putting a ".en" model back there switches this off again without
+		// touching a line of Go.
 		"-l", "auto",
 	).Output()
 	if err != nil {
