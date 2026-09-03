@@ -69,3 +69,45 @@ func mustFindMinutesIn(t *testing.T, s, pattern, what string) int {
 	}
 	return n
 }
+
+// The worker asks whisper to work out the language from the audio, and an
+// English-only model cannot do that — it ignores -l and hears everything as
+// English. Those two settings live in different files, so nothing but this
+// test stops them disagreeing.
+//
+// They already did disagree, for as long as speech had been on. Of 190
+// videos, 126 had no audio and were correctly skipped; every one of the
+// remaining 64 transcribed to something, but usually one, two or four words.
+// That is not people saying little, it is an English listener catching
+// fragments of speech it does not know. Only 12 of the 190 ever earned a
+// content tag.
+//
+// Putting a ".en" model back is a legitimate choice — it is more accurate on
+// English and a third of the size. It just has to be a decision, made with
+// the -l line, rather than a default nobody reread.
+func TestHLSWorkerSpeechModelUnderstandsMoreThanEnglish(t *testing.T) {
+	wf, err := os.ReadFile(".github/workflows/hls-worker.yml")
+	if err != nil {
+		t.Fatalf("read workflow: %v", err)
+	}
+	m := regexp.MustCompile(`WHISPER_MODEL_NAME:\s*(\S+)`).FindStringSubmatch(string(wf))
+	if m == nil {
+		t.Fatal("no WHISPER_MODEL_NAME in the workflow; the speech pass has " +
+			"no model to load and will silently switch itself off")
+	}
+	model := m[1]
+
+	analyze, err := os.ReadFile("cmd/hls-worker/analyze.go")
+	if err != nil {
+		t.Fatalf("read analyze.go: %v", err)
+	}
+	asksForAuto := regexp.MustCompile(`"-l",\s*"auto"`).Match(analyze)
+
+	if strings.HasSuffix(model, ".en") && asksForAuto {
+		t.Errorf("the workflow installs %q, which only understands English, "+
+			"while analyze.go asks whisper to detect the language. The model "+
+			"wins that argument: every video is heard as English whatever "+
+			"was said. Pick one — drop the \".en\", or stop passing -l auto "+
+			"and say in the code that speech is English-only.", model)
+	}
+}
