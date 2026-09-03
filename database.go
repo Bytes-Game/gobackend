@@ -1712,7 +1712,22 @@ SELECT c.id, c.creator_id, u.username, u.league,
 	c.created_at,
 	COALESCE(c.category, 'other') AS category,
 	COALESCE(c.emotion_tags, '[]') AS emotion_tags,
-	COALESCE(c.energy_level, 'medium') AS energy_level
+	COALESCE(c.energy_level, 'medium') AS energy_level,
+	-- The encoded versions, and the segmented manifest.
+	--
+	-- Without these two columns every list built on this query hands the
+	-- client the raw upload and nothing else — no rung to pick from, no
+	-- manifest, no way for the app's chooser to do its job. The reels feed
+	-- fills them in separately (populateHLSManifestURLs), so the gap was
+	-- invisible there and total everywhere else: the profile, the arena
+	-- list and the friends list all played the file exactly as it came off
+	-- somebody's camera.
+	--
+	-- 'PENDING' is the worker's claim marker, not a URL. It has to become
+	-- '' here or a client will try to play the word.
+	COALESCE(c.video_variants, '{}'::jsonb)::text AS video_variants,
+	CASE WHEN COALESCE(c.hls_manifest_url, '') = 'PENDING' THEN ''
+	     ELSE COALESCE(c.hls_manifest_url, '') END AS hls_manifest_url
 FROM challenges c
 JOIN users u ON c.creator_id = u.id
 LEFT JOIN (SELECT challenge_id, COUNT(*) AS cnt FROM challenge_likes GROUP BY challenge_id) lc ON lc.challenge_id = c.id
@@ -1731,7 +1746,7 @@ func queryChallenges(query string, args ...interface{}) []Challenge {
 	for rows.Next() {
 		var id, creatorID, views, likes, respCount int
 		var username, league, videoURL, thumbURL, prefix, subject, visibility, status string
-		var categoryStr, energyStr string
+		var categoryStr, energyStr, variantsJSON, manifestURL string
 		var emotionJSON []byte
 		var createdAt time.Time
 
@@ -1739,12 +1754,26 @@ func queryChallenges(query string, args ...interface{}) []Challenge {
 			&videoURL, &thumbURL,
 			&prefix, &subject, &visibility, &status, &views,
 			&likes, &respCount, &createdAt,
-			&categoryStr, &emotionJSON, &energyStr) == nil {
+			&categoryStr, &emotionJSON, &energyStr,
+			&variantsJSON, &manifestURL) == nil {
 
 			var emotions []string
 			json.Unmarshal(emotionJSON, &emotions)
 
+			// Unreadable variants are not a reason to drop the row — the
+			// client falls back to videoUrl, which is what it did for every
+			// row before these columns were selected at all.
+			var variants VideoVariants
+			if variantsJSON != "" && variantsJSON != "{}" {
+				if err := json.Unmarshal([]byte(variantsJSON), &variants); err != nil {
+					log.Printf("queryChallenges: bad video_variants on challenge %d: %v", id, err)
+					variants = nil
+				}
+			}
+
 			result = append(result, Challenge{
+				VideoVariants:  variants,
+				HLSManifestURL: manifestURL,
 				ID:              strconv.Itoa(id),
 				CreatorID:       strconv.Itoa(creatorID),
 				CreatorUsername: username,

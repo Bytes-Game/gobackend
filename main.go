@@ -582,6 +582,10 @@ func main() {
 	// Paginated social-graph lists for any user (logged-in callers only).
 	api.HandleFunc("/users/{id}/followers", authed(GetFollowersHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/users/{id}/following", authed(GetFollowingHandler)).Methods("GET", "OPTIONS")
+	// Everything this person has posted, for their profile grid. Not the
+	// arena list filtered by hand — that hid unanswered posts after a day.
+	// See user_challenges.go.
+	api.HandleFunc("/users/{id}/challenges", authed(GetUserChallengesHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/users/{id}/likes", authed(GetLikedChallengesHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/users/{id}/history", authed(GetWatchHistoryHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/users/{id}/history", authed(DeleteWatchHistoryHandler)).Methods("DELETE", "OPTIONS")
