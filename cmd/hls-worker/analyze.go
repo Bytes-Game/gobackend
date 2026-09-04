@@ -691,6 +691,69 @@ var analysisKeywords = map[string][]string{
 
 	// News and commentary
 	"news": {"news"}, "opinion": {"news"}, "breaking": {"news"},
+
+	// ══════════════════════════════════════════════════════════════════════
+	// FEELINGS AND THE ABSTRACT
+	// ══════════════════════════════════════════════════════════════════════
+	//
+	// Everything above this line names a SUBJECT — food, a gym, a phone. The
+	// list was entirely that shape, and it had no word at all for the
+	// "emotional" category, which is why two videos with clean transcripts
+	// came back tagged only "talking":
+	//
+	//	"If I do forgive you, you're just gonna break my heart all over
+	//	 again and I can't handle that."
+	//	"अर्जुन भविष्य में क्या होने वाला है उसका किसी को पता नहीं"
+	//
+	// Both obviously about something. Neither about a THING.
+	//
+	// Some of these also name a mood. emotionsFromTags reads any tag that is
+	// an emotion label and feeds it to the ranker's mood matching, the way
+	// "funny" and "scary" already did — so a word about heartbreak says both
+	// what the video is about and how it feels, in one entry.
+	//
+	// Deliberately NOT here: "life", "truth", "promise", "know". They carry
+	// no subject on their own, appear in every other sentence, and the whole
+	// point of word matching is that a match should mean something.
+
+	// Emotional — hurt, love, loss, repair
+	"heartbreak": {"emotional", "sad"}, "heartbroken": {"emotional", "sad"},
+	"break my heart": {"emotional", "sad"}, "broke my heart": {"emotional", "sad"},
+	"forgive": {"emotional"}, "forgiveness": {"emotional"},
+	"betrayed": {"emotional"}, "betrayal": {"emotional"},
+	"lonely": {"emotional", "sad"}, "alone": {"emotional"},
+	"crying": {"emotional", "sad"}, "tears": {"emotional", "sad"},
+	"breakup": {"emotional", "sad"}, "break up": {"emotional", "sad"},
+	"miss you": {"emotional", "nostalgic"}, "missing you": {"emotional", "nostalgic"},
+	"love you": {"emotional", "romantic"}, "in love": {"emotional", "romantic"},
+	"goodbye": {"emotional", "sad"}, "regret": {"emotional"},
+	"grief": {"emotional", "sad"}, "healing": {"emotional"},
+	"closure": {"emotional"}, "relationship": {"emotional"},
+	"apology": {"emotional"}, "trust": {"emotional"},
+	"दिल": {"emotional"}, "प्यार": {"emotional", "romantic"},
+	"मोहब्बत": {"emotional", "romantic"}, "दर्द": {"emotional"},
+	"आँसू": {"emotional", "sad"}, "माफ़": {"emotional"},
+	"अकेला": {"emotional", "sad"}, "रिश्ता": {"emotional"},
+	"जुदाई": {"emotional", "sad"},
+
+	// Motivation — the abstract half, which the list had almost none of
+	"future": {"motivation"}, "destiny": {"motivation"}, "fate": {"motivation"},
+	"purpose": {"motivation"}, "journey": {"motivation"},
+	"struggle": {"motivation"}, "failure": {"motivation"},
+	"courage": {"motivation", "empowering"}, "patience": {"motivation"},
+	"dream": {"motivation"}, "dreams": {"motivation"},
+	"goals": {"motivation"}, "comeback": {"motivation"},
+	"confidence": {"motivation", "empowering"}, "self love": {"motivation", "empowering"},
+	"keep going": {"motivation", "inspiring"}, "growth": {"motivation"},
+	"भविष्य": {"motivation"}, "ज़िंदगी": {"motivation"},
+	"किस्मत": {"motivation"}, "हिम्मत": {"motivation", "empowering"},
+	"कोशिश": {"motivation"}, "सपना": {"motivation"}, "सपने": {"motivation"},
+	"संघर्ष": {"motivation"},
+
+	// Story — a thing that happened, rather than a thing
+	"experience": {"story"}, "true story": {"story"},
+	"childhood": {"story", "nostalgic"}, "growing up": {"story"},
+	"बचपन": {"story", "nostalgic"}, "यादें": {"story", "nostalgic"},
 }
 
 // tagsFromAnalysis turns everything measured into tags.
