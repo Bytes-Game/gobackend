@@ -102,6 +102,34 @@ func SendChallengeAcceptedNotification(responderUsername, challengerUsername, ch
 	deliverNotification(challengerUsername, notification)
 }
 
+// SendBattleStartedNotification tells the RESPONDER their answer landed and
+// they are now in a battle.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY BOTH SIDES GET TOLD
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Only the challenger was told, which reads as an odd asymmetry once you look
+// at what actually happened: two people are now in a contest that people will
+// vote on, and one of them found out.
+//
+// It matters more than politeness. Accepting is the moment a short stops
+// being one person's video and becomes a thing with an opponent, a vote and a
+// result. The person who did the accepting has the most reason to come back
+// and watch it play out, and until now nothing told them it had started.
+//
+// The challenge's own title is in the message on purpose. A responder may
+// have answered several, and "you are in a battle" without saying which is a
+// notification that cannot be acted on.
+func SendBattleStartedNotification(responderUsername, challengerUsername, challengeTitle string) {
+	notification := Notification{
+		Type:      "battle_started",
+		Message:   fmt.Sprintf("You are in a battle with %s: \"%s\"", challengerUsername, challengeTitle),
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+	deliverNotification(responderUsername, notification)
+}
+
 // SendVoteNotification notifies the response owner that someone voted for them.
 func SendVoteNotification(payload ChallengeVotePayload) {
 	// Get the response to find the owner
