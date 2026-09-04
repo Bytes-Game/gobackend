@@ -266,9 +266,20 @@ func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		go recordVideoDimensions("response", response.ID, dims)
 	}
 
-	// Notify the challenger that someone accepted.
+	// Tell BOTH sides a battle just started.
+	//
+	// The challenger has always been told. The responder was not, which is
+	// the odd half: they are the one who just entered a contest that people
+	// will vote on, and nothing said so. See SendBattleStartedNotification.
+	//
+	// Both in the background, and neither can fail the upload. A response
+	// that was accepted, stored and queued for transcoding is accepted even
+	// if a websocket write fails — refusing it at this point would throw
+	// away somebody's video over a message.
 	responder, _ := GetUserByID(payload.ResponderID)
-	go SendChallengeAcceptedNotification(responder.Username, challenge.CreatorUsername, challenge.Prefix+" "+challenge.Subject)
+	title := challenge.Prefix + " " + challenge.Subject
+	go SendChallengeAcceptedNotification(responder.Username, challenge.CreatorUsername, title)
+	go SendBattleStartedNotification(responder.Username, challenge.CreatorUsername, title)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
