@@ -20,7 +20,14 @@ import (
 // inequality so an innocuous-looking edit to one number can't silently
 // reintroduce the overshoot.
 func TestHLSWorkerTimeBudgetsFitInsideJobTimeout(t *testing.T) {
-	const setupAllowanceMin = 2 // checkout + setup-go + apt install ffmpeg
+	// Setup has to cover a whisper CACHE MISS, not just apt.
+	//
+	// The cache key holds the model name, so changing the model rebuilds
+	// whisper.cpp and re-downloads the model on the very next run. Measured
+	// at 2m09s for the 466MB small model; medium is 1.5GB. That build was
+	// never counted here, which left a cache-miss run about a minute from
+	// the kill switch with nothing in the repo saying so.
+	const setupAllowanceMin = 5 // checkout + setup-go + apt + a whisper rebuild
 
 	raw, err := os.ReadFile(".github/workflows/hls-worker.yml")
 	if err != nil {

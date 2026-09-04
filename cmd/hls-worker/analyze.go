@@ -78,6 +78,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // videoAnalysis is what one video's inspection produced. Every field is
@@ -110,7 +111,17 @@ type videoAnalysis struct {
 // filter or a whisper run on a pathological file must never hold a worker
 // slot open, because the queue behind it is the upload path for every
 // creator on the app.
-const analyzeTimeout = 3 * time.Minute
+//
+// Six rather than three, because the speech model got bigger. Measured on a
+// real job with the `small` model, all three passes together took 47-56
+// seconds on a short clip; `medium` is roughly 2.5x that model, and a reel
+// can run to 60 seconds. Three minutes left no room for the worst of those,
+// and running out here is silent — analyzeVideo never fails, so a timeout
+// just loses the transcript with nothing saying why.
+//
+// It has to stay under the worker's -job-timeout, which the workflow moved
+// to 10m for the same reason. See the budget sum in hls-worker.yml.
+const analyzeTimeout = 6 * time.Minute
 
 // analyzeVideo inspects a local file and returns everything it could work
 // out. It never returns an error: a failed pass is a missing field, not a
@@ -415,23 +426,92 @@ func readScreenText(ctx context.Context, src string, dur float64) (string, bool)
 	seen := make(map[string]bool)
 	var words []string
 	for _, f := range frames {
-		out, err := exec.CommandContext(ctx, "tesseract", f, "stdout", "--psm", "11").Output()
+		// tsv rather than plain text, for the confidence column. See
+		// screenTextMinConfidence.
+		out, err := exec.CommandContext(ctx, "tesseract", f, "stdout",
+			"--psm", "11", "tsv").Output()
 		if err != nil {
 			continue
 		}
-		// The same caption sits on many frames, so dedupe by line. Without
+		// The same caption sits on many frames, so dedupe by word. Without
 		// this the text is one phrase repeated six times, which skews every
 		// keyword count that reads it.
-		for _, line := range strings.Split(string(out), "\n") {
-			line = strings.TrimSpace(line)
-			if len(line) < 3 || seen[strings.ToLower(line)] {
+		for _, w := range confidentWords(string(out)) {
+			key := strings.ToLower(w)
+			if seen[key] {
 				continue
 			}
-			seen[strings.ToLower(line)] = true
-			words = append(words, line)
+			seen[key] = true
+			words = append(words, w)
 		}
 	}
 	return strings.TrimSpace(strings.Join(words, " ")), true
+}
+
+// screenTextMinConfidence is how sure tesseract has to be about a word before
+// we keep it.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY THIS EXISTS
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Without it this pass produced almost pure noise. Real stored readings:
+//
+//	"—_ Vale 7 SCs Pda gy? Ww | C 0 — "A My ¥ ROMAN waN Sf" THE NEV Mima"
+//	"Rees 43 "s malas — — < " \. f = & p« Bay SSS 4 "~"
+//
+// -psm 11 is "find as much text as anywhere in this image", which is right
+// for a caption that could be anywhere on the frame and also means grain,
+// hair and foliage get read as letters. Plain text output gives no way to
+// tell those from a real caption: both arrive as words.
+//
+// tsv output carries a per-word confidence, and the two populations separate
+// cleanly. Measured on rendered frames here:
+//
+//	a readable caption              88-96
+//	noise read off a grainy frame   mostly under 50, highest seen 62
+//
+// 70 sits in that gap with room on both sides. 60 was the first choice and
+// was wrong: it is level with the noise, so the worst of it still came
+// through. It is a threshold on the OCR's own certainty, not on what the
+// words say, so it cannot decide that some real caption is not interesting
+// enough.
+//
+// The frames are still scaled to 640 first, which is worth keeping and was
+// worth checking: the same caption at 1080 read as nothing at all above this
+// threshold, and at 640 read perfectly. Downscaling averages the grain away
+// faster than it costs letter detail.
+const screenTextMinConfidence = 70
+
+// confidentWords pulls the words tesseract was sure about out of its tsv.
+//
+// The format is one row per word: 12 tab-separated columns, confidence in
+// column 11 and the text in column 12, with a header row and rows for page,
+// block, paragraph and line structure that carry no text.
+func confidentWords(tsv string) []string {
+	var out []string
+	for i, line := range strings.Split(tsv, "\n") {
+		if i == 0 {
+			continue // header
+		}
+		cols := strings.Split(line, "\t")
+		if len(cols) < 12 {
+			continue
+		}
+		word := strings.TrimSpace(cols[11])
+		if len(word) < 3 {
+			// Under three characters is not worth the risk: single letters
+			// and pairs are what grain most often reads as, and no keyword
+			// in the vocabulary is that short.
+			continue
+		}
+		conf, err := strconv.ParseFloat(strings.TrimSpace(cols[10]), 64)
+		if err != nil || conf < screenTextMinConfidence {
+			continue
+		}
+		out = append(out, word)
+	}
+	return out
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -536,17 +616,81 @@ func transcribeSpeech(ctx context.Context, src string) (string, bool) {
 // — it is picking out the handful of words that reliably mean something about
 // what a video is, in the vocabulary this app already uses.
 var analysisKeywords = map[string][]string{
-	"recipe": {"food"}, "cook": {"food"}, "kitchen": {"food"}, "eat": {"food"},
-	"workout": {"sports"}, "gym": {"sports"}, "reps": {"sports"}, "goal": {"sports"},
-	"dance": {"dance"}, "choreo": {"dance"}, "beat": {"music"},
-	"sing": {"music"}, "song": {"music"}, "lyrics": {"music"},
+	// Food
+	"recipe": {"food"}, "cook": {"food"}, "cooking": {"food"}, "kitchen": {"food"},
+	"eat": {"food"}, "eating": {"food"}, "food": {"food"}, "dish": {"food"},
+	"chef": {"food"}, "bake": {"food"}, "baking": {"food"}, "tasty": {"food"},
+	"delicious": {"food"}, "breakfast": {"food"}, "lunch": {"food"},
+	"dinner recipe": {"food"}, "snack": {"food"}, "curry": {"food"},
+	"masala": {"food"}, "paratha": {"food"}, "biryani": {"food"},
+	"khana": {"food"}, "खाना": {"food"}, "रेसिपी": {"food"}, "रसोई": {"food"},
+
+	// Sports and fitness
+	"workout": {"sports"}, "gym": {"sports"}, "reps": {"sports"},
+	"fitness": {"sports"}, "exercise": {"sports"}, "training": {"sports"},
+	"cricket": {"sports"}, "football": {"sports"}, "match": {"sports"},
+	"pushups": {"sports"}, "squats": {"sports"}, "athlete": {"sports"},
+	"क्रिकेट": {"sports"}, "जिम": {"sports"}, "खेल": {"sports"},
+
+	// Dance
+	"dance": {"dance"}, "dancing": {"dance"}, "choreo": {"dance"},
+	"choreography": {"dance"}, "steps": {"dance"}, "moves": {"dance"},
+	"नाच": {"dance"}, "डांस": {"dance"},
+
+	// Music
+	"sing": {"music"}, "singing": {"music"}, "song": {"music"},
+	"lyrics": {"music"}, "beat": {"music"}, "rap": {"music"},
+	"guitar": {"music"}, "piano": {"music"}, "melody": {"music"},
+	"गाना": {"music"}, "संगीत": {"music"},
+
+	// Education
 	"tutorial": {"education"}, "how to": {"education"}, "step 1": {"education"},
-	"learn": {"education"}, "tip": {"education"},
+	"learn": {"education"}, "learning": {"education"}, "teach": {"education"},
+	"lesson": {"education"}, "explain": {"education"}, "guide": {"education"},
+	"सीखो": {"education"}, "पढ़ाई": {"education"},
+
+	// Motivation
+	"motivation": {"motivation"}, "discipline": {"motivation"},
+	"hustle": {"motivation"}, "grind": {"motivation"}, "success": {"motivation"},
+	"mindset": {"motivation"}, "never give up": {"motivation"},
+	"doubt you": {"motivation"}, "advice": {"motivation"}, "believe": {"motivation"},
+	"मेहनत": {"motivation"}, "सफलता": {"motivation"},
+
+	// Comedy and pranks
 	"prank": {"prank"}, "reaction": {"comedy"}, "funny": {"comedy", "funny"},
-	"code": {"tech"}, "app": {"tech"}, "phone": {"tech"},
-	"outfit": {"fashion"}, "makeup": {"fashion"},
-	"scary": {"horror", "scary"}, "haunted": {"horror"},
-	"story": {"story"}, "day in my life": {"story"},
+	"joke": {"comedy"}, "comedy": {"comedy"}, "hilarious": {"comedy"},
+	"मज़ाक": {"comedy"}, "हंसी": {"comedy"},
+
+	// Tech
+	"code": {"tech"}, "coding": {"tech"}, "app": {"tech"}, "phone": {"tech"},
+	"laptop": {"tech"}, "gadget": {"tech"}, "software": {"tech"},
+	"मोबाइल": {"tech"},
+
+	// Gaming
+	"gameplay": {"gaming"}, "gaming": {"gaming"}, "esports": {"gaming"},
+	"noob": {"gaming"}, "respawn": {"gaming"},
+
+	// Art
+	"drawing": {"art"}, "painting": {"art"}, "sketch": {"art"},
+	"artwork": {"art"}, "craft": {"art"},
+
+	// Fashion
+	"outfit": {"fashion"}, "makeup": {"fashion"}, "style": {"fashion"},
+	"fashion": {"fashion"}, "hairstyle": {"fashion"},
+	"कपड़े": {"fashion"},
+
+	// Horror
+	"scary": {"horror", "scary"}, "haunted": {"horror"}, "ghost": {"horror"},
+	"creepy": {"horror"}, "horror": {"horror"},
+	"भूत": {"horror"},
+
+	// Story and lifestyle
+	"story": {"story"}, "storytime": {"story"}, "day in my life": {"lifestyle"},
+	"vlog": {"story"}, "routine": {"lifestyle"}, "morning routine": {"lifestyle"},
+	"कहानी": {"story"},
+
+	// News and commentary
+	"news": {"news"}, "opinion": {"news"}, "breaking": {"news"},
 }
 
 // tagsFromAnalysis turns everything measured into tags.
@@ -565,10 +709,12 @@ func tagsFromAnalysis(a videoAnalysis) []string {
 		}
 	}
 
-	text := strings.ToLower(a.ScreenText + " " + a.Speech)
+	text := wordSearchable(a.ScreenText + " " + a.Speech)
 	if strings.TrimSpace(text) != "" {
 		for kw, tags := range analysisKeywords {
-			if strings.Contains(text, kw) {
+			// wordSearchable pads both ends, so the keyword arrives already
+			// bounded by spaces and must not be padded again.
+			if strings.Contains(text, wordSearchable(kw)) {
 				for _, t := range tags {
 					add(t)
 				}
@@ -596,6 +742,51 @@ func tagsFromAnalysis(a videoAnalysis) []string {
 
 	sort.Strings(out) // stable order so the stored value does not churn
 	return out
+}
+
+// wordSearchable lowercases text and reduces everything that is not a letter
+// or a digit to a single space, padded at both ends.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY MATCHING ON WORDS AND NOT ON SUBSTRINGS
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The match used to be strings.Contains over the raw text, and the keyword
+// list was small enough to hide what that costs. It does not survive a bigger
+// list, and it was already wrong: "eat" means food and "beat" means music, so
+// every video with a beat in it was also tagged food. "rap" is inside "wrap",
+// "art" is inside "start" and "heart", "news" is inside "newspaper" — the
+// longer the list, the more of these there are, and each one is a video filed
+// under a subject nobody mentioned.
+//
+// Padding both the text and the keyword with spaces makes " eat " miss
+// "beat" and still match "eat" at either end of a sentence. Multi-word
+// keywords like "how to" keep working, because the separator is a space on
+// both sides.
+//
+// unicode.IsLetter rather than a-z, so Devanagari survives. Whisper writes
+// Hindi in its own script and the keyword list has Hindi words in it; a
+// filter that only knew ASCII would strip them out of the text and never
+// match one.
+func wordSearchable(s string) string {
+	var b strings.Builder
+	b.WriteByte(' ')
+	lastSpace := true
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+			lastSpace = false
+			continue
+		}
+		if !lastSpace {
+			b.WriteByte(' ')
+			lastSpace = true
+		}
+	}
+	if !lastSpace {
+		b.WriteByte(' ')
+	}
+	return b.String()
 }
 
 func hasPass(a videoAnalysis, name string) bool {

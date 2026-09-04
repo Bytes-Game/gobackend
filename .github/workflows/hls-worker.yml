@@ -44,8 +44,8 @@ env:
   #
   #   tiny    75MB   fastest, noticeably rougher
   #   base   142MB   quick, weak on anything but English
-  #   small  466MB   what we run now, ~3x base
-  #   medium 1.5GB   better still, ~8x base
+  #   small  466MB   ~3x base
+  #   medium 1.5GB   what we run now, ~8x base
   #
   # A ".en" suffix (base.en, small.en) picks the English-ONLY build of the
   # same size. Those ignore the -l language setting entirely.
@@ -64,18 +64,32 @@ env:
   # that is an English listener catching fragments of speech it does not
   # know. Only 12 of the 190 ever earned a content tag.
   #
-  # small rather than base, because the point of this change is to find out
-  # what people actually say. Multilingual base is thin enough on Indian
-  # languages that a poor transcript would leave that question open and we
-  # would be doing this again. If ~3x the analysis time turns out to hurt
-  # throughput, `base` is a one-word step back that keeps every language.
+  # ══════════════════════════════════════════════════════════════════════
+  # AND WHY IT IS NOW medium RATHER THAN small
+  # ══════════════════════════════════════════════════════════════════════
+  #
+  # small answered the question it was picked for. English came back clean:
+  #
+  #   "Hey, let me give you a little piece of advice, y'all. No matter what
+  #    you do in life, they're all gonna doubt you"
+  #
+  # Hindi came back detected but rough — the model wrote Devanagari, caught
+  # real words, and mangled the rest into phonetic spellings of English
+  # ("negative energies" as निगर्टेप आनर्जीज़), then repeated the whole
+  # sentence twice, which is what these models do on short or noisy audio.
+  #
+  # Rough enough that matching keywords against it would be guesswork. So
+  # the model goes up again. Bigger models are markedly better at Indian
+  # languages, and that is the half of the catalogue small could not read.
+  #
+  # `small` is a one-word step back if this costs too much throughput.
   WHISPER_RELEASE: v1.9.3
-  WHISPER_MODEL_NAME: small
+  WHISPER_MODEL_NAME: medium
 
 jobs:
   drain:
     runs-on: ubuntu-latest
-    timeout-minutes: 24
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -213,7 +227,14 @@ jobs:
       #
       # The two budgets must satisfy:
       #   max-runtime + job-timeout + setup  <  timeout-minutes
-      #   12m         + 8m          + ~2m    =  22m  <  24m    ✓
+      #   12m         + 10m         + ~5m    =  27m  <  30m    ✓
+      #
+      # "setup" has to cover a whisper CACHE MISS, not just apt. The cache
+      # key holds the model name, so changing the model rebuilds whisper.cpp
+      # and re-downloads the model on the next run: measured at 2m09s for
+      # the 466MB small model, and medium is 1.5GB. That build was never in
+      # this sum, which left a cache-miss run roughly a minute from the kill
+      # switch without anything saying so.
       #
       # -max-runtime alone was NOT sufficient: it is only consulted
       # BEFORE claiming, so a job claimed at 19m59s still ran to
@@ -237,6 +258,6 @@ jobs:
           R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
         run: |
           go build -o /tmp/hls-worker ./cmd/hls-worker
-          /tmp/hls-worker -drain -max-runtime 12m -job-timeout 8m &
-          /tmp/hls-worker -drain -max-runtime 12m -job-timeout 8m &
+          /tmp/hls-worker -drain -max-runtime 12m -job-timeout 10m &
+          /tmp/hls-worker -drain -max-runtime 12m -job-timeout 10m &
           wait
