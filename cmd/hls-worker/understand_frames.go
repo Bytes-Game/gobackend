@@ -127,22 +127,22 @@ Answer with one line of JSON and nothing else:
 // Same second-return contract as every other pass: it says whether the model
 // RAN, so "looked and could not tell" stays distinguishable from "there was
 // nothing here to look with".
-func understandContentFromFrames(ctx context.Context, src string, dur float64) ([]string, bool) {
+func understandContentFromFrames(ctx context.Context, src string, dur float64) (understood, bool) {
 	bin := strings.TrimSpace(os.Getenv(framesBinEnv))
 	model := strings.TrimSpace(os.Getenv(understandModelEnv))
 	proj := strings.TrimSpace(os.Getenv(framesProjectorEnv))
 	if bin == "" || model == "" || proj == "" {
-		return nil, false
+		return understood{}, false
 	}
 	if _, err := exec.LookPath(bin); err != nil {
 		log.Printf("analyze: %s is set to %q but that will not run: %v",
 			framesBinEnv, bin, err)
-		return nil, false
+		return understood{}, false
 	}
 
 	frames, cleanup, err := extractFrames(ctx, src, dur)
 	if err != nil || len(frames) == 0 {
-		return nil, false
+		return understood{}, false
 	}
 	defer cleanup()
 
@@ -165,9 +165,10 @@ func understandContentFromFrames(ctx context.Context, src string, dur float64) (
 	out, err := exec.CommandContext(ctx, bin, args...).Output()
 	if err != nil {
 		log.Printf("analyze: frames pass failed: %v", err)
-		return nil, false
+		return understood{}, false
 	}
-	return understoodTags(string(out)), true
+	answer := string(out)
+	return understood{Tags: understoodTags(answer), Topics: understoodTopics(answer)}, true
 }
 
 // understandFramesContextTokens is bigger than the reading pass's bound

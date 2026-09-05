@@ -100,6 +100,13 @@ type videoAnalysis struct {
 	// the backend stores creator tags in.
 	AutoTags []string `json:"autoTags,omitempty"`
 
+	// What the video is about, in the model's own words — "hanuman chalisa",
+	// "street food", "long distance relationship". Free-form on purpose and
+	// separate from AutoTags on purpose: nothing ranks on these, so they can
+	// describe a video far more precisely than eighteen categories ever
+	// could. See the topics note in understand.go.
+	Topics []string `json:"topics,omitempty"`
+
 	// Which passes actually ran, so the backend can tell "quiet video" from
 	// "we never listened".
 	Passes []string `json:"passes,omitempty"`
@@ -207,11 +214,15 @@ func analyzeVideo(ctx context.Context, src string) videoAnalysis {
 	// how often it cuts, whether anyone is talking — and are just as true
 	// whoever read the words.
 	understandCtx, cancelUnderstand := context.WithTimeout(ctx, understandBudget)
-	tags, ranUnderstand := understandContent(understandCtx, a)
+	read, ranUnderstand := understandContent(understandCtx, a)
 	cancelUnderstand()
 	if ranUnderstand {
 		a.Passes = append(a.Passes, "understand")
-		a.AutoTags = dedupeSorted(append(tags, shapeTags(a)...))
+		a.AutoTags = dedupeSorted(append(read.Tags, shapeTags(a)...))
+		// Topics are stored as they came, not merged into AutoTags. Nothing
+		// ranks on them and that is the point — see the topics note in
+		// understand.go.
+		a.Topics = read.Topics
 	}
 
 	// And the other half: for a video that said nothing, LOOK at it.
@@ -227,13 +238,16 @@ func analyzeVideo(ctx context.Context, src string) videoAnalysis {
 	// here having spent almost nothing: with no audio track the speech pass
 	// returns immediately, and the reading pass declines before starting a
 	// model. So the pass that needs the time is the one that gets it.
-	if len(tags) == 0 {
+	if len(read.Tags) == 0 {
 		framesCtx, cancelFrames := context.WithTimeout(ctx, framesBudget)
 		seen, ranFrames := understandContentFromFrames(framesCtx, src, dur)
 		cancelFrames()
 		if ranFrames {
 			a.Passes = append(a.Passes, "frames")
-			a.AutoTags = dedupeSorted(append(seen, shapeTags(a)...))
+			a.AutoTags = dedupeSorted(append(seen.Tags, shapeTags(a)...))
+			if len(seen.Topics) > 0 {
+				a.Topics = seen.Topics
+			}
 		}
 	}
 
