@@ -316,7 +316,26 @@ jobs:
             -DLLAMA_BUILD_TESTS=OFF
           # Only the two binaries this worker actually runs, rather than the
           # couple of dozen tools the project ships.
-          cmake --build /tmp/llama-build --config Release -j \
+          #
+          # -j 4, WITH A NUMBER. A bare -j means unlimited parallel compiles,
+          # and llama.cpp has a few hundred large C++ files — one per model
+          # architecture — that each want on the order of a gigabyte to
+          # compile. Unlimited jobs on a 16GB runner exhausts it, and the
+          # runner is killed mid-build:
+          #
+          #   gmake[1]: *** [tools/cli/.../llama-cli.dir/rule] Terminated
+          #   Process completed with exit code 143
+          #   The runner has received a shutdown signal
+          #
+          # 143 is SIGTERM, and the message reads like GitHub cancelled the
+          # job rather than like the build asked for too much — so it sends
+          # you looking in the wrong place. Four matches the runner's cores
+          # and is what this build was actually measured with.
+          #
+          # (The whisper build above still passes a bare -j. It has been fine
+          # for months because it is a fraction of the size, but it is the
+          # same shape of risk if it ever grows.)
+          cmake --build /tmp/llama-build --config Release -j 4 \
             --target llama-cli llama-mtmd-cli
           mkdir -p ~/llama
           cp /tmp/llama-build/bin/llama-cli      ~/llama/llama-cli

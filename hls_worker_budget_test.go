@@ -182,3 +182,38 @@ func TestHLSWorkerBuildsTheBinariesItThenRuns(t *testing.T) {
 		}
 	}
 }
+
+// TestHLSWorkerBoundsTheLlamaBuildParallelism guards the second way this build
+// took the worker down.
+//
+// A bare `-j` means unlimited parallel compiles. llama.cpp has a few hundred
+// large C++ files — one per model architecture — and each wants on the order
+// of a gigabyte to compile, so unlimited jobs exhaust a 16GB runner and it is
+// killed mid-build:
+//
+//	gmake[1]: *** [tools/cli/.../llama-cli.dir/rule] Terminated
+//	Process completed with exit code 143
+//	The runner has received a shutdown signal
+//
+// Exit 143 is SIGTERM and that message reads like GitHub cancelled the job,
+// not like the build asked for too much — so the error points away from the
+// cause. The local build this was measured on used -j4 and never saw it; the
+// workflow was written with a bare -j and failed on the first real run.
+func TestHLSWorkerBoundsTheLlamaBuildParallelism(t *testing.T) {
+	raw, err := os.ReadFile(".github/workflows/hls-worker.yml")
+	if err != nil {
+		t.Fatalf("read workflow: %v", err)
+	}
+	// The llama build line specifically. Whisper's is a fraction of the size
+	// and has been fine unbounded for months.
+	m := regexp.MustCompile(`cmake --build /tmp/llama-build[^\n]*`).FindString(string(raw))
+	if m == "" {
+		t.Fatal("could not find the llama.cpp build command in the workflow")
+	}
+	if !regexp.MustCompile(`-j\s+\d+`).MatchString(m) {
+		t.Errorf("the llama.cpp build does not bound its parallelism:\n  %s\n\n"+
+			"A bare -j is unlimited, which exhausts the runner and gets the "+
+			"job killed with exit 143 — a message that looks like a "+
+			"cancellation rather than a build problem.", strings.TrimSpace(m))
+	}
+}
