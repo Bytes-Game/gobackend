@@ -152,6 +152,78 @@ var understandEmotions = []string{
 	"wholesome", "suspenseful", "empowering",
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// TOPICS: SAYING WHAT A VIDEO IS ABOUT IN ITS OWN WORDS
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Eighteen categories cannot describe a video. A clip about somebody chanting
+// the Hanuman Chalisa when a ghost frightens them is spiritual, and devotional,
+// and paranormal, and a bit comic — and the only home the category list offers
+// it is "comedy" or "other". That is not the model failing; that is eighteen
+// boxes being asked to hold everything.
+//
+// So the model also writes down what the video is actually about, in whatever
+// words fit. No list to choose from, no ceiling on the vocabulary: "hanuman
+// chalisa", "ghost", "temple", "street food", "breakup", "exam results".
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY THESE ARE NOT JUST MORE CATEGORIES
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Because a category is not a label here — it is a slot in every user's taste
+// profile. ContentCategories is what somebody picks at signup and what
+// CategoryAffinity learns a weight for, one number per category per user. The
+// ranker gets better as each of those numbers sees more videos.
+//
+// Split the same catalogue across hundreds of categories and every one of them
+// holds almost nothing. With 114 videos and 500 categories the average category
+// has a fifth of a video in it, nobody can pick 10 meaningful interests from a
+// list that long, and every affinity number is learned from too little to mean
+// anything. More categories would make the feed WORSE, and it would do it
+// quietly.
+//
+// Topics have no such cost because nothing scores on them. They describe, and
+// later they can drive search and "more like this" — where a big vocabulary is
+// exactly what you want. So the ranking spine stays short and the description
+// gets as long as it likes.
+//
+// Nothing reads them yet. That is deliberate: describe first, and decide what
+// to do with the description once there is a corpus of it to look at.
+
+// understandMaxTopics caps how many one video may carry.
+//
+// Not a limit on the vocabulary — a limit per video. A model asked for
+// "everything it can think of" starts listing what is in shot rather than what
+// the video is about, and six is comfortably enough to separate a devotional
+// ghost clip from a cooking one.
+const understandMaxTopics = 6
+
+// understandTopicMaxLen bounds one topic, in runes. Long enough for "hanuman
+// chalisa" or "long distance relationship", short enough that a model writing
+// a sentence into the field is trimmed rather than stored.
+const understandTopicMaxLen = 40
+
+// understandTopicExamples steer the model's vocabulary WITHOUT constraining
+// it. They are examples, not a list to choose from — the point of topics is
+// that anything can be said. They exist because an unguided model drifts
+// between "food", "cooking", "recipe" and "making dinner" for the same idea,
+// and a few concrete examples pull it toward the shorter, more searchable
+// form. Indian subjects are over-represented on purpose: that is what this
+// catalogue is full of, and it is where a generic model needs the most help.
+var understandTopicExamples = []string{
+	"hanuman chalisa", "temple", "prayer", "festival", "mythology",
+	"ghost", "paranormal", "horoscope",
+	"street food", "recipe", "chai", "restaurant review",
+	"cricket", "gym workout", "football", "yoga",
+	"breakup", "long distance relationship", "friendship", "family",
+	"exam results", "job interview", "college life", "money advice",
+	"skincare", "haircut", "outfit", "wedding",
+	"stand up comedy", "roast", "dance cover", "singing",
+	"guitar", "rap", "bollywood", "film scene",
+	"phone review", "coding", "car", "bike",
+	"street dog", "cat", "travel vlog", "village life",
+}
+
 // understandPrompt is the whole instruction. Every paragraph in it is there
 // because of something that went wrong without it — see the notes on
 // understandCategories, and the bracket rule below.
@@ -163,14 +235,20 @@ CATEGORIES — pick one, or at most two if the video genuinely spans both:
 FEELINGS — pick up to two, or none:
 %s
 
+TOPICS — up to %d short phrases saying what the video is actually about.
+Unlike the categories, these are NOT a list to choose from. Write whatever
+fits, in two or three words each. Be specific: name the thing, the practice,
+the place, the situation. For example: %s.
+
 How to judge:
 - The transcript may be in any language and WILL contain transcription mistakes. Judge what the speaker means, not how words are spelled.
-- Text in brackets like (music playing), (dramatic music), (door squeaking) is the transcriber describing SOUND, not somebody speaking. A transcript that is only bracketed sounds means nobody said anything: answer "other".
-- A few words, or words with no subject, means you cannot tell. Answer "other".
-- "other" is a correct and useful answer. A wrong category is worse than "other", because the app will show this video to people who asked for something else.
+- Text in brackets like (music playing), (dramatic music), (door squeaking) is the transcriber describing SOUND, not somebody speaking. A transcript that is only bracketed sounds means nobody said anything: answer "other" with no topics.
+- A few words, or words with no subject, means you cannot tell. Answer "other" with no topics.
+- "other" is a correct and useful answer for the CATEGORY. A wrong category is worse than "other", because the app will show this video to people who asked for something else. Topics are different: nothing is filed by them, so name anything the video is genuinely about.
+- Write topics in English even when the video is in another language, so the same subject reads the same way across the app.
 
 Answer with one line of JSON and nothing else:
-{"categories": ["..."], "feelings": ["..."]}
+{"categories": ["..."], "feelings": ["..."], "topics": ["..."]}
 
 Transcript:
 %s
@@ -181,12 +259,27 @@ Transcript:
 type understandReply struct {
 	Categories []string `json:"categories"`
 	Feelings   []string `json:"feelings"`
+	Topics     []string `json:"topics"`
 }
 
 // lastJSONObject finds the final {...} containing "categories". The CLI prints
 // its own banner and, depending on build, may echo parts of the prompt — which
 // itself contains an example object — so the LAST match is the answer.
 var lastJSONObject = regexp.MustCompile(`(?s)\{[^{}]*"categories"[^{}]*\}`)
+
+// understood is one reading of a video: the tags that will be stored as
+// auto_tags and ranked on, and the free-form topics that describe it.
+//
+// One type rather than two return values because they come from one answer and
+// are meaningless apart — and because a bare ([]string, []string, bool) at the
+// call site says nothing about which is which.
+type understood struct {
+	// Tags are checked against the categories and feelings the backend knows.
+	// These reach the ranker.
+	Tags []string
+	// Topics are whatever the model wanted to say. Nothing ranks on them.
+	Topics []string
+}
 
 // understandContent reads what the video said and returns the tags a model
 // makes of it.
@@ -196,16 +289,16 @@ var lastJSONObject = regexp.MustCompile(`(?s)\{[^{}]*"categories"[^{}]*\}`)
 // "there is no model on this machine" both come back as no tags, and only one
 // of them means the feature is off. Callers use it to decide whether to fall
 // back to the keyword list.
-func understandContent(ctx context.Context, a videoAnalysis) ([]string, bool) {
+func understandContent(ctx context.Context, a videoAnalysis) (understood, bool) {
 	bin := strings.TrimSpace(os.Getenv(understandBinEnv))
 	model := strings.TrimSpace(os.Getenv(understandModelEnv))
 	if bin == "" || model == "" {
-		return nil, false
+		return understood{}, false
 	}
 	if _, err := exec.LookPath(bin); err != nil {
 		log.Printf("analyze: %s is set to %q but that will not run: %v",
 			understandBinEnv, bin, err)
-		return nil, false
+		return understood{}, false
 	}
 
 	// Both sources of words, the same pair the keyword list reads. A caption
@@ -215,7 +308,7 @@ func understandContent(ctx context.Context, a videoAnalysis) ([]string, bool) {
 	if len(strings.Fields(said)) < understandMinWords {
 		// Not enough to judge. Saying so here rather than asking the model
 		// saves a run per silent video, which is most of them.
-		return nil, false
+		return understood{}, false
 	}
 
 	prompt := buildUnderstandPrompt(said)
@@ -233,11 +326,11 @@ func understandContent(ctx context.Context, a videoAnalysis) ([]string, bool) {
 	).Output()
 	if err != nil {
 		log.Printf("analyze: understand pass failed: %v", err)
-		return nil, false
+		return understood{}, false
 	}
 
-	tags := understoodTags(string(out))
-	return tags, true
+	answer := string(out)
+	return understood{Tags: understoodTags(answer), Topics: understoodTopics(answer)}, true
 }
 
 // understandMinWords is the floor below which the model is not asked.
@@ -257,6 +350,8 @@ func buildUnderstandPrompt(said string) string {
 	return fmt.Sprintf(understandPrompt,
 		strings.TrimRight(cats.String(), "\n"),
 		strings.Join(understandEmotions, ", "),
+		understandMaxTopics,
+		strings.Join(understandTopicExamples, ", "),
 		truncateForModel(said, understandMaxSpeechChars))
 }
 
@@ -312,4 +407,56 @@ func understoodTags(raw string) []string {
 		out = append(out, t)
 	}
 	return dedupeSorted(out)
+}
+
+// understoodTopics pulls the free-form description out of the same answer.
+//
+// Deliberately NOT filtered against a known list, which is the whole point —
+// see the topics note above. A topic nobody anticipated is the feature
+// working, not a fault: eighteen categories cannot say "hanuman chalisa" or
+// "long distance relationship", and those are what actually describe a video.
+//
+// Nothing scores on these, so an odd one costs nothing. That is exactly why
+// they can be open where the tags must be closed: a wrong TAG sends a video to
+// the wrong viewer, while a wrong topic sits in a column nothing ranks on.
+//
+// What is enforced is shape, not vocabulary: lowercase so the same subject
+// reads the same way twice, no runaway length, and a cap per video.
+func understoodTopics(raw string) []string {
+	m := lastJSONObject.FindAllString(raw, -1)
+	if len(m) == 0 {
+		return nil
+	}
+	var reply understandReply
+	if err := json.Unmarshal([]byte(m[len(m)-1]), &reply); err != nil {
+		return nil
+	}
+
+	var out []string
+	seen := map[string]bool{}
+	for _, t := range reply.Topics {
+		t = strings.ToLower(strings.TrimSpace(t))
+		// Collapse any inner whitespace so "street  food" and "street food"
+		// are one topic rather than two.
+		t = strings.Join(strings.Fields(t), " ")
+		// A model with nothing to say sometimes says so in this field. Those
+		// are the template and the refusal, not subjects.
+		if t == "" || t == "other" || t == "..." || t == "none" || t == "unknown" {
+			continue
+		}
+		if len([]rune(t)) > understandTopicMaxLen {
+			continue
+		}
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+		if len(out) == understandMaxTopics {
+			break
+		}
+	}
+	// Order as the model gave them: it puts the main subject first, and that
+	// ordering is information a sort would throw away.
+	return out
 }

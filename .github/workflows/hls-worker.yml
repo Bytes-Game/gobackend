@@ -132,6 +132,12 @@ env:
   LLAMA_RELEASE: b10819
   UNDERSTAND_REPO: Qwen/Qwen3-VL-4B-Instruct-GGUF
   UNDERSTAND_MODEL_FILE: Qwen3VL-4B-Instruct-Q4_K_M.gguf
+  # The vision projector — the companion file that turns pixels into something
+  # the language model can read. Same repository, and only needed by the pass
+  # that LOOKS at videos rather than reading them. 454MB, against the model's
+  # 2.4GB, which is the saving that made one vision model the right choice
+  # over a text model plus a separate image one.
+  UNDERSTAND_PROJECTOR_FILE: mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf
 
 jobs:
   drain:
@@ -278,7 +284,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/llama
-          key: llama-${{ env.LLAMA_RELEASE }}-${{ env.UNDERSTAND_MODEL_FILE }}-v1
+          key: llama-${{ env.LLAMA_RELEASE }}-${{ env.UNDERSTAND_MODEL_FILE }}-${{ env.UNDERSTAND_PROJECTOR_FILE }}-v2
 
       - name: build llama.cpp
         if: steps.llama-cache.outputs.cache-hit != 'true'
@@ -342,6 +348,8 @@ jobs:
           cp /tmp/llama-build/bin/llama-mtmd-cli ~/llama/llama-mtmd-cli
           curl -sSL --retry 3 -o ~/llama/model.gguf \
             "https://huggingface.co/${UNDERSTAND_REPO}/resolve/main/${UNDERSTAND_MODEL_FILE}"
+          curl -sSL --retry 3 -o ~/llama/mmproj.gguf \
+            "https://huggingface.co/${UNDERSTAND_REPO}/resolve/main/${UNDERSTAND_PROJECTOR_FILE}"
           # Same reasoning as whisper's: delete the build tree before anything
           # checks the install, so the first run faces the cached run's world.
           rm -rf /tmp/llama-build /tmp/llama-src
@@ -374,6 +382,32 @@ jobs:
           echo "UNDERSTAND_BIN=$HOME/llama/llama-cli"   >> "$GITHUB_ENV"
           echo "UNDERSTAND_MODEL=$HOME/llama/model.gguf" >> "$GITHUB_ENV"
           echo "understanding: ON"
+
+          # ── AND THE HALF THAT LOOKS ────────────────────────────────────
+          #
+          # Separate binary (llama-mtmd-cli) and a separate file (the vision
+          # projector), so this half is proved separately. If it fails, the
+          # reading half above stays on — the two variables are already
+          # exported by the time we get here.
+          #
+          # SHOWING IT A PICTURE IS THE POINT of this check. Loading the
+          # model proves nothing about whether the projector matches it, and
+          # a mismatched projector fails on every silent video — which is
+          # most of them — while looking exactly like the feature being off.
+          #
+          # ffmpeg draws the test frame, so there is no fixture to keep. 256
+          # wide because that is what the worker sends: see framesWidth in
+          # cmd/hls-worker/understand_frames.go, where the measurement is.
+          test -x ~/llama/llama-mtmd-cli
+          test -s ~/llama/mmproj.gguf
+          ffmpeg -v error -f lavfi -i color=c=blue:s=256x256:d=1 \
+            -frames:v 1 /tmp/probe.png -y
+          ~/llama/llama-mtmd-cli -m ~/llama/model.gguf \
+            --mmproj ~/llama/mmproj.gguf -c 4096 -n 8 -t 2 --temp 0 \
+            --image /tmp/probe.png -p 'What colour is this? One word.'
+          echo "UNDERSTAND_FRAMES_BIN=$HOME/llama/llama-mtmd-cli" >> "$GITHUB_ENV"
+          echo "UNDERSTAND_PROJECTOR=$HOME/llama/mmproj.gguf"     >> "$GITHUB_ENV"
+          echo "looking: ON"
 
       # TWO parallel workers: the backend's FOR UPDATE SKIP LOCKED claim
       # makes concurrent workers safe by construction, and the runner's

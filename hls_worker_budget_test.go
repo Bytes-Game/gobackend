@@ -27,14 +27,18 @@ func TestHLSWorkerTimeBudgetsFitInsideJobTimeout(t *testing.T) {
 	// program and re-downloads its weights on the very next run:
 	//
 	//	whisper.cpp   build ~2m + 1.5GB model   (measured 2m09s at 466MB)
-	//	llama.cpp     build ~6m + 2.4GB model
+	//	llama.cpp     build ~12m + 2.4GB model + 454MB vision projector
+	//
+	// The llama build was measured at 12m on a real cache-miss run, not the
+	// 6m first guessed — worth having the real number here, since this sum is
+	// the only thing standing between a cache miss and a hard-killed job.
 	//
 	// The whisper build was never counted here at all, which once left a
 	// cache-miss run about a minute from the kill switch with nothing in the
 	// repo saying so. Adding a second, larger download without raising this
 	// would repeat that exactly — which is the whole reason this number is
 	// checked by a test rather than left in a comment.
-	const setupAllowanceMin = 14 // checkout + setup-go + apt + BOTH rebuilds
+	const setupAllowanceMin = 20 // checkout + setup-go + apt + BOTH rebuilds
 
 	raw, err := os.ReadFile(".github/workflows/hls-worker.yml")
 	if err != nil {
@@ -179,6 +183,23 @@ func TestHLSWorkerBuildsTheBinariesItThenRuns(t *testing.T) {
 		if !strings.Contains(wf, "cp /tmp/llama-build/bin/"+bin) {
 			t.Errorf("%s is built but never copied into the cached directory, "+
 				"so it disappears on the next run", bin)
+		}
+	}
+
+	// Same rule for the files, not just the binaries. The worker is pointed
+	// at these by name; a path exported into the environment that nothing
+	// downloaded fails on every video it is needed for, silently.
+	for _, f := range []string{"model.gguf", "mmproj.gguf"} {
+		if !strings.Contains(wf, "-o ~/llama/"+f) {
+			t.Errorf("~/llama/%s is referenced but never downloaded", f)
+		}
+	}
+	// And the cache key has to name both files, or changing one re-uses a
+	// cache built for the other and the download is skipped.
+	for _, v := range []string{"UNDERSTAND_MODEL_FILE", "UNDERSTAND_PROJECTOR_FILE"} {
+		if !regexp.MustCompile(`key:\s*llama-[^\n]*` + v).MatchString(wf) {
+			t.Errorf("the llama cache key does not include %s, so changing it "+
+				"re-uses a cache built for a different file", v)
 		}
 	}
 }

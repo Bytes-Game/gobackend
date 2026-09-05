@@ -63,7 +63,15 @@ type VideoAnalysis struct {
 	ScreenText    string   `json:"screenText,omitempty"`
 	Speech        string   `json:"speech,omitempty"`
 	AutoTags      []string `json:"autoTags,omitempty"`
-	Passes        []string `json:"passes,omitempty"`
+
+	// What the video is about in the model's own words — "hanuman chalisa",
+	// "street food", "long distance relationship". Free-form and deliberately
+	// separate from AutoTags: nothing ranks on these, so they can describe a
+	// video far more precisely than the eighteen categories can. Written by
+	// the worker's understanding pass; see cmd/hls-worker/understand.go.
+	Topics []string `json:"topics,omitempty"`
+
+	Passes []string `json:"passes,omitempty"`
 }
 
 // Measured reports whether anything was actually looked at.

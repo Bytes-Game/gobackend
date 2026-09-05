@@ -60,6 +60,11 @@ type analysisRow struct {
 	Speech   string   `json:"speech,omitempty"`
 	Screen   string   `json:"screenText,omitempty"`
 	AutoTags []string `json:"autoTags,omitempty"`
+	// The free-form description, which is what actually says what a video is
+	// about. Surfaced here because it is the only way to see whether the
+	// model understood a video — auto_tags can only ever say one of eighteen
+	// things.
+	Topics []string `json:"topics,omitempty"`
 	// The counts the workflow log prints, so a row here can be lined up
 	// against the run that produced it without counting words by hand.
 	SpeechWords     int `json:"speechWords"`
@@ -157,6 +162,7 @@ func readAnalysisRows(table, kind string, id, limit int) []analysisRow {
 			Speech:          a.Speech,
 			Screen:          a.ScreenText,
 			AutoTags:        a.AutoTags,
+			Topics:          a.Topics,
 			SpeechWords:     countWords(a.Speech),
 			ScreenTextChars: len(a.ScreenText),
 		})

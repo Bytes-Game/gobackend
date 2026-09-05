@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -281,16 +282,16 @@ func TestUnderstand_EndToEndAgainstARealModel(t *testing.T) {
 	a := videoAnalysis{Speech: "If I do forgive you, you're just gonna break " +
 		"my heart all over again and I can't handle that. I won't. I promise."}
 
-	tags, ran := understandContent(t.Context(), a)
+	got, ran := understandContent(t.Context(), a)
 	if !ran {
 		t.Fatal("the pass reported it did not run, with both variables set")
 	}
-	if len(tags) == 0 {
+	if len(got.Tags) == 0 {
 		t.Fatal("the model ran and produced no tags for an unambiguous transcript")
 	}
-	t.Logf("model answered: %v", tags)
+	t.Logf("model answered: tags=%v topics=%v", got.Tags, got.Topics)
 	var sawCategory bool
-	for _, tag := range tags {
+	for _, tag := range got.Tags {
 		for _, c := range understandCategories {
 			if tag == c.Name {
 				sawCategory = true
@@ -299,7 +300,7 @@ func TestUnderstand_EndToEndAgainstARealModel(t *testing.T) {
 	}
 	if !sawCategory {
 		t.Errorf("got %v — feelings but no category, so nothing decides where "+
-			"this video is filed", tags)
+			"this video is filed", got.Tags)
 	}
 }
 
@@ -458,9 +459,16 @@ func TestFrames_AnswersGoThroughTheSameFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read understand_frames.go: %v", err)
 	}
-	if !strings.Contains(string(src), "understoodTags(string(out))") {
+	if !strings.Contains(string(src), "understoodTags(") {
 		t.Error("the frames pass no longer validates its answer through " +
 			"understoodTags. It could then store a tag nothing downstream knows.")
+	}
+	// Topics come from the same answer and are deliberately NOT validated —
+	// see the topics note. Both halves must read both, or a video categorised
+	// from pictures would carry no description at all.
+	if !strings.Contains(string(src), "understoodTopics(") {
+		t.Error("the frames pass does not read topics, so a video with no " +
+			"words gets a category and no description of what it is about")
 	}
 	if !strings.Contains(string(src), `"-c", strconv.Itoa(understandFramesContextTokens)`) {
 		t.Error("the frames pass does not bound its context. The pictures take " +
@@ -494,8 +502,125 @@ func TestFrames_OnlyRunWhenReadingFoundNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read analyze.go: %v", err)
 	}
-	if !strings.Contains(string(src), "if len(tags) == 0 {") {
+	// Matched on the gate itself rather than an exact line, so a rename does
+	// not fail this for the wrong reason — the property is that looking is
+	// conditional on reading having produced no tags.
+	gate := regexp.MustCompile(`if len\([A-Za-z.]*[Tt]ags\) == 0 \{`)
+	if !gate.Match(src) {
 		t.Error("the frames pass is no longer gated on the reading pass " +
 			"finding nothing, so every video now pays for both")
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// TOPICS — WHAT THE VIDEO IS ABOUT, IN THE MODEL'S OWN WORDS
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Eighteen categories cannot describe a video. A clip about chanting the
+// Hanuman Chalisa when a ghost frightens somebody is spiritual, devotional,
+// paranormal and a bit comic, and the category list offers it "comedy" or
+// "other". Topics are the answer to that, and they are deliberately the
+// OPPOSITE of tags: open where tags are closed, unranked where tags are
+// ranked. These say so, because the natural instinct on reading the code is
+// to "fix" the missing validation.
+
+func TestTopics_AreNotFilteredAgainstAnyList(t *testing.T) {
+	// The whole feature. None of these is a category, a feeling, or anything
+	// the backend has ever heard of — and every one of them describes a video
+	// better than "comedy" does.
+	got := understoodTopics(
+		`{"categories": ["comedy"], "feelings": ["funny"],` +
+			` "topics": ["hanuman chalisa", "ghost", "temple", "negative energy"]}`)
+	if len(got) != 4 {
+		t.Fatalf("got %v, want all four kept. Topics are not validated against "+
+			"a vocabulary — that is the point of them.", got)
+	}
+	if got[0] != "hanuman chalisa" {
+		t.Errorf("got %v; the model's own ordering must survive, because it "+
+			"puts the main subject first and a sort would throw that away", got)
+	}
+}
+
+func TestTopics_AreShapedEvenThoughTheyAreNotFiltered(t *testing.T) {
+	// Not filtered is not the same as not cleaned. The same subject has to
+	// read the same way twice or nothing can ever group by it.
+	got := understoodTopics(
+		`{"categories": ["food"], "topics": ["  Street   Food ", "STREET FOOD", "chai"]}`)
+	if len(got) != 2 {
+		t.Fatalf("got %v, want street food (once) and chai", got)
+	}
+	if got[0] != "street food" {
+		t.Errorf("got %q, want %q — lowercased with inner spacing collapsed",
+			got[0], "street food")
+	}
+}
+
+func TestTopics_DropTheModelSayingItHasNothingToSay(t *testing.T) {
+	// A model with no answer writes it into the field rather than leaving the
+	// field out. None of these is a subject, and "other" as a TOPIC is
+	// especially misleading — it is a real category name.
+	for _, raw := range []string{
+		`{"topics": ["other"]}`,
+		`{"topics": ["none"]}`,
+		`{"topics": ["unknown"]}`,
+		`{"topics": ["..."]}`,
+		`{"topics": [""]}`,
+	} {
+		if got := understoodTopics(`{"categories": ["other"], ` + raw[1:]); len(got) != 0 {
+			t.Errorf("%s produced %v, want nothing", raw, got)
+		}
+	}
+}
+
+func TestTopics_AreCappedPerVideoNotInVocabulary(t *testing.T) {
+	// The cap is on how many one video carries, not on which words exist. A
+	// model asked for everything starts naming what is in shot rather than
+	// what the video is about.
+	many := `{"categories": ["food"], "topics": ["a1","b2","c3","d4","e5","f6","g7","h8","i9"]}`
+	if got := understoodTopics(many); len(got) != understandMaxTopics {
+		t.Errorf("got %d topics, want the cap of %d", len(got), understandMaxTopics)
+	}
+	// And a sentence written into the field is dropped rather than stored.
+	long := `{"categories": ["food"], "topics": ["` +
+		strings.Repeat("very long ", 20) + `"]}`
+	if got := understoodTopics(long); len(got) != 0 {
+		t.Errorf("got %v, want the over-long entry dropped", got)
+	}
+}
+
+func TestTopics_DoNotReachTheRankedTags(t *testing.T) {
+	// The safety property. Tags decide who a video is shown to; topics do not.
+	// If a topic ever leaked into AutoTags it would be an unvalidated string
+	// in the column the ranker reads — exactly what understoodTags exists to
+	// prevent.
+	answer := `{"categories": ["horror"], "feelings": ["scary"],` +
+		` "topics": ["ghost", "hanuman chalisa"]}`
+	tags := understoodTags(answer)
+	for _, tag := range tags {
+		if tag == "ghost" || tag == "hanuman chalisa" {
+			t.Errorf("topic %q reached the ranked tags: %v", tag, tags)
+		}
+	}
+	if len(tags) != 2 {
+		t.Errorf("got %v, want just horror and scary", tags)
+	}
+}
+
+func TestPrompt_AsksForTopicsWithoutGivingAList(t *testing.T) {
+	p := buildUnderstandPrompt("anything")
+	if !strings.Contains(p, "NOT a list to choose from") {
+		t.Error("the prompt no longer tells the model topics are open. Given a " +
+			"list it will pick from it, and the whole value here is the words " +
+			"nobody thought to include.")
+	}
+	// Examples steer vocabulary without constraining it — an unguided model
+	// drifts between "food", "cooking" and "making dinner" for one idea.
+	if !strings.Contains(p, "hanuman chalisa") {
+		t.Error("the steering examples are gone from the prompt")
+	}
+	// English topics for non-English videos, or the same subject reads two
+	// ways and nothing can group by it.
+	if !strings.Contains(p, "Write topics in English") {
+		t.Error("the prompt no longer asks for topics in one language")
 	}
 }
