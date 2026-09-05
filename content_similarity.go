@@ -43,6 +43,7 @@ package main
 // than six that drift apart.
 
 import (
+	"encoding/json"
 	"math"
 	"sort"
 	"strings"
@@ -300,3 +301,151 @@ func topicMatchesQuery(fingerprint []string, query string) bool {
 	}
 	return false
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// TURNING BEHAVIOUR INTO TASTE
+// ════════════════════════════════════════════════════════════════════════════
+
+// engagementWeight is what one thing a viewer did is worth.
+//
+// Pulled out of the profile builder so the category tally and the topic tally
+// are driven by ONE set of numbers. They used to be one switch statement
+// writing into one map; the moment a second map appeared, two copies of these
+// weights would have drifted the first time anybody tuned them, and the two
+// halves of the same profile would then disagree about how much a share means.
+//
+// Negative on purpose where the viewer pushed back. A fast scroll is not the
+// absence of interest, it is a small statement against.
+func engagementWeight(evType string, completion float64) float64 {
+	switch evType {
+	case "share":
+		return 3.0
+	case "rewatch":
+		return 2.5
+	case "save":
+		return 1.5
+	case "comment":
+		return 1.2 // more effort than a like
+	case "like":
+		return 1.0
+	case "view":
+		// Granular watch time — more honest than a binary threshold.
+		switch {
+		case completion >= 0.9:
+			return 1.0 // nearly finished
+		case completion >= 0.7:
+			return 0.5 // watched most
+		case completion >= 0.5:
+			return 0.1 // watched half
+		case completion >= 0.3:
+			return -0.1 // gave it a chance and left
+		}
+		return 0 // under 30% says nothing either way
+	case "pause":
+		return 0.3
+	case "scroll_slow":
+		return 0.2
+	case "scroll_fast":
+		return -0.3
+	case "skip":
+		return -0.5
+	case "not_interested":
+		return -2.0
+	}
+	return 0
+}
+
+// normalizeTopicAffinity folds raw evidence into taste in [-1, 1].
+//
+// Divided by the largest feeling in EITHER direction, and the sign is kept.
+//
+// That last part is the difference from how categories are normalised. Those
+// are clamped to zero at the bottom, which throws every dislike away — so a
+// separate pass has to remember mined negatives and paste them back
+// afterwards, and a single weak positive event can wipe a sustained dislike.
+//
+// Dividing by the largest magnitude keeps both halves in one number from the
+// start. A viewer who skipped every prank video ends up around -1 for "prank"
+// and stays there until they actually watch one.
+func normalizeTopicAffinity(raw map[string]float64) map[string]float64 {
+	if len(raw) == 0 {
+		return map[string]float64{}
+	}
+	maxAbs := 0.0
+	for _, v := range raw {
+		if a := math.Abs(v); a > maxAbs {
+			maxAbs = a
+		}
+	}
+	if maxAbs == 0 {
+		return map[string]float64{}
+	}
+	out := make(map[string]float64, len(raw))
+	for k, v := range raw {
+		n := v / maxAbs
+		if n > 1 {
+			n = 1
+		} else if n < -1 {
+			n = -1
+		}
+		// A feeling too faint to matter is noise that costs profile space and
+		// slows every feed request. Dropping it loses nothing.
+		if math.Abs(n) < topicAffinityFloor {
+			continue
+		}
+		out[k] = n
+	}
+	return trimTopicAffinity(out)
+}
+
+// topicAffinityFloor is how faint a feeling has to be before it is forgotten.
+const topicAffinityFloor = 0.02
+
+// avoidedTopicThreshold is how strongly a viewer has to have pushed back
+// before a subject counts as one they actively do not want.
+//
+// Matched to the category equivalent's spirit: one tap is not enough. At -0.5
+// after normalising, a subject has drawn sustained rejection rather than a
+// single bad video, so acting on it will not silence a whole subject because
+// one clip about it was poor.
+const avoidedTopicThreshold = -0.5
+
+// avoidedTopics lists the subjects a viewer has pushed back on hard enough
+// that the feed should stop offering them.
+//
+// Sorted, so a profile rebuild that found the same things does not look like a
+// change and churn the stored row.
+func avoidedTopics(affinity map[string]float64) []string {
+	var out []string
+	for k, v := range affinity {
+		if v <= avoidedTopicThreshold {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// jsonStrings decodes a JSONB text column into a string slice.
+//
+// Never errors: a column that is NULL, empty, or holding something unexpected
+// means "nothing known about this video", which is an ordinary state on a
+// platform where most of the catalogue has not been analysed. Failing here
+// would take down a profile rebuild over a missing description.
+func jsonStrings(raw string) []string {
+	if raw == "" || raw == "[]" || raw == "null" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// avoidedTopicPenalty is what a video about a rejected subject scores.
+//
+// The same floor the avoided-category rule uses. Not lower: somebody who
+// rejected one subject has not rejected the video entirely, and a penalty
+// deep enough to bury it outright makes a single bad session permanent.
+const avoidedTopicPenalty = -0.3

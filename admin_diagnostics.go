@@ -94,6 +94,12 @@ type UserProfileSnapshot struct {
 	RecentLosses         int                `json:"recentLosses"`
 	PreferredCreators    []string           `json:"preferredCreators"`
 	AvoidedCategories    []string           `json:"avoidedCategories"`
+	// What this viewer actually likes, in the words videos are described by.
+	// Surfaced next to the categories because relevance is scored on THIS
+	// now — a dashboard showing only the eighteen would be showing a signal
+	// that no longer decides anything.
+	TopicAffinity map[string]float64 `json:"topicAffinity,omitempty"`
+	AvoidedTopics []string           `json:"avoidedTopics,omitempty"`
 	ActiveHours          []int              `json:"activeHours"`
 	EmotionPreference    map[string]float64 `json:"emotionPreference"`
 	EnergyByHour         map[int]float64    `json:"energyByHour"`
@@ -160,6 +166,7 @@ func probeProfile(r *DiagnosticsReport, userID string) {
 		TotalSessions: p.TotalSessions, TotalWatchTimeMs: p.TotalWatchTimeMs,
 		RecentWins: p.RecentWins, RecentLosses: p.RecentLosses,
 		PreferredCreators: p.PreferredCreators, AvoidedCategories: p.AvoidedCategories,
+		TopicAffinity: p.TopicAffinity, AvoidedTopics: p.AvoidedTopics,
 		ActiveHours: p.ActiveHours, EmotionPreference: p.EmotionPreference,
 		EnergyByHour: p.EnergyByHour,
 	}

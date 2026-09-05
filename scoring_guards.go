@@ -190,6 +190,7 @@ func safeProfile(p *UserProfile) *UserProfile {
 	if p == nil {
 		return &UserProfile{
 			CategoryAffinity: map[string]float64{},
+			TopicAffinity:    map[string]float64{},
 			EnergyPreference: 0.5,
 			SocialDrive:      0.5,
 			NoveltyTolerance: 0.5,
@@ -207,6 +208,10 @@ func safeProfile(p *UserProfile) *UserProfile {
 	// 0..1 and the negative miner writes down to about -0.3, so ±1 is
 	// generous and still bounded.
 	safe.CategoryAffinity = safeWeights(safe.CategoryAffinity, -1, 1)
+	// Topic affinity is what relevance is scored on now, so it needs the same
+	// bound — arguably more, since its vocabulary is open and a corrupt value
+	// could arrive under any key rather than one of eighteen known ones.
+	safe.TopicAffinity = safeWeights(safe.TopicAffinity, -1, 1)
 	return &safe
 }
 
