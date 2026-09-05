@@ -47,6 +47,7 @@ import (
 	"encoding/json"
 	"log"
 	"math"
+	"strconv"
 )
 
 // VideoAnalysis mirrors the worker's struct. Kept as its own declaration
@@ -132,7 +133,38 @@ func storeVideoAnalysis(table string, id int, raw json.RawMessage) {
 		id, []byte(raw), tagsJSON, topicsJSON,
 	); err != nil {
 		log.Printf("video analysis: could not save for %s id=%d: %v", table, id, err)
+		return
 	}
+
+	// Tell search the video now has words attached to it.
+	//
+	// Without this the whole reading, listening and looking pipeline was
+	// invisible to search forever. A challenge is indexed once, at upload,
+	// minutes BEFORE any of this exists — so the copy search holds has no
+	// topics, no tags from the model, and nothing that was said out loud.
+	// Somebody could describe a jellyfish video perfectly and find nothing.
+	//
+	// Only challenges: responses are not in the search index at all.
+	if table == "challenges" {
+		go reindexChallengeForSearch(id)
+	}
+}
+
+// reindexChallengeForSearch re-upserts one challenge into the search index
+// after its analysis lands.
+//
+// Best effort and off the hot path. A failure here means the video is
+// findable by its title but not yet by its subject, which is exactly where it
+// was before — never a reason to fail the analysis that just succeeded.
+func reindexChallengeForSearch(id int) {
+	if meili == nil || db == nil {
+		return
+	}
+	ch, ok := GetChallengeByID(strconv.Itoa(id))
+	if !ok {
+		return
+	}
+	IndexChallenge(ch)
 }
 
 // mergeTags combines the creator's tags with the machine's, creator first.

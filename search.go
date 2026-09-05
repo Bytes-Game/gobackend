@@ -546,15 +546,64 @@ func meiliSearchChallenges(query string, limit int) []challengeHit {
 func postgresSearchChallengesFallback(query string, limit int) []challengeHit {
 	q := strings.ToLower(strings.TrimSpace(query))
 	allChallenges := GetArenaChallenges()
+
+	// Which videos are ABOUT this word. One query for the whole search rather
+	// than one per candidate — the topics column is GIN-indexed for exactly
+	// this question (migration 006).
+	//
+	// Without it this fallback could only match a title or a username, so
+	// while Meilisearch is down a search for "jellyfish" returns nothing even
+	// though the app knows perfectly well which video that is.
+	aboutQ := challengeIDsAboutTopic(q)
+
 	out := make([]challengeHit, 0)
 	for _, c := range allChallenges {
 		title := strings.ToLower(c.Prefix + " " + c.Subject)
 		creator := strings.ToLower(c.CreatorUsername)
-		if strings.Contains(title, q) || strings.Contains(creator, q) {
+		if strings.Contains(title, q) || strings.Contains(creator, q) || aboutQ[c.ID] {
 			out = append(out, challengeHit{Ch: c, Rank: len(out)})
 			if len(out) >= limit {
 				break
 			}
+		}
+	}
+	return out
+}
+
+// challengeIDsAboutTopic finds videos whose topics or machine tags contain the
+// search term.
+//
+// Substring, not equality: somebody searching "food" should find a video whose
+// topic is "street food", and "jelly" should find "jellyfish". Topics are
+// phrases, so exact matching would only ever hit single-word subjects.
+//
+// Returns an empty set on any failure — a search that finds fewer things is a
+// worse search, not a broken one.
+func challengeIDsAboutTopic(q string) map[string]bool {
+	out := map[string]bool{}
+	if db == nil || q == "" {
+		return out
+	}
+	rows, err := db.Query(`
+		SELECT CAST(id AS TEXT)
+		  FROM challenges
+		 WHERE EXISTS (
+		           SELECT 1 FROM jsonb_array_elements_text(
+		                          COALESCE(content_topics, '[]'::jsonb)) AS t(w)
+		            WHERE w ILIKE '%' || $1 || '%')
+		    OR EXISTS (
+		           SELECT 1 FROM jsonb_array_elements_text(
+		                          COALESCE(auto_tags, '[]'::jsonb)) AS t(w)
+		            WHERE w ILIKE '%' || $1 || '%')
+		 LIMIT 200`, q)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			out[id] = true
 		}
 	}
 	return out
