@@ -291,18 +291,36 @@ jobs:
           # develop the "works today, dies on every cached run" fault that
           # shipped once already above.
           #
-          # Only llama-cli is built. The full project builds a couple of dozen
-          # tools and takes several times as long; nothing here uses the rest.
+          # ⚠ DO NOT ADD -DLLAMA_BUILD_SERVER=OFF HERE.
+          #
+          # It reads like an obvious saving and it deletes the binary this
+          # whole feature runs on. llama-cli lives in tools/cli, and that
+          # directory is inside `if (LLAMA_BUILD_SERVER)` in tools/
+          # CMakeLists.txt — so turning the server off removes llama-cli from
+          # the build entirely. The target then does not exist, the build step
+          # fails, and because this step is not continue-on-error the WHOLE
+          # JOB fails: no transcoding at all, for every upload, until someone
+          # notices.
+          #
+          # That is not hypothetical. It shipped, and three consecutive worker
+          # runs failed before it was caught — the queue was stopped for about
+          # three hours. The cache made it worse: the very first run after the
+          # change was a guaranteed cache miss, so it broke immediately and
+          # then stayed broken.
+          #
+          # -DLLAMA_BUILD_TESTS=OFF is safe and is most of the saving anyway.
           cmake -S /tmp/llama-src -B /tmp/llama-build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DLLAMA_CURL=OFF \
-            -DLLAMA_BUILD_TESTS=OFF \
-            -DLLAMA_BUILD_EXAMPLES=OFF \
-            -DLLAMA_BUILD_SERVER=OFF
-          cmake --build /tmp/llama-build --config Release -j --target llama-cli
+            -DLLAMA_BUILD_TESTS=OFF
+          # Only the two binaries this worker actually runs, rather than the
+          # couple of dozen tools the project ships.
+          cmake --build /tmp/llama-build --config Release -j \
+            --target llama-cli llama-mtmd-cli
           mkdir -p ~/llama
-          cp /tmp/llama-build/bin/llama-cli ~/llama/llama-cli
+          cp /tmp/llama-build/bin/llama-cli      ~/llama/llama-cli
+          cp /tmp/llama-build/bin/llama-mtmd-cli ~/llama/llama-mtmd-cli
           curl -sSL --retry 3 -o ~/llama/model.gguf \
             "https://huggingface.co/${UNDERSTAND_REPO}/resolve/main/${UNDERSTAND_MODEL_FILE}"
           # Same reasoning as whisper's: delete the build tree before anything
