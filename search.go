@@ -53,6 +53,12 @@ type UnifiedSearchResponse struct {
 	// "category:<name>", or "general". Clients may use it to order
 	// sections (e.g. accounts first for username-shaped queries).
 	Intent string `json:"intent,omitempty"`
+	// Subjects that go with what was searched for, learned from which
+	// topics keep turning up on the same videos. Searching "jellyfish"
+	// offers aquarium and marine life. Empty when the query is not a
+	// subject this catalogue knows about — a client should render nothing
+	// rather than an empty row.
+	RelatedSearches []string `json:"relatedSearches,omitempty"`
 	// Related is true when the query itself had zero matches and the
 	// results are a trending fallback — client should render a "no
 	// exact matches, trending now" header instead of the plain list.
@@ -70,7 +76,8 @@ const (
 )
 
 // SearchHandler handles requests to the /search endpoint.
-//   GET /search?q=query[&type=all|accounts|battles|shorts][&userId=X]
+//
+//	GET /search?q=query[&type=all|accounts|battles|shorts][&userId=X]
 //
 // The 'type' param narrows the response to a single section but leaves the
 // JSON shape stable — empty arrays for the sections you didn't ask for.
@@ -103,9 +110,9 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 	// Pull personalization context once if we have a userID. All four lookups
 	// are cheap and request-local-cached.
 	var (
-		profile     *UserProfile
+		profile      *UserProfile
 		followingSet map[string]bool
-		fofSet      map[string]bool
+		fofSet       map[string]bool
 		viewerLeague string
 	)
 	if userID != "" {
@@ -169,14 +176,19 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 	// ("user" only when the accounts lane actually found something —
 	// a username-shaped query with zero account hits is just a word).
 	resp.Intent = searchIntent(query, len(resp.Accounts) > 0)
+	resp.RelatedSearches = relatedSearches(query, relatedSearchCap)
 
 	// Zero-result rescue: never render an empty search page. Fall back
 	// to realtime-trending content (category-filtered when the query
 	// smells like a topic), flagged so the client can label it honestly.
 	if len(resp.Accounts) == 0 && len(resp.Battles) == 0 && len(resp.Shorts) == 0 {
-		if rescued := searchZeroResultRescue(resp.Intent); len(rescued) > 0 {
+		// Before falling back to whatever is trending, try the subjects that
+		// go with what they asked for. Somebody searching a word this
+		// catalogue has never seen gets trending — fair enough. Somebody
+		// searching "aquarium" should get the jellyfish video, not a shrug.
+		if near := searchNearbySubjects(query); len(near) > 0 {
 			resp.Related = true
-			for _, ch := range rescued {
+			for _, ch := range near {
 				if ch.ResponseCount > 0 && len(resp.Battles) < searchBattleCap {
 					resp.Battles = append(resp.Battles, ch)
 				} else if len(resp.Shorts) < searchShortCap {
@@ -184,6 +196,19 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			resp.Challenges = append(append([]Challenge{}, resp.Battles...), resp.Shorts...)
+		}
+		if len(resp.Challenges) == 0 {
+			if rescued := searchZeroResultRescue(resp.Intent); len(rescued) > 0 {
+				resp.Related = true
+				for _, ch := range rescued {
+					if ch.ResponseCount > 0 && len(resp.Battles) < searchBattleCap {
+						resp.Battles = append(resp.Battles, ch)
+					} else if len(resp.Shorts) < searchShortCap {
+						resp.Shorts = append(resp.Shorts, ch)
+					}
+				}
+				resp.Challenges = append(append([]Challenge{}, resp.Battles...), resp.Shorts...)
+			}
 		}
 	}
 
@@ -554,7 +579,14 @@ func postgresSearchChallengesFallback(query string, limit int) []challengeHit {
 	// Without it this fallback could only match a title or a username, so
 	// while Meilisearch is down a search for "jellyfish" returns nothing even
 	// though the app knows perfectly well which video that is.
-	aboutQ := challengeIDsAboutTopic(q)
+	// Widened to the subjects that go with the query, so "aquarium" finds the
+	// jellyfish video. The original term is always first and never dropped.
+	aboutQ := map[string]bool{}
+	for _, term := range expandQuery(q) {
+		for id := range challengeIDsAboutTopic(term) {
+			aboutQ[id] = true
+		}
+	}
 
 	out := make([]challengeHit, 0)
 	for _, c := range allChallenges {
