@@ -125,3 +125,60 @@ func TestHLSWorkerSpeechModelUnderstandsMoreThanEnglish(t *testing.T) {
 			"and say in the code that speech is English-only.", model)
 	}
 }
+
+// TestHLSWorkerBuildsTheBinariesItThenRuns guards a flag that reads like a
+// saving and is a total outage.
+//
+// llama-cli lives in tools/cli, and tools/CMakeLists.txt puts that directory
+// inside `if (LLAMA_BUILD_SERVER)`. So -DLLAMA_BUILD_SERVER=OFF — which looks
+// like an obvious way to skip building a web server nobody here wants —
+// removes llama-cli from the build entirely. The target stops existing, the
+// build step fails, and that step is not continue-on-error, so the whole job
+// dies: no transcoding for any upload until a person notices.
+//
+// It shipped exactly that way. Three consecutive worker runs failed and the
+// queue was stopped for about three hours. The cache guaranteed it: the first
+// run after the change was a cache miss, so it broke on the very next run and
+// stayed broken.
+//
+// Nothing about the failure points at this flag, which is why it is a test.
+func TestHLSWorkerBuildsTheBinariesItThenRuns(t *testing.T) {
+	raw, err := os.ReadFile(".github/workflows/hls-worker.yml")
+	if err != nil {
+		t.Fatalf("read workflow: %v", err)
+	}
+	wf := string(raw)
+
+	// Comments are stripped first, because the workflow documents this exact
+	// trap in a comment right above the build — and a naive search would trip
+	// on its own warning, which is a confusing way for a guard to fail.
+	var live strings.Builder
+	for _, line := range strings.Split(wf, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		live.WriteString(line)
+		live.WriteByte('\n')
+	}
+	if strings.Contains(live.String(), "LLAMA_BUILD_SERVER=OFF") {
+		t.Error("LLAMA_BUILD_SERVER=OFF is back in the llama.cpp build.\n\n" +
+			"That deletes llama-cli (tools/cli is gated on it), so the build " +
+			"step fails and takes the whole drain job with it — every upload " +
+			"stops transcoding. Use LLAMA_BUILD_TESTS=OFF for the saving.")
+	}
+
+	// And every binary the worker is pointed at has to be one the build was
+	// actually asked for. A path exported into the environment that nothing
+	// produced is the same outage wearing a different hat.
+	for _, bin := range []string{"llama-cli", "llama-mtmd-cli"} {
+		if !strings.Contains(wf, "--target llama-cli llama-mtmd-cli") &&
+			!strings.Contains(wf, "--target "+bin) {
+			t.Errorf("%s is not built by any --target line, but the workflow "+
+				"copies it out of the build directory", bin)
+		}
+		if !strings.Contains(wf, "cp /tmp/llama-build/bin/"+bin) {
+			t.Errorf("%s is built but never copied into the cached directory, "+
+				"so it disappears on the next run", bin)
+		}
+	}
+}
