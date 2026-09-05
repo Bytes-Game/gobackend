@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -299,5 +300,95 @@ func TestUnderstand_EndToEndAgainstARealModel(t *testing.T) {
 	if !sawCategory {
 		t.Errorf("got %v — feelings but no category, so nothing decides where "+
 			"this video is filed", tags)
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE BUDGETS THAT KEEP THE PASSES OUT OF EACH OTHER'S WAY
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Found in production, on the two videos re-queued to prove an unrelated fix:
+//
+//	probeHasAudio: source.mp4 hasAudio=true
+//	... 6m35s later ...
+//	analyze: speech pass failed: signal: killed
+//
+// Challenge 260 HAS sound and had been transcribed before — 41 words — and
+// lost its transcript entirely because it was processed at the same moment as
+// another video. Two causes, and both are pinned below, because both failures
+// are silent: the stored analysis of a killed transcription is identical to
+// that of a genuinely quiet video.
+
+func TestSpeech_AsksForHalfTheMachineNotAllOfIt(t *testing.T) {
+	// The root cause. The workflow runs TWO workers on a four-core runner and
+	// whisper.cpp takes four threads when nobody says otherwise, so both
+	// workers together wanted eight — while also encoding video. Not "a bit
+	// slower": slow enough to still be running when the deadline expired.
+	src, err := os.ReadFile("analyze.go")
+	if err != nil {
+		t.Fatalf("read analyze.go: %v", err)
+	}
+	if !strings.Contains(string(src), `"-t", strconv.Itoa(speechThreads)`) {
+		t.Error("whisper is no longer told how many threads to use. With two " +
+			"workers on a four-core runner it will take eight, and " +
+			"transcripts start disappearing on whichever videos happen to " +
+			"be processed together.")
+	}
+	if speechThreads > 2 {
+		t.Errorf("speechThreads is %d; two workers would ask for %d threads "+
+			"on a four-core runner", speechThreads, speechThreads*2)
+	}
+	// Both models that run on this box share the machine the same way, and a
+	// change to one without the other puts it straight back into overcommit.
+	if speechThreads != understandThreads {
+		t.Errorf("speech uses %d threads and understanding uses %d. Both run "+
+			"two-up on the same four cores, so they should agree.",
+			speechThreads, understandThreads)
+	}
+}
+
+func TestAnalyze_NoSinglePassCanSpendTheWholeBudget(t *testing.T) {
+	// The structural half. The passes run in sequence against one deadline,
+	// so a slow one spends the time belonging to those behind it — and the
+	// slowest pass sits directly in front of the one that depends on its
+	// output. When speech ran to the full six minutes, understanding never
+	// started at all.
+	for _, b := range []struct {
+		name   string
+		budget time.Duration
+	}{
+		{"shape", shapeBudget},
+		{"screen text", screenTextBudget},
+		{"speech", speechBudget},
+		{"understand", understandBudget},
+	} {
+		if b.budget <= 0 {
+			t.Errorf("the %s pass has no budget of its own", b.name)
+		}
+		if b.budget >= analyzeTimeout {
+			t.Errorf("the %s pass may run for %v, which is the whole %v "+
+				"analysis budget — it can still starve every pass after it",
+				b.name, b.budget, analyzeTimeout)
+		}
+	}
+	// Understanding must have room left after speech has had its worst case,
+	// or the fix does not actually buy anything.
+	if speechBudget+understandBudget > analyzeTimeout {
+		t.Errorf("speech (%v) plus understanding (%v) is more than the %v "+
+			"ceiling, so a slow transcription still leaves nothing to read it",
+			speechBudget, understandBudget, analyzeTimeout)
+	}
+}
+
+func TestAnalyze_TheCeilingStillFitsInsideOneJob(t *testing.T) {
+	// analyzeTimeout is nested inside the worker's -job-timeout, which also
+	// has to cover downloading and transcoding the video. Raising the analysis
+	// ceiling to buy headroom is the obvious move and the wrong one: it would
+	// push whole JOBS past their limit, and a job killed mid-transcode leaves
+	// a row PENDING for the reaper.
+	if analyzeTimeout > 6*time.Minute {
+		t.Errorf("analyzeTimeout is %v. It shares -job-timeout with the "+
+			"download, the transcode and the upload; give the passes room by "+
+			"making them faster, not by raising this.", analyzeTimeout)
 	}
 }

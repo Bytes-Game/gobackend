@@ -123,6 +123,35 @@ type videoAnalysis struct {
 // to 10m for the same reason. See the budget sum in hls-worker.yml.
 const analyzeTimeout = 6 * time.Minute
 
+// Each pass also gets its OWN slice of that budget.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY ONE SHARED POT WAS NOT ENOUGH
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The passes run one after another against a single deadline, so whichever
+// one is slow spends the time belonging to the ones behind it. That is not
+// hypothetical — the speech pass ran to the full six minutes on challenge 260
+// and was killed, and by then the clock was gone, so the pass after it never
+// started at all. Two features lost to one slow model.
+//
+// The order matters here too. Speech feeds understanding: a transcript that
+// arrives is read, and a transcript that is cut off leaves the video with
+// nothing to read. So the pass most likely to overrun sits directly in front
+// of the pass that depends on it, which is the worst possible arrangement
+// under a shared clock.
+//
+// Per-pass budgets fix that. A wedged whisper now costs its own pass and
+// nothing else, and the sum deliberately exceeds analyzeTimeout — these bound
+// each pass individually, while analyzeTimeout stays the hard ceiling on all
+// of them together.
+const (
+	shapeBudget      = 1 * time.Minute
+	screenTextBudget = 1 * time.Minute
+	speechBudget     = 3 * time.Minute
+	understandBudget = 2 * time.Minute
+)
+
 // analyzeVideo inspects a local file and returns everything it could work
 // out. It never returns an error: a failed pass is a missing field, not a
 // failed job.
@@ -133,18 +162,29 @@ func analyzeVideo(ctx context.Context, src string) videoAnalysis {
 	var a videoAnalysis
 	dur := probeDuration(ctx, src)
 
-	if analyzeShape(ctx, src, dur, &a) {
+	shapeCtx, cancelShape := context.WithTimeout(ctx, shapeBudget)
+	ranShape := analyzeShape(shapeCtx, src, dur, &a)
+	cancelShape()
+	if ranShape {
 		a.Passes = append(a.Passes, "shape")
 	}
+
 	// A pass is recorded when it RAN, not when it found something. Those are
 	// different facts and the difference is the whole reason Passes exists:
 	// a video with nobody talking and a worker with no whisper installed both
 	// produce an empty transcript, and only one of them is a problem.
-	if txt, ran := readScreenText(ctx, src, dur); ran {
+	textCtx, cancelText := context.WithTimeout(ctx, screenTextBudget)
+	txt, ranText := readScreenText(textCtx, src, dur)
+	cancelText()
+	if ranText {
 		a.ScreenText = txt
 		a.Passes = append(a.Passes, "text")
 	}
-	if sp, ran := transcribeSpeech(ctx, src); ran {
+
+	speechCtx, cancelSpeech := context.WithTimeout(ctx, speechBudget)
+	sp, ranSpeech := transcribeSpeech(speechCtx, src)
+	cancelSpeech()
+	if ranSpeech {
 		a.Speech = sp
 		a.Passes = append(a.Passes, "speech")
 	}
@@ -165,7 +205,10 @@ func analyzeVideo(ctx context.Context, src string) videoAnalysis {
 	// Shape tags survive either way. Those are measurements of the file —
 	// how often it cuts, whether anyone is talking — and are just as true
 	// whoever read the words.
-	if tags, ran := understandContent(ctx, a); ran {
+	understandCtx, cancelUnderstand := context.WithTimeout(ctx, understandBudget)
+	tags, ranUnderstand := understandContent(understandCtx, a)
+	cancelUnderstand()
+	if ranUnderstand {
 		a.Passes = append(a.Passes, "understand")
 		a.AutoTags = dedupeSorted(append(tags, shapeTags(a)...))
 	}
@@ -550,6 +593,13 @@ const (
 	whisperModelEnv = "WHISPER_MODEL"
 )
 
+// speechThreads is how many cores one whisper run may use.
+//
+// Half the runner, because the workflow runs two workers at once — the same
+// arithmetic as understandThreads. See the long note at the -t flag below for
+// what going without this cost.
+const speechThreads = 2
+
 // transcribeSpeech extracts the audio and runs whisper over it.
 //
 // The second return says whether whisper actually ran. That distinction is the
@@ -596,6 +646,32 @@ func transcribeSpeech(ctx context.Context, src string) (string, bool) {
 		"-f", wav,
 		"-nt", // no timestamps — we want the words, not a subtitle file
 		"-np", // no progress spam on stderr
+		// HALF the runner's cores, not all of them.
+		//
+		// This line is why transcripts were going missing. The workflow runs
+		// TWO workers side by side on a four-core runner, and whisper.cpp
+		// helps itself to four threads when nobody tells it otherwise. So
+		// whenever both workers reached this pass together there were eight
+		// threads fighting over four cores — while those same two workers were
+		// also each encoding video.
+		//
+		// The result was not "a bit slower". It was whisper still running when
+		// the analysis deadline expired, and being killed outright:
+		//
+		//   probeHasAudio: source.mp4 hasAudio=true
+		//   ... 6m35s later ...
+		//   analyze: speech pass failed: signal: killed
+		//
+		// That is challenge 260, a video WITH sound that had been transcribed
+		// successfully before — 41 words — losing its transcript entirely
+		// because it happened to be processed at the same moment as another.
+		// It reads in the stored analysis exactly like a silent video, which
+		// is how "79 of 114 videos have no words" turned out to be partly
+		// untrue.
+		//
+		// Two threads each means the two workers add up to the machine instead
+		// of overcommitting it.
+		"-t", strconv.Itoa(speechThreads),
 		// Work out the language from the audio rather than assuming one.
 		//
 		// This line was here before the model could honour it. The workflow
