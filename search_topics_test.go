@@ -191,3 +191,71 @@ func TestCreatorTagsStillCount(t *testing.T) {
 			"having no opinion", got.Category, got.Source)
 	}
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// TELLING THE TRUTH ABOUT WHERE RESULTS CAME FROM
+// ════════════════════════════════════════════════════════════════════════════
+
+func TestSearch_SaysWhichKindOfFallbackItGave(t *testing.T) {
+	// A search with no exact hits can now be answered two very different ways,
+	// and the app renders a banner from the answer.
+	//
+	// "aquarium" finding the jellyfish video has genuinely answered the
+	// question. Calling that "trending now" — which is what the one shared
+	// flag used to make the app say — tells the user the app did not
+	// understand them, when it understood perfectly.
+	src, err := os.ReadFile("search.go")
+	if err != nil {
+		t.Fatalf("read search.go: %v", err)
+	}
+	s := string(src)
+	if !strings.Contains(s, `resp.RelatedKind = "subjects"`) {
+		t.Error("a near-subject rescue is not labelled, so the app cannot " +
+			"tell it apart from a trending fallback and will claim these " +
+			"genuinely related videos are merely popular")
+	}
+	if !strings.Contains(s, `resp.RelatedKind = "trending"`) {
+		t.Error("the trending rescue is not labelled")
+	}
+	// Both must set Related too, or the app renders no banner at all and
+	// presents a fallback as if it were an exact match.
+	if strings.Count(s, "resp.Related = true") != 2 {
+		t.Errorf("expected exactly two rescue paths to set Related, found %d — "+
+			"a rescue that does not set it is presented as a real match",
+			strings.Count(s, "resp.Related = true"))
+	}
+}
+
+func TestSearch_SubjectRescueIsTriedBeforeTrending(t *testing.T) {
+	// Order matters and is easy to get backwards. Trending always returns
+	// something, so if it runs first the near-subject path can never fire and
+	// "aquarium" gets popular videos forever.
+	src, err := os.ReadFile("search.go")
+	if err != nil {
+		t.Fatalf("read search.go: %v", err)
+	}
+	s := string(src)
+	subjects := strings.Index(s, "searchNearbySubjects(query)")
+	trending := strings.Index(s, "searchZeroResultRescue(resp.Intent)")
+	if subjects < 0 || trending < 0 {
+		t.Fatal("could not find both rescue paths")
+	}
+	if subjects > trending {
+		t.Error("trending is tried before near subjects. Trending always " +
+			"returns something, so the subject path would never run.")
+	}
+}
+
+func TestSearch_SuggestionsOnlyNameThingsTheAppHas(t *testing.T) {
+	// A suggestion chip that leads to an empty page is worse than no chip.
+	// These come from the topic graph, which is built from videos that exist,
+	// so every suggestion is by construction something the catalogue has.
+	src, err := os.ReadFile("topic_graph.go")
+	if err != nil {
+		t.Fatalf("read topic_graph.go: %v", err)
+	}
+	if !strings.Contains(string(src), "FROM challenges") {
+		t.Error("suggestions are not derived from real videos, so a chip " +
+			"could name a subject nothing is about")
+	}
+}

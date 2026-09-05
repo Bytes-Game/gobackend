@@ -53,6 +53,12 @@ type UnifiedSearchResponse struct {
 	// "category:<name>", or "general". Clients may use it to order
 	// sections (e.g. accounts first for username-shaped queries).
 	Intent string `json:"intent,omitempty"`
+	// WHY the results are related rather than exact: "subjects" means
+	// these videos really are about something near the query, "trending"
+	// means we gave up and showed what is popular. The app says a
+	// different thing for each, and saying "trending now" over a genuine
+	// subject match is a lie about where the results came from.
+	RelatedKind string `json:"relatedKind,omitempty"`
 	// Subjects that go with what was searched for, learned from which
 	// topics keep turning up on the same videos. Searching "jellyfish"
 	// offers aquarium and marine life. Empty when the query is not a
@@ -188,6 +194,7 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 		// searching "aquarium" should get the jellyfish video, not a shrug.
 		if near := searchNearbySubjects(query); len(near) > 0 {
 			resp.Related = true
+			resp.RelatedKind = "subjects"
 			for _, ch := range near {
 				if ch.ResponseCount > 0 && len(resp.Battles) < searchBattleCap {
 					resp.Battles = append(resp.Battles, ch)
@@ -200,6 +207,7 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 		if len(resp.Challenges) == 0 {
 			if rescued := searchZeroResultRescue(resp.Intent); len(rescued) > 0 {
 				resp.Related = true
+				resp.RelatedKind = "trending"
 				for _, ch := range rescued {
 					if ch.ResponseCount > 0 && len(resp.Battles) < searchBattleCap {
 						resp.Battles = append(resp.Battles, ch)
