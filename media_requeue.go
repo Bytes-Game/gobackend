@@ -49,17 +49,35 @@ package main
 // still waiting ('') — only ones that finished. So it cannot disturb work in
 // flight, and running it twice cannot double-claim anything.
 //
+// ════════════════════════════════════════════════════════════════════════════
+// TWO WAYS TO CHOOSE THE ROWS
+// ════════════════════════════════════════════════════════════════════════════
+//
+// By default it takes the oldest finished rows, which suits the reason above:
+// the oldest were transcoded by the oldest worker and have the most to gain,
+// and repeated calls walk steadily through the backlog.
+//
+// Naming ids instead suits the other reason, which turns out to be the common
+// one: a bug is fixed and the videos that showed it need to go round again to
+// prove it. Those are usually the NEWEST rows, so oldest-first could only
+// reach them by re-running the whole catalogue — hours of worker time to
+// correct one tag on one video. That is how it went the first time.
+//
 // Nothing decides quality here. Whether a video is worth re-encoding is a
 // question about the file, and only the worker has the file — see
 // progressiveSkipBps, which leaves an already-lean source alone.
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/lib/pq"
 )
 
 // requeueMaxBatch bounds one call.
@@ -76,16 +94,35 @@ const requeueDefaultBatch = 50
 
 type requeueRequest struct {
 	// How many videos to put back in the queue. Clamped to requeueMaxBatch.
+	// Ignored when IDs is given — a named list already says how many.
 	Limit int `json:"limit"`
 	// Which table: "challenges" (the video every viewer sees) or "responses"
 	// (the opponent side of a battle). Empty means challenges.
 	Kind string `json:"kind"`
+	// Particular videos to put back, instead of the oldest ones.
+	//
+	// The batch path walks the backlog oldest-first, which is right for
+	// "everything should get the benefit of the newer worker" and useless for
+	// the case that actually keeps coming up: a bug is fixed, and the two
+	// videos that showed it need to go round again to prove it. Those two are
+	// usually the NEWEST rows, so reaching them oldest-first meant re-running
+	// the entire catalogue — hours of worker time to correct one tag.
+	//
+	// A video not in this table, or one the worker is already holding, is
+	// reported back in SkippedIDs rather than silently dropped. Asking for a
+	// video and being told nothing happened is the whole reason to name it.
+	IDs []int `json:"ids"`
 }
 
 type requeueResponse struct {
 	Requeued int    `json:"requeued"`
 	Kind     string `json:"kind"`
 	Note     string `json:"note"`
+	// Which of the named ids were actually put back, and which were not.
+	// Only filled in when the request named ids — the batch path picks its
+	// own rows, so listing them would say nothing the count does not.
+	RequeuedIDs []int `json:"requeuedIds,omitempty"`
+	SkippedIDs  []int `json:"skippedIds,omitempty"`
 	// Whether the worker was started immediately, and what happened if not.
 	// See startWorkerNow.
 	WorkerStarted bool   `json:"workerStarted"`
@@ -139,22 +176,48 @@ func startWorkerNow(ctx context.Context) (bool, string) {
 // AdminRequeueMediaHandler puts finished videos back in the transcode queue.
 //
 // POST /api/v1/admin/media/requeue   {"limit": 50, "kind": "challenges"}
+// POST /api/v1/admin/media/requeue   {"ids": [260, 262], "kind": "challenges"}
 //
-// Oldest first, deliberately: the oldest rows are the ones transcoded by the
-// oldest worker, so they are the ones with the most to gain. It also makes
-// repeated calls walk steadily through the backlog instead of re-picking the
-// same rows.
+// Without ids: oldest first, deliberately. The oldest rows are the ones
+// transcoded by the oldest worker, so they are the ones with the most to gain,
+// and repeated calls walk steadily through the backlog instead of re-picking
+// the same rows.
+//
+// With ids: exactly those, in any order, and the answer says which of them
+// actually moved.
 func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
-	if db == nil {
-		http.Error(w, "db unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	var req requeueRequest
 	// An empty body is a valid request for the default batch, so a decode
 	// failure is only an error when there was something there to decode.
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
+
+	// Validate BEFORE looking at the database. A malformed request is a bad
+	// request whether or not the database happens to be up, and answering
+	// "service unavailable" to it sends whoever sent it looking in the wrong
+	// place.
+	//
+	// An "ids" key that is there but empty means the caller built a list and
+	// it came out empty. Falling through to "the oldest fifty" would be a
+	// surprise nobody asked for, so say so instead. (A missing key decodes to
+	// nil, an empty list to a non-nil empty slice — which is the difference
+	// this relies on.)
+	if req.IDs != nil && len(req.IDs) == 0 {
+		http.Error(w, `"ids" was given but empty`, http.StatusBadRequest)
+		return
+	}
+	if len(req.IDs) > requeueMaxBatch {
+		http.Error(w, fmt.Sprintf("%d ids is more than the %d a single call "+
+			"may queue", len(req.IDs), requeueMaxBatch), http.StatusBadRequest)
+		return
+	}
+
+	if db == nil {
+		http.Error(w, "db unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
 	limit := req.Limit
 	if limit <= 0 {
 		limit = requeueDefaultBatch
@@ -167,31 +230,49 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 		table = "challenge_responses"
 	}
 
-	// hls_attempts goes back to zero as well. It counts failures against a
-	// row so a genuinely broken source stops being retried forever; a row
-	// that succeeded and is being sent round again deserves a clean slate,
-	// and without this a video that failed four times years ago would be
-	// offered once and then dropped.
-	res, err := db.Exec(`
-		UPDATE `+table+`
-		   SET hls_manifest_url = '',
-		       hls_attempts     = 0,
-		       hls_claimed_at    = NULL
-		 WHERE id IN (
-		   SELECT id FROM `+table+`
-		    WHERE hls_manifest_url <> ''
-		      AND hls_manifest_url <> 'PENDING'
-		      AND COALESCE(video_url, '') <> ''
-		    ORDER BY created_at ASC
-		    LIMIT $1
-		 )`, limit)
+	var n int64
+	var requeuedIDs, skippedIDs []int
+	var err error
+	if len(req.IDs) > 0 {
+		requeuedIDs, err = requeueByID(table, req.IDs)
+		if err == nil {
+			n = int64(len(requeuedIDs))
+			skippedIDs = missingFrom(req.IDs, requeuedIDs)
+		}
+	} else {
+		// hls_attempts goes back to zero as well. It counts failures against a
+		// row so a genuinely broken source stops being retried forever; a row
+		// that succeeded and is being sent round again deserves a clean slate,
+		// and without this a video that failed four times years ago would be
+		// offered once and then dropped.
+		var res sql.Result
+		res, err = db.Exec(`
+			UPDATE `+table+`
+			   SET hls_manifest_url = '',
+			       hls_attempts     = 0,
+			       hls_claimed_at    = NULL
+			 WHERE id IN (
+			   SELECT id FROM `+table+`
+			    WHERE hls_manifest_url <> ''
+			      AND hls_manifest_url <> 'PENDING'
+			      AND COALESCE(video_url, '') <> ''
+			    ORDER BY created_at ASC
+			    LIMIT $1
+			 )`, limit)
+		if err == nil {
+			n, _ = res.RowsAffected()
+		}
+	}
 	if err != nil {
 		log.Printf("admin requeue: %s: %v", table, err)
 		http.Error(w, "requeue failed", http.StatusInternalServerError)
 		return
 	}
-	n, _ := res.RowsAffected()
 	log.Printf("admin requeue: %d %s rows put back in the transcode queue", n, table)
+	if len(skippedIDs) > 0 {
+		log.Printf("admin requeue: %s ids not put back (unknown, still "+
+			"queued, or held by the worker): %v", table, skippedIDs)
+	}
 
 	started, workerNote := startWorkerNow(r.Context())
 	log.Printf("admin requeue: worker started=%v: %s", started, workerNote)
@@ -202,7 +283,61 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 		Kind:     table,
 		Note: "nothing was deleted and the current files keep serving until " +
 			"each one is replaced",
+		RequeuedIDs:   requeuedIDs,
+		SkippedIDs:    skippedIDs,
 		WorkerStarted: started,
 		WorkerNote:    workerNote,
 	})
+}
+
+// requeueByID clears the "already transcoded" mark on the named rows and
+// reports which ones it actually cleared.
+//
+// Same guard as the batch path — a row still waiting (”) or held by the
+// worker ('PENDING') is left alone, so naming a video cannot disturb work in
+// flight. RETURNING is what makes the difference visible: a caller who names
+// five videos and gets three back knows two did not move, which is the
+// question they were asking by naming them.
+func requeueByID(table string, ids []int) ([]int, error) {
+	rows, err := db.Query(`
+		UPDATE `+table+`
+		   SET hls_manifest_url = '',
+		       hls_attempts     = 0,
+		       hls_claimed_at    = NULL
+		 WHERE id = ANY($1)
+		   AND hls_manifest_url <> ''
+		   AND hls_manifest_url <> 'PENDING'
+		   AND COALESCE(video_url, '') <> ''
+		RETURNING id`, pq.Array(ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	done := []int{}
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		done = append(done, id)
+	}
+	return done, rows.Err()
+}
+
+// missingFrom returns the entries of want that are not in got, in the order
+// they were asked for — the ids a caller named and did not get.
+func missingFrom(want, got []int) []int {
+	have := make(map[int]bool, len(got))
+	for _, id := range got {
+		have[id] = true
+	}
+	var missing []int
+	for _, id := range want {
+		if !have[id] {
+			missing = append(missing, id)
+			have[id] = true // an id named twice is reported once
+		}
+	}
+	return missing
 }
