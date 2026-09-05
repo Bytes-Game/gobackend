@@ -831,12 +831,39 @@ func tagsFromAnalysis(a videoAnalysis) []string {
 // Hindi in its own script and the keyword list has Hindi words in it; a
 // filter that only knew ASCII would strip them out of the text and never
 // match one.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY THE VOWEL MARKS HAVE TO BE KEPT
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Letters alone are not enough, and leaving them alone was a real bug. In
+// Hindi the vowels are written as small strokes attached to the consonants —
+// the ा in नाच, the ि and ् in भविष्य. Go does not count those strokes as
+// letters (they are "marks"), so a filter that keeps only letters throws
+// every vowel away and leaves a row of bare consonants.
+//
+// That is not a smaller version of the word. It is a different word, and it
+// collides with other words:
+//
+//	नाच          ("dance")            → न च
+//	हनुमान चालीसा ("Hanuman Chalisa")  → हन म न च ल स   ← contains "न च"
+//
+// So a devotional video about reciting the Hanuman Chalisa was tagged
+// "dance". Seen in production on challenge 260. Every Hindi keyword had the
+// same problem: stripped to consonants they are short, and short things
+// match by accident.
+//
+// Worse, it made the word-boundary padding above useless for Hindi. Its
+// whole job is to stop one word matching inside another, and it cannot do
+// that on fragments that were never words.
+//
+// Keeping the marks costs nothing anywhere else — English has none.
 func wordSearchable(s string) string {
 	var b strings.Builder
 	b.WriteByte(' ')
 	lastSpace := true
 	for _, r := range strings.ToLower(s) {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || isCombiningMark(r) {
 			b.WriteRune(r)
 			lastSpace = false
 			continue
@@ -850,6 +877,14 @@ func wordSearchable(s string) string {
 		b.WriteByte(' ')
 	}
 	return b.String()
+}
+
+// isCombiningMark reports whether r is a mark that attaches to the letter
+// before it rather than standing on its own — the vowel strokes and nasal
+// dots of Devanagari and of most other Indic scripts. Mn is a mark that
+// takes no width of its own (ि, ं); Mc is one that does (ा, ी).
+func isCombiningMark(r rune) bool {
+	return unicode.In(r, unicode.Mn, unicode.Mc)
 }
 
 func hasPass(a videoAnalysis, name string) bool {

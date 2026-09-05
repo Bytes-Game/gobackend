@@ -184,6 +184,74 @@ func TestKeywords_AOneLetterTranscriptionErrorStillDefeatsIt(t *testing.T) {
 	}
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// THE VOWEL MARKS ARE PART OF THE HINDI WORD
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Found in production, not in review. Challenge 260 is a Hindi video about
+// reciting the Hanuman Chalisa when something frightens you. It was tagged
+// "dance".
+//
+// In Hindi the vowels are small strokes attached to the consonants — the ा in
+// नाच, the ि in भविष्य. Go does not count those strokes as letters, so a
+// filter keeping only letters threw every vowel away and left a row of bare
+// consonants:
+//
+//	नाच          ("dance")            → न च
+//	हनूमान चालिशा ("Hanuman Chalisa")  → हन म न च ल श   ← contains "न च"
+//
+// Two different phrases, one string, one wrong tag. And it defeated the
+// word-boundary matching completely for Hindi: that padding exists to stop
+// one word matching inside another, and it cannot do that on fragments that
+// were never words to begin with.
+
+func TestWordSearchable_KeepsTheStrokesThatMakeAHindiWord(t *testing.T) {
+	cases := map[string]string{
+		"नाच":    " नाच ",
+		"भविष्य": " भविष्य ",
+		"खाना":   " खाना ",
+		"dance":  " dance ",
+		"a, b":   " a b ",
+	}
+	for in, want := range cases {
+		if got := wordSearchable(in); got != want {
+			t.Errorf("wordSearchable(%q) = %q, want %q. Dropping the vowel "+
+				"strokes leaves loose consonants, and loose consonants are "+
+				"short enough to collide with unrelated words.", in, got, want)
+		}
+	}
+}
+
+func TestKeywords_TheHanumanChalisaIsNotADanceVideo(t *testing.T) {
+	// Challenge 260's transcript, byte for byte as whisper wrote it and as it
+	// is stored. Nothing in this sentence is about dancing.
+	stored := "इसा क्यू हैं कि जब कभी किसी को डर लगे तो वो हनूमान चालिशा " +
+		"पढ़ना शुरू कर देता हैं याफर शिफ के सामने जो निगर्डिटिव अनर्जीज हैं " +
+		"वो क्यूट हैं पर जब हनूमान जी की बात आदी तो वो डरने लगे"
+
+	if tagsFor(stored)["dance"] {
+		t.Error("tagged dance. The match came from stripping the vowel marks " +
+			"off हनूमान चालिशा until the letters न and च sat next to each " +
+			"other — which is exactly what नाच collapses to. A wrong tag is " +
+			"worse for the feed than no tag.")
+	}
+}
+
+func TestKeywords_HindiStillMatchesWhenTheWordIsActuallyThere(t *testing.T) {
+	// The other half of the fix. Keeping the marks must not make Hindi
+	// unmatchable — that would trade a wrong tag for no tags at all.
+	cases := map[string]string{
+		"वो नाच रहा है":           "dance",
+		"मुझे खाना बनाना पसंद है": "food",
+		"मेरा भविष्य उज्ज्वल है":  "motivation",
+	}
+	for text, want := range cases {
+		if !tagsFor(text)[want] {
+			t.Errorf("%q did not tag %q — the word is right there", text, want)
+		}
+	}
+}
+
 func TestKeywords_AFeelingWordAlsoNamesTheMood(t *testing.T) {
 	// emotionsFromTags reads any tag that is an emotion label, so one entry
 	// can say what a video is about and how it feels. "funny" and "scary"
