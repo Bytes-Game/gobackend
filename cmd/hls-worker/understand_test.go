@@ -392,3 +392,110 @@ func TestAnalyze_TheCeilingStillFitsInsideOneJob(t *testing.T) {
 			"making them faster, not by raising this.", analyzeTimeout)
 	}
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// AND THE HALF THAT LOOKS INSTEAD OF READING
+// ════════════════════════════════════════════════════════════════════════════
+//
+// 79 of 114 videos produce no transcript, and 62 of those have no readable
+// text on screen either. Nothing that only reads has ever been able to help
+// them. This half is why the model chosen was a vision one.
+
+func TestFrames_StayOffUnlessEveryPieceIsPresent(t *testing.T) {
+	// Three things are needed: the multimodal binary, the weights, and the
+	// vision projector. Any one missing must count as off — a run started
+	// without the projector would fail on every silent video, which is most
+	// of them.
+	full := map[string]string{
+		framesBinEnv:       "/nonexistent/llama-mtmd-cli",
+		understandModelEnv: "/nonexistent/model.gguf",
+		framesProjectorEnv: "/nonexistent/mmproj.gguf",
+	}
+	for missing := range full {
+		for k, v := range full {
+			if k == missing {
+				t.Setenv(k, "")
+			} else {
+				t.Setenv(k, v)
+			}
+		}
+		if _, ran := understandContentFromFrames(t.Context(), "/tmp/nope.mp4", 10); ran {
+			t.Errorf("claimed to run with %s unset", missing)
+		}
+	}
+}
+
+func TestFrames_AskTheSameQuestionAsTheReadingHalf(t *testing.T) {
+	// Both halves feed the same auto_tags column and the same ranker. If they
+	// offered different categories, which pass happened to run would change
+	// what a video could possibly be filed under.
+	p := buildFramesPrompt()
+	for _, c := range understandCategories {
+		if !strings.Contains(p, c.Name+" — "+c.Means) {
+			t.Errorf("the frames prompt is missing %q, so the two halves no "+
+				"longer choose from the same list", c.Name)
+		}
+	}
+	// And err the same way. A picture invites guessing far more than a
+	// transcript does — there is always SOMETHING in a frame — so this line
+	// matters more here, not less.
+	if !strings.Contains(p, "worse than") {
+		t.Error("the frames prompt no longer tells the model which way to err")
+	}
+	// The specific over-guess this is written against: every video has a
+	// person or a room in it, and neither is what a video is about.
+	if !strings.Contains(p, "not a subject") {
+		t.Error("the frames prompt no longer warns that an ordinary scene is " +
+			"not a subject, which is the easiest way for it to invent a tag")
+	}
+}
+
+func TestFrames_AnswersGoThroughTheSameFilter(t *testing.T) {
+	// Same validation as the reading half, so a model looking at a picture
+	// can no more invent a category than one reading a sentence. Shared code
+	// rather than a second copy — see understoodTags.
+	src, err := os.ReadFile("understand_frames.go")
+	if err != nil {
+		t.Fatalf("read understand_frames.go: %v", err)
+	}
+	if !strings.Contains(string(src), "understoodTags(string(out))") {
+		t.Error("the frames pass no longer validates its answer through " +
+			"understoodTags. It could then store a tag nothing downstream knows.")
+	}
+	if !strings.Contains(string(src), `"-c", strconv.Itoa(understandFramesContextTokens)`) {
+		t.Error("the frames pass does not bound its context. The pictures take " +
+			"context too, so this is the same silent out-of-memory kill as the " +
+			"reading pass, only easier to hit.")
+	}
+}
+
+func TestFrames_TheSilentVideoPathFitsInTheBudget(t *testing.T) {
+	// This pass exists for videos with no sound. Such a video costs almost
+	// nothing before it: with no audio track the speech pass returns
+	// immediately, and the reading pass declines without starting a model. So
+	// the arithmetic that has to hold is shape + text + frames.
+	if shapeBudget+screenTextBudget+framesBudget > analyzeTimeout {
+		t.Errorf("a silent video's passes need %v but the ceiling is %v, so "+
+			"the one pass that could categorise it is the one that gets cut",
+			shapeBudget+screenTextBudget+framesBudget, analyzeTimeout)
+	}
+	if framesBudget <= 0 || framesBudget >= analyzeTimeout {
+		t.Errorf("framesBudget is %v, which is not a slice of %v",
+			framesBudget, analyzeTimeout)
+	}
+}
+
+func TestFrames_OnlyRunWhenReadingFoundNothing(t *testing.T) {
+	// Words beat pictures: somebody saying what they are doing is better
+	// evidence than a model inferring it from four stills. Running both on
+	// every video would double the cost of the videos that were already
+	// answered, which are the ones that needed help least.
+	src, err := os.ReadFile("analyze.go")
+	if err != nil {
+		t.Fatalf("read analyze.go: %v", err)
+	}
+	if !strings.Contains(string(src), "if len(tags) == 0 {") {
+		t.Error("the frames pass is no longer gated on the reading pass " +
+			"finding nothing, so every video now pays for both")
+	}
+}

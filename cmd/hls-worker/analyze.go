@@ -150,6 +150,7 @@ const (
 	screenTextBudget = 1 * time.Minute
 	speechBudget     = 3 * time.Minute
 	understandBudget = 2 * time.Minute
+	framesBudget     = 2 * time.Minute
 )
 
 // analyzeVideo inspects a local file and returns everything it could work
@@ -211,6 +212,29 @@ func analyzeVideo(ctx context.Context, src string) videoAnalysis {
 	if ranUnderstand {
 		a.Passes = append(a.Passes, "understand")
 		a.AutoTags = dedupeSorted(append(tags, shapeTags(a)...))
+	}
+
+	// And the other half: for a video that said nothing, LOOK at it.
+	//
+	// Only when reading came back with nothing, which is the whole point.
+	// Words are better evidence than pictures — somebody saying what they are
+	// doing beats a model inferring it from four stills — so when there are
+	// words worth reading, this does not run and does not cost anything. It
+	// exists for the 79 videos of 114 that produce no transcript at all, which
+	// no amount of reading has ever been able to help.
+	//
+	// That gate is also what keeps the budget honest. A silent video reaches
+	// here having spent almost nothing: with no audio track the speech pass
+	// returns immediately, and the reading pass declines before starting a
+	// model. So the pass that needs the time is the one that gets it.
+	if len(tags) == 0 {
+		framesCtx, cancelFrames := context.WithTimeout(ctx, framesBudget)
+		seen, ranFrames := understandContentFromFrames(framesCtx, src, dur)
+		cancelFrames()
+		if ranFrames {
+			a.Passes = append(a.Passes, "frames")
+			a.AutoTags = dedupeSorted(append(seen, shapeTags(a)...))
+		}
 	}
 
 	logAnalysis(src, a)
