@@ -104,11 +104,32 @@ func storeVideoAnalysis(table string, id int, raw json.RawMessage) {
 		tagsJSON = []byte("[]")
 	}
 
+	// What the video is ABOUT, lifted out of the JSON blob into its own
+	// column so it can be QUERIED.
+	//
+	// Topics are the open-vocabulary half — "thistle", "dark fantasy",
+	// "street food" — and inside video_analysis they were write-only:
+	// answering "which other videos are about thistles" meant parsing every
+	// row. In their own indexed column that becomes one question, which is
+	// what lets the feed match videos to each other instead of sorting them
+	// into eighteen boxes.
+	//
+	// Shaped, not filtered. Unlike auto_tags there is no list to check
+	// against — that is the point of topics — so this only lowercases and
+	// de-duplicates, the same normalisation both tag columns get, so that
+	// "Street Food" and "street food" are one topic rather than two.
+	topicsJSON, err := json.Marshal(normalizeTags(a.Topics))
+	if err != nil || len(a.Topics) == 0 {
+		topicsJSON = []byte("[]")
+	}
+
 	// Only these two tables have the columns, and table is chosen by
 	// hlsTableForKind from a fixed pair — never from user input.
 	if _, err := db.Exec(
-		`UPDATE `+table+` SET video_analysis = $2, auto_tags = $3 WHERE id = $1`,
-		id, []byte(raw), tagsJSON,
+		`UPDATE `+table+`
+		    SET video_analysis = $2, auto_tags = $3, content_topics = $4
+		  WHERE id = $1`,
+		id, []byte(raw), tagsJSON, topicsJSON,
 	); err != nil {
 		log.Printf("video analysis: could not save for %s id=%d: %v", table, id, err)
 	}
