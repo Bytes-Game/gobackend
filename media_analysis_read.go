@@ -131,6 +131,29 @@ func AdminReadAnalysisHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, readAnalysisRows(table, kind, 0, limit))
 }
 
+// analysisCreatorColumns names the two things the creator said about their own
+// video: the category they picked and the tags they typed.
+//
+// Both live only on challenges. A response is somebody's answer to another
+// person's challenge, so it never had a category or tags of its own, and those
+// columns were never added to its table.
+//
+// This is a function rather than two words inside the query because getting a
+// column name wrong here is not a small mistake. Postgres does not hand back an
+// empty value for a column that does not exist — it refuses the whole
+// statement. So a single wrong name returns nothing for every video at once,
+// and the endpoint looks like "nothing has been analysed yet" rather than like
+// a broken query. That is exactly what happened: this asked for a column called
+// "tags", the creator's tags are in custom_tags, and the endpoint answered null
+// for the entire catalogue.
+func analysisCreatorColumns(table string) string {
+	if table == "challenges" {
+		return `COALESCE(category, ''), COALESCE(custom_tags::text, '[]')`
+	}
+	// Literals, not columns. Nothing to read, so nothing to ask for.
+	return `'', '[]'`
+}
+
 // readAnalysisRows pulls stored analyses, newest first. id > 0 asks for one.
 func readAnalysisRows(table, kind string, id, limit int) []analysisRow {
 	where := `WHERE video_analysis IS NOT NULL`
@@ -141,7 +164,7 @@ func readAnalysisRows(table, kind string, id, limit int) []analysisRow {
 	}
 	rows, err := db.Query(`
 		SELECT id, created_at, video_analysis::text,
-		       COALESCE(category, ''), COALESCE(tags::text, '[]')
+		       `+analysisCreatorColumns(table)+`
 		  FROM `+table+`
 		  `+where+`
 		 ORDER BY created_at DESC
