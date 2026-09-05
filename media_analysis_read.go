@@ -60,6 +60,20 @@ type analysisRow struct {
 	Speech   string   `json:"speech,omitempty"`
 	Screen   string   `json:"screenText,omitempty"`
 	AutoTags []string `json:"autoTags,omitempty"`
+
+	// ── WHO SAYS WHAT THIS VIDEO IS ──────────────────────────────────────
+	//
+	// The whole point of surfacing these together. The machine now outranks
+	// the creator when it has an opinion, and the only way to know whether
+	// that is the right call is to see how often the two disagree and on
+	// what. Counting that needs both answers side by side, which nothing
+	// else in the app shows.
+	CreatorCategory string `json:"creatorCategory,omitempty"`
+	MachineCategory string `json:"machineCategory,omitempty"`
+	// Which one won, and whether the other was overruled: "agreed",
+	// "machine", "creator" or "guess".
+	CategorySource string `json:"categorySource,omitempty"`
+	Disputed       bool   `json:"categoryDisputed,omitempty"`
 	// The free-form description, which is what actually says what a video is
 	// about. Surfaced here because it is the only way to see whether the
 	// model understood a video — auto_tags can only ever say one of eighteen
@@ -126,7 +140,8 @@ func readAnalysisRows(table, kind string, id, limit int) []analysisRow {
 		args = append(args, id)
 	}
 	rows, err := db.Query(`
-		SELECT id, created_at, video_analysis::text
+		SELECT id, created_at, video_analysis::text,
+		       COALESCE(category, ''), COALESCE(tags::text, '[]')
 		  FROM `+table+`
 		  `+where+`
 		 ORDER BY created_at DESC
@@ -141,10 +156,12 @@ func readAnalysisRows(table, kind string, id, limit int) []analysisRow {
 	for rows.Next() {
 		var rowID int
 		var created time.Time
-		var raw string
-		if err := rows.Scan(&rowID, &created, &raw); err != nil {
+		var raw, dbCategory, tagsJSON string
+		if err := rows.Scan(&rowID, &created, &raw, &dbCategory, &tagsJSON); err != nil {
 			continue
 		}
+		var creatorTags []string
+		_ = json.Unmarshal([]byte(tagsJSON), &creatorTags)
 		var a VideoAnalysis
 		if err := json.Unmarshal([]byte(raw), &a); err != nil {
 			// Keep the row. That the stored blob is unreadable is itself
@@ -154,6 +171,15 @@ func readAnalysisRows(table, kind string, id, limit int) []analysisRow {
 			out = append(out, analysisRow{ID: rowID, Kind: kind})
 			continue
 		}
+		// The same decision the ranker makes, so this view shows what
+		// actually happens rather than a second opinion about it.
+		//
+		// Named catVerdict because `verdict` is already a function in this
+		// package — shadowing it here compiles and then confuses whoever
+		// reads it next.
+		catVerdict := categoryFromEvidence(
+			normalizeTags(a.AutoTags), normalizeTags(creatorTags),
+			dbCategory, "", "", analysisText(&a))
 		out = append(out, analysisRow{
 			ID:              rowID,
 			Kind:            kind,
@@ -162,6 +188,10 @@ func readAnalysisRows(table, kind string, id, limit int) []analysisRow {
 			Speech:          a.Speech,
 			Screen:          a.ScreenText,
 			AutoTags:        a.AutoTags,
+			CreatorCategory: catVerdict.Creator,
+			MachineCategory: catVerdict.Machine,
+			CategorySource:  catVerdict.Source,
+			Disputed:        catVerdict.Disputed(),
 			Topics:          a.Topics,
 			SpeechWords:     countWords(a.Speech),
 			ScreenTextChars: len(a.ScreenText),

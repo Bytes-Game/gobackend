@@ -154,33 +154,33 @@ func normalizeOneTag(t string) string {
 // here would be a second, worse copy of the keyword matcher this is meant to
 // improve on.
 var tagCategoryAliases = map[string]string{
-	"funny":    "comedy",
-	"humor":    "comedy",
-	"meme":     "comedy",
-	"gym":      "sports",
-	"fitness":  "sports",
-	"workout":  "sports",
-	"football": "sports",
-	"cricket":  "sports",
-	"singing":  "music",
-	"rap":      "music",
-	"song":     "music",
-	"dancing":  "dance",
-	"cooking":  "food",
-	"recipe":   "food",
-	"tutorial": "education",
-	"howto":    "education",
-	"how to":   "education",
-	"learn":    "education",
-	"coding":   "tech",
-	"gadget":   "tech",
-	"vlog":     "story",
+	"funny":     "comedy",
+	"humor":     "comedy",
+	"meme":      "comedy",
+	"gym":       "sports",
+	"fitness":   "sports",
+	"workout":   "sports",
+	"football":  "sports",
+	"cricket":   "sports",
+	"singing":   "music",
+	"rap":       "music",
+	"song":      "music",
+	"dancing":   "dance",
+	"cooking":   "food",
+	"recipe":    "food",
+	"tutorial":  "education",
+	"howto":     "education",
+	"how to":    "education",
+	"learn":     "education",
+	"coding":    "tech",
+	"gadget":    "tech",
+	"vlog":      "story",
 	"storytime": "story",
-	"makeup":   "fashion",
-	"outfit":   "fashion",
-	"style":    "fashion",
-	"scary":    "horror",
-	"creepy":   "horror",
+	"makeup":    "fashion",
+	"outfit":    "fashion",
+	"style":     "fashion",
+	"scary":     "horror",
+	"creepy":    "horror",
 }
 
 // categoryFromTags returns the category a creator's tags name, or "" if none
@@ -213,9 +213,9 @@ func categoryFromTags(tags []string) string {
 // categoryForContent decides a video's category from everything known about
 // it, in order of how much the source can be trusted.
 //
-//	1. what the creator explicitly chose as the category
-//	2. what the creator's tags say
-//	3. keyword matching on the subject line — the guess
+//  1. what the creator explicitly chose as the category
+//  2. what the creator's tags say
+//  3. keyword matching on the subject line — the guess
 //
 // The creator outranks the guesser, which is the whole point: a keyword
 // matcher reading a five-word subject line is the weakest signal available
@@ -270,9 +270,9 @@ func emotionsFromTags(tags []string) []string {
 // emotionsForContent works out a video's mood from everything available, in
 // order of how much each source can be trusted.
 //
-//	1. emotions the creator explicitly picked from the list
-//	2. tags that name a mood outright
-//	3. keyword matching over the caption AND the tags
+//  1. emotions the creator explicitly picked from the list
+//  2. tags that name a mood outright
+//  3. keyword matching over the caption AND the tags
 //
 // The third step reads the tags as text as well, so "hilarious" reaches the
 // "funny" mood through the keyword table even though it is not an emotion
@@ -308,3 +308,112 @@ func emotionsForContent(explicit []string, tags []string, subject, prefix, capti
 	}
 	return out
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// WHO DECIDES WHAT A VIDEO IS
+// ════════════════════════════════════════════════════════════════════════════
+//
+// categoryForContent above ranks the creator's word first, and that was right
+// when the only alternative was keyword-matching a five-word subject line. It
+// is not right any more.
+//
+// The worker now reads what is said in the video, in any language, reads what
+// is written on the screen, and looks at the frames. Set against that, the
+// creator's category is an unverified claim that nothing ever checks — and the
+// people making it are often not trying to game anything, they simply do not
+// know. Somebody uploading their first video, or a child, picks whatever
+// sounds closest. Everybody downstream then treats that guess as fact.
+//
+// So the machine's reading is preferred. Not because people lie, but because
+// one side has looked at the video and the other has not.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHAT KEEPS THIS SAFE
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The model very often has NO opinion — it answers "other" whenever it cannot
+// tell, and "other" is deliberately never stored as a tag. So its category
+// comes back empty for most of the catalogue, and empty must never beat a real
+// answer from the creator. "Machine preferred" means preferred WHEN IT HAS ONE.
+//
+// Get that wrong and every video in the app loses its category at once, which
+// is the single most damaging thing this file could do.
+type categoryVerdict struct {
+	// Category is the answer, and what everything downstream uses.
+	Category string
+	// Machine is what the model concluded; Creator is what the person who
+	// uploaded it claimed. Either may be empty, and usually one is.
+	Machine string
+	Creator string
+	// Source names which one won: "agreed", "machine", "creator" or "guess".
+	// Recorded so the choice can be counted afterwards rather than argued
+	// about — see Disputed.
+	Source string
+}
+
+// Disputed reports that BOTH sides had an opinion and they differ.
+//
+// This is the interesting case and the reason both are kept rather than
+// collapsed. It does not mean the creator lied and it does not mean the model
+// is right; it means nobody actually knows what this video is, and a category
+// nobody can corroborate should not be pushed at people who asked for that
+// category. See how it is used in scoring.
+func (v categoryVerdict) Disputed() bool {
+	return v.Machine != "" && v.Creator != "" && v.Machine != v.Creator
+}
+
+// usableCategory returns a creator's explicit choice, or "" if they did not
+// really make one. "other" and "general" are what the app stores when nobody
+// chose, so neither is a claim about anything.
+func usableCategory(explicit string) string {
+	if explicit == "" || explicit == "other" || explicit == "general" {
+		return ""
+	}
+	return explicit
+}
+
+// categoryFromEvidence decides a video's category from every source, with the
+// one that actually examined the video ranked first.
+//
+// machineTags are the worker's auto_tags — the model's conclusion. creatorTags
+// and explicit are the uploader's. They must arrive SEPARATELY: merged into one
+// list the creator's entries come first and would win by position alone, which
+// is precisely the behaviour being replaced.
+func categoryFromEvidence(machineTags, creatorTags []string, explicit, subject, prefix, analysis string) categoryVerdict {
+	machine := categoryFromTags(machineTags)
+	creator := usableCategory(explicit)
+	if creator == "" {
+		creator = categoryFromTags(creatorTags)
+	}
+
+	switch {
+	case machine != "" && machine == creator:
+		// Both looked and agree. The strongest answer available.
+		return categoryVerdict{Category: machine, Machine: machine, Creator: creator, Source: "agreed"}
+	case machine != "":
+		// The machine has an opinion. It wins whether or not the creator
+		// offered one, and Disputed records when it overruled them.
+		return categoryVerdict{Category: machine, Machine: machine, Creator: creator, Source: "machine"}
+	case creator != "":
+		// The model could not tell. THIS is the branch that stops "machine
+		// preferred" emptying the catalogue.
+		return categoryVerdict{Category: creator, Creator: creator, Source: "creator"}
+	default:
+		// Nobody knows. Keyword-match the words as a last resort, exactly as
+		// before — a guess, and labelled as one.
+		return categoryVerdict{Category: inferCategory(subject, prefix, analysis), Source: "guess"}
+	}
+}
+
+// disputedCategoryTrust is how much of the category boost survives when the
+// creator and the model disagree about what a video is.
+//
+// Not zero: the model is not always right, and its measured accuracy is
+// nowhere near good enough to justify erasing a category outright. Not one:
+// half the time this video is not what its category says, and the viewer asked
+// for that category specifically.
+//
+// A number rather than a rule, so it can be moved once there is data on which
+// side wins a disagreement. That is exactly what CategorySource is recorded
+// for.
+const disputedCategoryTrust = 0.6

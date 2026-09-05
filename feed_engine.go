@@ -201,11 +201,18 @@ type ContentScore struct {
 	TrendingScore      float64 `json:"trendingScore"`
 	QualityScore       float64 `json:"qualityScore"`
 	// === Content understanding ===
-	EnergyLevel      float64            `json:"energyLevel"`      // 0=chill, 1=intense (may be inferred for medium/unset; used by energyFit)
-	EnergyLevelLabel float64            `json:"energyLevelLabel"` // discrete label energy (energyStringToFloat); used by energyHourMatch to match EnergyByHour's train scale
-	Category         string             `json:"category"`         // Primary category
-	Tags             []string           `json:"tags,omitempty"`   // Creator's own words — see content_tags.go
-	EmotionVector    map[string]float64 `json:"emotionVector"`    // "happy":0.5, "competitive":0.3
+	EnergyLevel      float64 `json:"energyLevel"`      // 0=chill, 1=intense (may be inferred for medium/unset; used by energyFit)
+	EnergyLevelLabel float64 `json:"energyLevelLabel"` // discrete label energy (energyStringToFloat); used by energyHourMatch to match EnergyByHour's train scale
+	Category         string  `json:"category"`         // Primary category
+	// Where Category came from: "agreed", "machine", "creator" or
+	// "guess". Recorded so the decision can be counted afterwards
+	// rather than argued about.
+	CategorySource string `json:"categorySource,omitempty"`
+	// True when the creator and the model both had an opinion and
+	// they differ — see categoryVerdict.Disputed.
+	CategoryDisputed bool               `json:"categoryDisputed,omitempty"`
+	Tags             []string           `json:"tags,omitempty"` // Creator's own words — see content_tags.go
+	EmotionVector    map[string]float64 `json:"emotionVector"`  // "happy":0.5, "competitive":0.3
 	// === Creator info (denormalized for speed) ===
 	CreatorID        string  `json:"creatorId"`
 	CreatorLeague    string  `json:"creatorLeague"`
@@ -3014,14 +3021,21 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		// Cheap: at most ten short strings, and this runs inside the cached
 		// per-content computation rather than per request.
 		cs.Tags = mergeTags(normalizeTags(rawTags), normalizeTags(rawAutoTags))
-		// Category, best source first: what the creator picked, then what
-		// their tags say, then keyword matching on the subject line. That
-		// last one is a guess and used to be the only input — see
-		// content_tags.go.
-		// The caption the matcher reads now includes anything found on screen
-		// or spoken aloud, so a video whose only description is burned into
-		// the picture is no longer invisible to it.
-		cs.Category = categoryForContent(dbCategory, cs.Tags, subject, prefix, analysisText(analysis))
+		// Category, with the source that actually EXAMINED the video
+		// ranked first — see categoryFromEvidence in content_tags.go.
+		// The creator's word used to win outright, so a model that had
+		// read the speech and watched the frames was overruled by an
+		// unverified claim nothing ever checked.
+		//
+		// The two sides are passed separately and deliberately. Merged
+		// into one list the creator's tags come first and would win on
+		// position alone, which is the old behaviour under a new name.
+		catVerdict := categoryFromEvidence(
+			normalizeTags(rawAutoTags), normalizeTags(rawTags),
+			dbCategory, subject, prefix, analysisText(analysis))
+		cs.Category = catVerdict.Category
+		cs.CategorySource = catVerdict.Source
+		cs.CategoryDisputed = catVerdict.Disputed()
 		switch dbEnergy {
 		case "low":
 			cs.EnergyLevel = 0.25
@@ -3300,6 +3314,18 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 			}
 			break
 		}
+	}
+	// A category the two sources DISAGREE about is one nobody can
+	// corroborate: the creator says one thing, the model that read
+	// and watched the video says another, and only one can be
+	// right. Showing it at full strength to somebody who asked for
+	// that category bets their feed on a coin toss.
+	//
+	// Only the POSITIVE side is damped. If a viewer actively avoids
+	// this category the penalty stands untouched — when we are
+	// unsure what a video is, not showing it is the safe error.
+	if cs.CategoryDisputed && relevance > 0 {
+		relevance *= disputedCategoryTrust
 	}
 	breakdown["relevance"] = relevance
 

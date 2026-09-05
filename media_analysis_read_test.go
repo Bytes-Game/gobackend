@@ -8,9 +8,21 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
+// The query also returns the creator's own category and tags, so the endpoint
+// can show BOTH answers to "what is this video" side by side — the creator's
+// and the model's. Counting how often they disagree is the only way to know
+// whether preferring the machine was the right call, and nothing else in the
+// app puts the two together.
 func analysisRowsFor(raw string) *sqlmock.Rows {
-	return sqlmock.NewRows([]string{"id", "created_at", "video_analysis"}).
-		AddRow(259, time.Now(), raw)
+	return analysisRowsWithCreator(raw, "", "[]")
+}
+
+// analysisRowsWithCreator is the same row with the creator's claim filled in,
+// for the cases that are about the disagreement rather than the transcript.
+func analysisRowsWithCreator(raw, category, tagsJSON string) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{
+		"id", "created_at", "video_analysis", "category", "tags",
+	}).AddRow(259, time.Now(), raw, category, tagsJSON)
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -102,5 +114,67 @@ func TestReadAnalysis_CountsWordsTheSameWayTheWorkerLogDoes(t *testing.T) {
 		if got := countWords(in); got != want {
 			t.Errorf("countWords(%q) = %d, want %d", in, got, want)
 		}
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// AND WHO SAID WHAT
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The machine now outranks the creator when it has an opinion. Whether that
+// was right is an empirical question, and it can only be answered by seeing
+// both answers together — which is what this endpoint is now for.
+
+func TestReadAnalysis_ShowsBothAnswersWhenTheyDisagree(t *testing.T) {
+	mock, cleanup := withMockDB(t)
+	defer cleanup()
+
+	// The model read the video and called it horror. The creator said comedy.
+	stored := `{"passes":["shape","speech","understand"],` +
+		`"speech":"something moved behind me and I ran",` +
+		`"autoTags":["horror","scary","talking"],"topics":["ghost"]}`
+	mock.ExpectQuery(regexp.QuoteMeta("FROM challenges")).
+		WillReturnRows(analysisRowsWithCreator(stored, "comedy", `["comedy"]`))
+
+	got := readAnalysisRows("challenges", "challenges", 259, 1)
+	if len(got) != 1 {
+		t.Fatalf("expected one row, got %d", len(got))
+	}
+	r := got[0]
+	if r.MachineCategory != "horror" || r.CreatorCategory != "comedy" {
+		t.Errorf("got machine=%q creator=%q, want horror and comedy. Both have "+
+			"to survive or the disagreement cannot be counted.",
+			r.MachineCategory, r.CreatorCategory)
+	}
+	if !r.Disputed {
+		t.Error("the two answers differ and it is not reported as disputed")
+	}
+	if r.CategorySource != "machine" {
+		t.Errorf("source is %q, want machine — the model examined the video",
+			r.CategorySource)
+	}
+	if len(r.Topics) != 1 || r.Topics[0] != "ghost" {
+		t.Errorf("topics came back as %v; they are what actually says what "+
+			"the video is about", r.Topics)
+	}
+}
+
+func TestReadAnalysis_SaysWhenBothSidesAgree(t *testing.T) {
+	mock, cleanup := withMockDB(t)
+	defer cleanup()
+
+	stored := `{"passes":["understand"],"autoTags":["food"]}`
+	mock.ExpectQuery(regexp.QuoteMeta("FROM challenges")).
+		WillReturnRows(analysisRowsWithCreator(stored, "food", `["food"]`))
+
+	got := readAnalysisRows("challenges", "challenges", 259, 1)
+	if len(got) != 1 {
+		t.Fatalf("expected one row, got %d", len(got))
+	}
+	if got[0].CategorySource != "agreed" {
+		t.Errorf("source is %q, want agreed", got[0].CategorySource)
+	}
+	if got[0].Disputed {
+		t.Error("agreement reported as a dispute")
 	}
 }
