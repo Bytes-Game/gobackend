@@ -653,3 +653,75 @@ func TestPrompt_AsksForTopicsWithoutGivingAList(t *testing.T) {
 		t.Error("the prompt no longer asks for topics in one language")
 	}
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE MODEL'S FIRST ANSWER IS ITS ANSWER
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The prompt says "pick one, or at most two if the video genuinely spans
+// both", and the backend files a video under the FIRST tag it recognises. So
+// the order the model answers in decides the category, and sorting the answer
+// alphabetically hands the decision to the alphabet instead.
+//
+// Video 108 is the case that proved it. Its transcript is a dark-fantasy
+// scene, and the model answers {"categories": ["story", "horror"]} — story
+// first, which is also what its creator chose. Sorted, "horror" came first,
+// the backend filed it under horror, and the video was recorded as the machine
+// OVERRULING its creator when in fact the two agreed.
+
+func TestTags_KeepTheOrderTheModelAnsweredIn(t *testing.T) {
+	got := understoodTags(`{"categories": ["story", "horror"], "feelings": ["intense", "scary"]}`)
+	if len(got) == 0 {
+		t.Fatal("no tags came back at all")
+	}
+	if got[0] != "story" {
+		t.Errorf("first tag is %q, want story. The model named story first and "+
+			"the backend takes the first category it recognises, so anything "+
+			"else means the answer was reordered and the alphabet chose the "+
+			"category. Got %v", got[0], got)
+	}
+}
+
+func TestTags_CategoriesStillComeBeforeFeelings(t *testing.T) {
+	// A feeling can alias to a category ("scary" reads as horror), so a
+	// feelings-first order would let the mood outrank the subject.
+	got := understoodTags(`{"categories": ["food"], "feelings": ["scary"]}`)
+	if len(got) < 2 || got[0] != "food" {
+		t.Errorf("got %v, want the category first", got)
+	}
+}
+
+func TestTags_TheModelsAnswerIsNotSorted(t *testing.T) {
+	// Guards the call site as well as the function: analyze.go merges the
+	// model's tags with the shape tags, and sorting THERE undoes this just as
+	// completely.
+	src, err := os.ReadFile("analyze.go")
+	if err != nil {
+		t.Fatalf("read analyze.go: %v", err)
+	}
+	s := string(src)
+	for _, bad := range []string{
+		"dedupeSorted(append(read.Tags",
+		"dedupeSorted(append(seen.Tags",
+	} {
+		if strings.Contains(s, bad) {
+			t.Errorf("%s — the model's answer is sorted after being merged with "+
+				"the shape tags, so its first category is no longer first and "+
+				"the backend files the video under whichever choice sorts "+
+				"earliest", bad)
+		}
+	}
+}
+
+func TestDedupeStable_KeepsOrderAndDropsRepeats(t *testing.T) {
+	got := dedupeStable([]string{"story", "horror", "story", "", "talking"})
+	want := []string{"story", "horror", "talking"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}

@@ -218,7 +218,7 @@ func analyzeVideo(ctx context.Context, src string) videoAnalysis {
 	cancelUnderstand()
 	if ranUnderstand {
 		a.Passes = append(a.Passes, "understand")
-		a.AutoTags = dedupeSorted(append(read.Tags, shapeTags(a)...))
+		a.AutoTags = dedupeStable(append(read.Tags, shapeTags(a)...))
 		// Topics are stored as they came, not merged into AutoTags. Nothing
 		// ranks on them and that is the point — see the topics note in
 		// understand.go.
@@ -244,7 +244,7 @@ func analyzeVideo(ctx context.Context, src string) videoAnalysis {
 		cancelFrames()
 		if ranFrames {
 			a.Passes = append(a.Passes, "frames")
-			a.AutoTags = dedupeSorted(append(seen.Tags, shapeTags(a)...))
+			a.AutoTags = dedupeStable(append(seen.Tags, shapeTags(a)...))
 			if len(seen.Topics) > 0 {
 				a.Topics = seen.Topics
 			}
@@ -953,7 +953,45 @@ func shapeTags(a videoAnalysis) []string {
 
 // dedupeSorted drops repeats and sorts, so the stored value does not churn
 // between runs that found the same things in a different order.
+//
+// Only for tags whose order means nothing — keyword matches. Never for a
+// model's answer: see dedupeStable.
 func dedupeSorted(tags []string) []string {
+	out := dedupeStable(tags)
+	sort.Strings(out)
+	return out
+}
+
+// dedupeStable drops repeats and KEEPS THE ORDER IT WAS GIVEN.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY THE ORDER IS NOT DECORATION
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The model is told "pick one category, or at most two if the video genuinely
+// spans both". When it names two, the first is its answer and the second is
+// the qualifier. And the backend picks a video's category by walking the tag
+// list and taking the FIRST one it recognises.
+//
+// So sorting the answer alphabetically silently replaces the model's choice
+// with whichever of its choices happens to start with an earlier letter.
+//
+// This was not hypothetical. Video 108 is a dark-fantasy scene — "What brings
+// you to the land of the gatekeepers? I'm searching for someone." Run against
+// that transcript the model answers:
+//
+//	{"categories": ["story", "horror"], ...}
+//
+// Story first, which is also exactly what its creator chose. Sorted, that
+// became ["horror", "intense", "scary", "story", "talking"], the backend took
+// "horror", and the video was recorded as a case of the machine OVERRULING its
+// creator — with its category boost damped for a disagreement that never
+// happened.
+//
+// That second cost is the worse one. The whole point of recording both answers
+// was to measure how often the machine and the creator really disagree, and a
+// sort was manufacturing disagreements into that measurement.
+func dedupeStable(tags []string) []string {
 	seen := make(map[string]bool, len(tags))
 	var out []string
 	for _, t := range tags {
@@ -962,7 +1000,6 @@ func dedupeSorted(tags []string) []string {
 			out = append(out, t)
 		}
 	}
-	sort.Strings(out)
 	return out
 }
 
