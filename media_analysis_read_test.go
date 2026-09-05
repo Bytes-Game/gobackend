@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -156,6 +158,98 @@ func TestReadAnalysis_ShowsBothAnswersWhenTheyDisagree(t *testing.T) {
 	if len(r.Topics) != 1 || r.Topics[0] != "ghost" {
 		t.Errorf("topics came back as %v; they are what actually says what "+
 			"the video is about", r.Topics)
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ASKING FOR A COLUMN THAT IS NOT THERE
+// ════════════════════════════════════════════════════════════════════════════
+//
+// This endpoint shipped asking for a column called "tags". No table here has
+// one — the creator's tags are in custom_tags. Postgres does not return an
+// empty value for a column that does not exist; it refuses the whole query. So
+// the endpoint answered null for every video on the platform, which reads
+// exactly like "nothing has been analysed yet".
+//
+// The mock database cannot catch this. It replays whatever rows a test hands
+// it and never looks at the column names, so every test above passed against a
+// query the real database rejects. These two check the names themselves.
+
+func TestReadAnalysis_AsksChallengesForColumnsThatExist(t *testing.T) {
+	cols := analysisCreatorColumns("challenges")
+
+	if strings.Contains(cols, "custom_tags") == false {
+		t.Errorf("the creator's tags are read from %q. The column is "+
+			"custom_tags — asking for anything else takes down the whole "+
+			"listing, not just the tags.", cols)
+	}
+
+	// Checked against the schema rather than against a remembered name, so
+	// renaming the column in database.go fails here too instead of failing in
+	// production.
+	schema, err := os.ReadFile("database.go")
+	if err != nil {
+		t.Fatalf("read database.go: %v", err)
+	}
+	for _, col := range []string{"custom_tags", "category"} {
+		if !strings.Contains(string(schema), "ALTER TABLE challenges ADD COLUMN "+col+" ") {
+			t.Errorf("the analysis query asks challenges for %q, but the "+
+				"schema in database.go never adds that column to challenges",
+				col)
+		}
+		if !strings.Contains(cols, col) {
+			t.Errorf("the analysis query no longer reads %q from challenges", col)
+		}
+	}
+}
+
+func TestReadAnalysis_AsksResponsesForNothingItDoesNotHave(t *testing.T) {
+	// challenge_responses has neither column: a response answers somebody
+	// else's challenge, so it never carried a category or the responder's own
+	// tags. The fragment for that table must be literals only.
+	schema, err := os.ReadFile("database.go")
+	if err != nil {
+		t.Fatalf("read database.go: %v", err)
+	}
+	cols := analysisCreatorColumns("challenge_responses")
+	for _, absent := range []string{"category", "custom_tags", "tags"} {
+		if strings.Contains(string(schema), "ALTER TABLE challenge_responses ADD COLUMN "+absent+" ") {
+			// Somebody added it. Then reading it is fine and this test is the
+			// thing that is out of date.
+			continue
+		}
+		if strings.Contains(cols, absent) {
+			t.Errorf("the responses query asks for %q, which that table does "+
+				"not have. One missing column returns nothing for every "+
+				"response, not an empty value for that one field. Got: %s",
+				absent, cols)
+		}
+	}
+}
+
+func TestReadAnalysis_StillWorksForResponses(t *testing.T) {
+	// The end-to-end shape of the above: a response comes back with its
+	// reading, and with no creator claim to disagree with.
+	mock, cleanup := withMockDB(t)
+	defer cleanup()
+
+	stored := `{"passes":["understand"],"speech":"watch this","autoTags":["dance"]}`
+	mock.ExpectQuery(regexp.QuoteMeta("FROM challenge_responses")).
+		WillReturnRows(analysisRowsWithCreator(stored, "", "[]"))
+
+	got := readAnalysisRows("challenge_responses", "responses", 0, 20)
+	if len(got) != 1 {
+		t.Fatalf("expected one row, got %d", len(got))
+	}
+	if got[0].Speech != "watch this" {
+		t.Errorf("the transcript did not come back; got %q", got[0].Speech)
+	}
+	if got[0].CreatorCategory != "" {
+		t.Errorf("a response reported a creator category of %q; there is no "+
+			"column for one", got[0].CreatorCategory)
+	}
+	if got[0].Disputed {
+		t.Error("a response was reported as disputed, but only one side spoke")
 	}
 }
 
