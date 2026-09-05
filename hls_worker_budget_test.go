@@ -20,14 +20,21 @@ import (
 // inequality so an innocuous-looking edit to one number can't silently
 // reintroduce the overshoot.
 func TestHLSWorkerTimeBudgetsFitInsideJobTimeout(t *testing.T) {
-	// Setup has to cover a whisper CACHE MISS, not just apt.
+	// Setup has to cover a CACHE MISS, not just apt — and there are two
+	// caches now, either or both of which can miss on the same run.
 	//
-	// The cache key holds the model name, so changing the model rebuilds
-	// whisper.cpp and re-downloads the model on the very next run. Measured
-	// at 2m09s for the 466MB small model; medium is 1.5GB. That build was
-	// never counted here, which left a cache-miss run about a minute from
-	// the kill switch with nothing in the repo saying so.
-	const setupAllowanceMin = 5 // checkout + setup-go + apt + a whisper rebuild
+	// Each cache key holds its model name, so changing a model rebuilds that
+	// program and re-downloads its weights on the very next run:
+	//
+	//	whisper.cpp   build ~2m + 1.5GB model   (measured 2m09s at 466MB)
+	//	llama.cpp     build ~6m + 2.4GB model
+	//
+	// The whisper build was never counted here at all, which once left a
+	// cache-miss run about a minute from the kill switch with nothing in the
+	// repo saying so. Adding a second, larger download without raising this
+	// would repeat that exactly — which is the whole reason this number is
+	// checked by a test rather than left in a comment.
+	const setupAllowanceMin = 14 // checkout + setup-go + apt + BOTH rebuilds
 
 	raw, err := os.ReadFile(".github/workflows/hls-worker.yml")
 	if err != nil {
