@@ -406,7 +406,9 @@ func understoodTags(raw string) []string {
 		}
 		out = append(out, t)
 	}
-	return dedupeSorted(out)
+	// Stable, not sorted: the model's first category is its answer and
+	// the backend takes the first one it recognises. See dedupeStable.
+	return dedupeStable(out)
 }
 
 // understoodTopics pulls the free-form description out of the same answer.
