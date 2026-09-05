@@ -103,6 +103,18 @@ const framesWidth = 256
 
 // understandFramesPrompt asks the same question of a picture that
 // understandPrompt asks of a transcript, and errs the same way.
+//
+// Including the topics question, which it originally left out. That omission
+// meant the videos that most need describing could never be described: reading
+// declines on a silent video, so looking is the ONLY pass that ever runs on
+// it, and 66 of the app's 96 analysed videos say nothing at all. Eighteen
+// categories were never going to be enough for them — that is the whole reason
+// topics exist — and picking one of eighteen was all this pass could do.
+//
+// A picture is in fact good evidence for a topic. What a video shows is often
+// more concrete than what somebody says about it: a plate of biryani, a temple
+// doorway, a cricket bat. The instructions differ from the reading version
+// only where seeing differs from hearing.
 const understandFramesPrompt = `You label short videos for a social video app. You are shown a few frames taken from one video, spread across its length. Decide what the video is about.
 
 CATEGORIES — pick one, or at most two if the video genuinely spans both:
@@ -111,14 +123,20 @@ CATEGORIES — pick one, or at most two if the video genuinely spans both:
 FEELINGS — pick up to two, or none:
 %s
 
+TOPICS — up to %d short phrases saying what the video is actually about.
+Unlike the categories, these are NOT a list to choose from. Write whatever
+fits, in two or three words each. Name what you can SEE: the object, the food,
+the place, the activity. For example: %s.
+
 How to judge:
 - These frames are from ONE video. Judge the video as a whole, not each frame separately.
 - Nobody speaks in this video, or nothing they said could be made out. The pictures are all the evidence there is.
-- If the frames are too dark, too blurred, or too ordinary to tell what the video is about, answer "other". A person, a room or a street on its own is not a subject.
-- "other" is a correct and useful answer. A wrong category is worse than "other", because the app will show this video to people who asked for something else.
+- If the frames are too dark, too blurred, or too ordinary to tell what the video is about, answer "other" with no topics. A person, a room or a street on its own is not a subject.
+- "other" is a correct and useful answer for the CATEGORY. A wrong category is worse than "other", because the app will show this video to people who asked for something else. Topics are different: nothing is filed by them, so name anything you can genuinely see.
+- Write topics in English, so the same subject reads the same way across the app.
 
 Answer with one line of JSON and nothing else:
-{"categories": ["..."], "feelings": ["..."]}
+{"categories": ["..."], "feelings": ["..."], "topics": ["..."]}
 `
 
 // understandContentFromFrames looks at a video and returns the tags a model
@@ -191,7 +209,9 @@ func buildFramesPrompt() string {
 	}
 	return fmt.Sprintf(understandFramesPrompt,
 		strings.TrimRight(cats.String(), "\n"),
-		strings.Join(understandEmotions, ", "))
+		strings.Join(understandEmotions, ", "),
+		understandMaxTopics,
+		strings.Join(understandTopicExamples, ", "))
 }
 
 // extractFrames pulls evenly spread stills and returns their paths plus a

@@ -451,6 +451,35 @@ func TestFrames_AskTheSameQuestionAsTheReadingHalf(t *testing.T) {
 	}
 }
 
+func TestFrames_AskForTopicsToo(t *testing.T) {
+	// This was missing, and it mattered more here than anywhere else.
+	//
+	// Reading declines on a video with no words, so LOOKING is the only pass
+	// that ever runs on a silent video — and 66 of the app's 96 analysed
+	// videos say nothing at all. A frames prompt that asks only for a category
+	// leaves exactly those videos with one of eighteen words and no
+	// description, which is the situation topics were added to fix.
+	p := buildFramesPrompt()
+	if !strings.Contains(p, "TOPICS") {
+		t.Fatal("the frames prompt does not ask for topics, so a silent video " +
+			"can never be described — only filed under one of eighteen words")
+	}
+	if !strings.Contains(p, `"topics"`) {
+		t.Error("the answer format does not include topics, so anything the " +
+			"model says about them is dropped when the JSON is parsed")
+	}
+	// Same vocabulary as the reading half. Two different example lists would
+	// make the same video described differently depending on whether it
+	// happened to have a soundtrack.
+	for _, want := range understandTopicExamples[:3] {
+		if !strings.Contains(p, want) {
+			t.Errorf("the frames prompt does not share the reading half's topic "+
+				"examples (missing %q), so the two passes would name the same "+
+				"thing differently", want)
+		}
+	}
+}
+
 func TestFrames_AnswersGoThroughTheSameFilter(t *testing.T) {
 	// Same validation as the reading half, so a model looking at a picture
 	// can no more invent a category than one reading a sentence. Shared code
