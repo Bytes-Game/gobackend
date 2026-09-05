@@ -94,6 +94,39 @@ func applyNegativeFeedbackToProfile(profile *UserProfile, eventType string, cs *
 				profile.AvoidedCategories = profile.AvoidedCategories[1:]
 			}
 		}
+
+		// The same rejection, against what the video was actually ABOUT.
+		//
+		// Without this half the "stop showing me this" signal can only ever
+		// name one of eighteen things. Somebody skipping every jellyfish video
+		// would teach the profile to avoid "other" — which is most of the
+		// catalogue — instead of jellyfish.
+		//
+		// Nudged more gently than the category, because a topic is a narrower
+		// claim: rejecting three videos that happen to share the word "nature"
+		// says less about nature than three rejections of one category say
+		// about that category.
+		if profile.TopicAffinity == nil {
+			profile.TopicAffinity = make(map[string]float64)
+		}
+		for _, w := range contentFingerprint(cs.Topics, cs.Tags, cat) {
+			cur := profile.TopicAffinity[w]
+			d := drop * 0.6
+			if cur < 0.20 {
+				d *= 0.5
+			}
+			cur -= d
+			if cur < -1 {
+				cur = -1
+			}
+			profile.TopicAffinity[w] = cur
+			if cur <= avoidedTopicThreshold && !containsCI(profile.AvoidedTopics, w) {
+				profile.AvoidedTopics = append(profile.AvoidedTopics, w)
+				if len(profile.AvoidedTopics) > 40 {
+					profile.AvoidedTopics = profile.AvoidedTopics[1:]
+				}
+			}
+		}
 	}
 
 	// 2. Emotion preference nudge — per emotion in the content.

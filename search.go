@@ -457,8 +457,18 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 			// ch.Category would deterministically miss a mixed-case category and zero
 			// the personalization.
 			cat := strings.ToLower(ch.Category)
-			// Category-affinity match.
-			if cat != "" {
+			// Taste match on what the video is ABOUT.
+			//
+			// The category lookup below it stays as a fallback: search results
+			// come from a query that does not load content_topics, so for now
+			// the fingerprint is the category plus whatever tags the row
+			// carries. As topics reach search, this widens on its own.
+			if w, matched := topicRelevance(profile.TopicAffinity,
+				contentFingerprint(nil, ch.Tags, cat)); matched > 0 && w > 0 {
+				personalBoost += w * topicConfidence(matched) * 0.15
+			} else if cat != "" {
+				// Category-affinity match — the coarse answer, for viewers and
+				// videos with nothing more specific known about them yet.
 				if w, ok := profile.CategoryAffinity[cat]; ok && w > 0 {
 					personalBoost += w * 0.15
 				}

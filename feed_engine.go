@@ -61,6 +61,10 @@ type SessionState struct {
 	SaveCount         int            `json:"saveCount"`
 	LastCreditedItems int            `json:"lastCreditedItems"` // ItemsSeen at last mood/strategy crediting — avoids re-crediting the same window on repeated app_background
 	CategoriesSeen    map[string]int `json:"categoriesSeen"`    // category -> count (saturation tracking)
+	// The same tally, keyed by every word a shown video was described by.
+	// Three nature clips filed under three different categories look varied
+	// to CategoriesSeen and repetitive here, which is the point.
+	TopicsSeen        map[string]int `json:"topicsSeen"`
 	CreatorsSeen      map[string]int `json:"creatorsSeen"`      // creatorId -> count (diversity)
 	LastEmotions      []string       `json:"lastEmotions"`      // Last ~10 items, ONE negative-priority emotion each (wellbeing spiral detection)
 	LastMoodEmotions  []string       `json:"lastMoodEmotions"`  // Last ~10 items, FIRST/dominant emotion each (mood-transition learner — must match the serve-time "to" key)
@@ -109,6 +113,10 @@ type SessionState struct {
 	// Last N categories/creators shown, in order. Used by the ranker to avoid
 	// clumpy repeats (same category/creator 3+ in a row = feed feels monotonous).
 	LastCategories []string `json:"lastCategories"`
+	// What the last few items were about, in lockstep with LastCategories, so
+	// the sequence penalty can ask how ALIKE two items are instead of whether
+	// one word matches.
+	LastTopics [][]string `json:"lastTopics"`
 	LastCreators   []string `json:"lastCreators"`
 	// LastEnergies runs in lockstep with LastCategories (same indices,
 	// same trim) so the trajectory model's CATEGORY × ENERGY from-state
@@ -142,6 +150,20 @@ type UserProfile struct {
 	UserID string `json:"userId"`
 	// === Long-term personality (updated every session) ===
 	CategoryAffinity map[string]float64 `json:"categoryAffinity"` // "comedy":0.4, "skill":0.3
+	// What the viewer actually likes, in the video's own words — "thistle",
+	// "street food", "dark fantasy". Open vocabulary: a subject appears the
+	// first time a video is about it, so there is no list to keep up to date
+	// and nothing to add when the content changes.
+	//
+	// This is what relevance is scored on. CategoryAffinity above stays because
+	// twenty other things read the category — session variety, search, the
+	// time-of-day boost — but it no longer decides what a viewer is shown.
+	//
+	// Unlike CategoryAffinity these keep their sign: a dislike is stored as a
+	// negative rather than clamped away and pasted back later.
+	TopicAffinity map[string]float64 `json:"topicAffinity"`
+	// Subjects pushed back on hard enough to stop offering.
+	AvoidedTopics []string `json:"avoidedTopics"`
 	EnergyPreference float64            `json:"energyPreference"` // 0=chill, 1=intense
 	SocialDrive      float64            `json:"socialDrive"`      // 0=solo, 1=social
 	NoveltyTolerance float64            `json:"noveltyTolerance"` // 0=loyalist, 1=explorer
@@ -211,6 +233,11 @@ type ContentScore struct {
 	// True when the creator and the model both had an opinion and
 	// they differ — see categoryVerdict.Disputed.
 	CategoryDisputed bool               `json:"categoryDisputed,omitempty"`
+	// What the video is ABOUT, in the model's own words — "thistle",
+	// "street food", "dark fantasy". Open vocabulary, so this is the half
+	// that can describe a video the eighteen categories have no word for.
+	// Read from content_topics; see migration 006.
+	Topics           []string           `json:"topics,omitempty"`
 	Tags             []string           `json:"tags,omitempty"` // Creator's own words — see content_tags.go
 	EmotionVector    map[string]float64 `json:"emotionVector"`  // "happy":0.5, "competitive":0.3
 	// === Creator info (denormalized for speed) ===
@@ -620,6 +647,7 @@ func getSessionState(userID, sessionID string) *SessionState {
 			DopamineBudget:   1.0,
 			CategoriesSeen:   make(map[string]int),
 			CreatorsSeen:     make(map[string]int),
+			TopicsSeen:       make(map[string]int),
 			LastEmotions:     []string{},
 			LastMoodEmotions: []string{},
 			CurrentStrategy:  strategyStandard,
@@ -636,6 +664,7 @@ func getSessionState(userID, sessionID string) *SessionState {
 			DopamineBudget:   1.0,
 			CategoriesSeen:   make(map[string]int),
 			CreatorsSeen:     make(map[string]int),
+			TopicsSeen:       make(map[string]int),
 			LastEmotions:     []string{},
 			LastMoodEmotions: []string{},
 			CurrentStrategy:  strategyStandard,
@@ -691,9 +720,11 @@ func applyRefreshSignal(userID, sessionID string) {
 	}
 	state.CategoriesSeen = make(map[string]int)
 	state.CreatorsSeen = make(map[string]int)
+	state.TopicsSeen = make(map[string]int)
 	state.LastCategories = nil
 	state.LastEnergies = nil
 	state.LastCreators = nil
+	state.LastTopics = nil
 	saveSessionState(state)
 }
 
@@ -1292,6 +1323,17 @@ func updateSessionFromEvent(event FeedEvent) {
 				// split one category into 'Comedy'/'comedy' buckets and under-count.
 				state.CategoriesSeen[strings.ToLower(cs.Category)]++
 			}
+			// The same tally against what the video was ABOUT. Written from
+			// the same fingerprint the read side builds, so the keys cannot
+			// drift — that mismatch is exactly what made the old category
+			// tally silently do nothing for inference-categorised content.
+			seenFP := contentFingerprint(cs.Topics, cs.Tags, strings.ToLower(cs.Category))
+			if len(seenFP) > 0 {
+				if state.TopicsSeen == nil {
+					state.TopicsSeen = make(map[string]int)
+				}
+				rememberTopics(state.TopicsSeen, seenFP)
+			}
 			if cs.CreatorID != "" {
 				if state.CreatorsSeen == nil {
 					state.CreatorsSeen = make(map[string]int)
@@ -1752,6 +1794,7 @@ func loadUserProfile(userID string) (*UserProfile, error) {
 	var catJSON, hoursJSON, creatorsJSON, avoidedJSON []byte
 	var catByHourJSON, catByEgoJSON, emotionPrefJSON, energyByHourJSON []byte
 	var strategySuccessJSON []byte
+	var topicAffJSON, avoidedTopicsJSON []byte
 
 	err := db.QueryRow(`
 		SELECT user_id, category_affinity, energy_preference, social_drive,
@@ -1761,7 +1804,8 @@ func loadUserProfile(userID string) (*UserProfile, error) {
 			recent_wins, recent_losses, last_computed_at, event_count,
 			category_by_hour, category_by_ego, emotion_preference, energy_by_hour,
 			attention_span, binge_intensity, creator_loyalty,
-			competitiveness_index, mood_volatility, strategy_success_history
+			competitiveness_index, mood_volatility, strategy_success_history,
+			COALESCE(topic_affinity, '{}'::jsonb), COALESCE(avoided_topics, '[]'::jsonb)
 		FROM user_profiles WHERE user_id = $1`, userID).Scan(
 		&p.UserID, &catJSON, &p.EnergyPreference, &p.SocialDrive,
 		&p.NoveltyTolerance, &p.EgoSensitivity, &p.AvgSessionSec, &hoursJSON,
@@ -1771,6 +1815,7 @@ func loadUserProfile(userID string) (*UserProfile, error) {
 		&catByHourJSON, &catByEgoJSON, &emotionPrefJSON, &energyByHourJSON,
 		&p.AttentionSpan, &p.BingeIntensity, &p.CreatorLoyalty,
 		&p.CompetitivenessIndex, &p.MoodVolatility, &strategySuccessJSON,
+		&topicAffJSON, &avoidedTopicsJSON,
 	)
 	if err != nil {
 		return nil, err
@@ -1784,6 +1829,8 @@ func loadUserProfile(userID string) (*UserProfile, error) {
 	json.Unmarshal(catByEgoJSON, &p.CategoryByEgo)
 	json.Unmarshal(emotionPrefJSON, &p.EmotionPreference)
 	json.Unmarshal(energyByHourJSON, &p.EnergyByHour)
+	json.Unmarshal(topicAffJSON, &p.TopicAffinity)
+	json.Unmarshal(avoidedTopicsJSON, &p.AvoidedTopics)
 	json.Unmarshal(strategySuccessJSON, &p.StrategySuccessHistory)
 	if p.StrategySuccessHistory == nil {
 		p.StrategySuccessHistory = make(map[string]float64)
@@ -1791,6 +1838,12 @@ func loadUserProfile(userID string) (*UserProfile, error) {
 
 	if p.CategoryAffinity == nil {
 		p.CategoryAffinity = make(map[string]float64)
+	}
+	// A viewer whose profile predates topic taste has an empty map, not a nil
+	// one: relevance reads it on every scored item and a nil map read is fine,
+	// but the miners below WRITE to it.
+	if p.TopicAffinity == nil {
+		p.TopicAffinity = make(map[string]float64)
 	}
 	if p.CategoryByHour == nil {
 		p.CategoryByHour = make(map[int]string)
@@ -1903,7 +1956,17 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		SELECT fe.event_type, fe.completion_rate, fe.content_type, fe.content_id,
 			COALESCE(c.category, '') as c_cat, COALESCE(p.category, '') as p_cat,
 			COALESCE(c.subject, '') as subject, COALESCE(c.prefix, '') as prefix,
-			COALESCE(p.caption, '') as caption
+			COALESCE(p.caption, '') as caption,
+			-- What the video is ABOUT, for the open-vocabulary half of taste.
+			-- Only challenges carry content_topics and auto_tags (migrations
+			-- 005 and 006); posts have neither, so they contribute their own
+			-- tags and category and nothing else. Asking posts for a column
+			-- they do not have would not return blank — Postgres would reject
+			-- the whole query and every profile would rebuild as empty.
+			COALESCE(c.content_topics::text, '[]') as c_topics,
+			COALESCE(c.auto_tags::text, '[]')     as c_auto,
+			COALESCE(c.custom_tags::text, '[]')   as c_tags,
+			COALESCE(p.custom_tags::text, '[]')   as p_tags
 		FROM feed_events fe
 		LEFT JOIN challenges c ON fe.content_type = 'challenge' AND fe.content_id = CAST(c.id AS TEXT)
 		LEFT JOIN posts p ON fe.content_type = 'post' AND fe.content_id = CAST(p.id AS TEXT)
@@ -1914,14 +1977,23 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		defer rows.Close()
 
 		categoryScores := make(map[string]float64)
+		topicScores := make(map[string]float64)
 		var totalCompletion float64
 		var completionCount int
 		eventTypes := make(map[string]int)
 
 		for rows.Next() {
 			var evType, cType, cID, cCat, pCat, subject, prefix, caption string
+			var cTopicsJSON, cAutoJSON, cTagsJSON, pTagsJSON string
 			var completion float64
-			rows.Scan(&evType, &completion, &cType, &cID, &cCat, &pCat, &subject, &prefix, &caption)
+			rows.Scan(&evType, &completion, &cType, &cID, &cCat, &pCat, &subject, &prefix, &caption,
+				&cTopicsJSON, &cAutoJSON, &cTagsJSON, &pTagsJSON)
+
+			// One row is a challenge or a post, never both, so the unused side
+			// is an empty array and contributes nothing.
+			rowTopics := jsonStrings(cTopicsJSON)
+			rowTags := append(jsonStrings(cAutoJSON), jsonStrings(cTagsJSON)...)
+			rowTags = append(rowTags, jsonStrings(pTagsJSON)...)
 
 			// Prefer stored category, fall back to inference. Lowercase the key so
 			// CategoryAffinity/AvoidedCategories use the SAME canonical casing the
@@ -1938,40 +2010,18 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 			category = strings.ToLower(category)
 			eventTypes[evType]++
 
-			// Weight events by effort/intent with granular watch time tiers
-			switch evType {
-			case "share":
-				categoryScores[category] += 3.0
-			case "rewatch":
-				categoryScores[category] += 2.5
-			case "save":
-				categoryScores[category] += 1.5
-			case "like":
-				categoryScores[category] += 1.0
-			case "comment":
-				categoryScores[category] += 1.2 // Comments require more effort than likes
-			case "view":
-				// Granular watch time scoring — more honest than binary thresholds
-				if completion >= 0.9 {
-					categoryScores[category] += 1.0 // Strong interest — nearly finished
-				} else if completion >= 0.7 {
-					categoryScores[category] += 0.5 // Good interest — watched most
-				} else if completion >= 0.5 {
-					categoryScores[category] += 0.1 // Neutral — watched half
-				} else if completion >= 0.3 {
-					categoryScores[category] -= 0.1 // Weak — gave it a chance, left
-				}
-				// <30% = no score change (neither positive nor negative)
-			case "pause":
-				categoryScores[category] += 0.3 // Paused to look = mild interest
-			case "scroll_slow":
-				categoryScores[category] += 0.2 // Slow scroll past = considering
-			case "scroll_fast":
-				categoryScores[category] -= 0.3 // Fast scroll = rejection
-			case "skip":
-				categoryScores[category] -= 0.5
-			case "not_interested":
-				categoryScores[category] -= 2.0
+			// Weight events by effort/intent with granular watch time tiers.
+			// ONE weight, applied to the category and to every word the video
+			// is described by, so the two can never disagree about how much a
+			// share is worth.
+			weight := engagementWeight(evType, completion)
+			categoryScores[category] += weight
+
+			// The same evidence, against what the video is actually ABOUT.
+			// This is the open-vocabulary half: no list to keep up to date, a
+			// subject appears the first time a video is about it.
+			for _, w := range contentFingerprint(rowTopics, rowTags, category) {
+				topicScores[w] += weight
 			}
 
 			// Count each item's completion ONCE, from its view event. 'complete'
@@ -2007,6 +2057,12 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 				p.CategoryAffinity[k] = negv
 			}
 		}
+
+		// The open-vocabulary half of the same evidence. Normalised keeping
+		// its sign, so dislikes survive without the preserve-and-reapply dance
+		// the category clamp needs above.
+		p.TopicAffinity = normalizeTopicAffinity(topicScores)
+		p.AvoidedTopics = avoidedTopics(p.TopicAffinity)
 
 		// Build avoided categories — require CORROBORATED dislike. A single
 		// "not_interested" tap scores -2.0, so the old -1.0 cutoff let ONE tap
@@ -2594,6 +2650,8 @@ func saveUserProfile(p *UserProfile) {
 	emotionPrefJSON, _ := json.Marshal(p.EmotionPreference)
 	energyByHourJSON, _ := json.Marshal(p.EnergyByHour)
 	strategySuccessJSON, _ := json.Marshal(p.StrategySuccessHistory)
+	topicAffJSON, _ := json.Marshal(p.TopicAffinity)
+	avoidedTopicsJSON, _ := json.Marshal(p.AvoidedTopics)
 
 	_, err := db.Exec(`
 		INSERT INTO user_profiles (user_id, category_affinity, energy_preference,
@@ -2603,9 +2661,10 @@ func saveUserProfile(p *UserProfile) {
 			recent_wins, recent_losses, last_computed_at, event_count,
 			category_by_hour, category_by_ego, emotion_preference, energy_by_hour,
 			attention_span, binge_intensity, creator_loyalty,
-			competitiveness_index, mood_volatility, strategy_success_history)
+			competitiveness_index, mood_volatility, strategy_success_history,
+			topic_affinity, avoided_topics)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-			$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+			$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
 		ON CONFLICT (user_id) DO UPDATE SET
 			category_affinity=$2, energy_preference=$3, social_drive=$4,
 			novelty_tolerance=$5, ego_sensitivity=$6,
@@ -2615,7 +2674,8 @@ func saveUserProfile(p *UserProfile) {
 			last_computed_at=$17, event_count=$18,
 			category_by_hour=$19, category_by_ego=$20, emotion_preference=$21, energy_by_hour=$22,
 			attention_span=$23, binge_intensity=$24, creator_loyalty=$25,
-			competitiveness_index=$26, mood_volatility=$27, strategy_success_history=$28`,
+			competitiveness_index=$26, mood_volatility=$27, strategy_success_history=$28,
+			topic_affinity=$29, avoided_topics=$30`,
 		p.UserID, catJSON, p.EnergyPreference, p.SocialDrive,
 		p.NoveltyTolerance, p.EgoSensitivity, p.AvgSessionSec,
 		hoursJSON, creatorsJSON, avoidedJSON,
@@ -2624,6 +2684,7 @@ func saveUserProfile(p *UserProfile) {
 		catByHourJSON, catByEgoJSON, emotionPrefJSON, energyByHourJSON,
 		p.AttentionSpan, p.BingeIntensity, p.CreatorLoyalty,
 		p.CompetitivenessIndex, p.MoodVolatility, strategySuccessJSON,
+		topicAffJSON, avoidedTopicsJSON,
 	)
 	if err != nil {
 		log.Printf("Failed to save user profile for %s: %v", p.UserID, err)
@@ -2925,7 +2986,7 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 	// Category, creator info, and created_at — single query per content type
 	if contentType == "challenge" {
 		var subject, prefix, dbCategory, dbEnergy string
-		var emotionJSON, tagsJSON, autoTagsJSON, analysisJSON []byte
+		var emotionJSON, tagsJSON, autoTagsJSON, topicsJSON, analysisJSON []byte
 		var creatorID, league string
 		var followers, wins, losses, respCount, chViews, chLikes int
 		var createdAt time.Time
@@ -2935,6 +2996,7 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 				COALESCE(c.emotion_tags,'[]'::JSONB),
 				COALESCE(c.custom_tags,'[]'::JSONB),
 				COALESCE(c.auto_tags,'[]'::JSONB),
+				COALESCE(c.content_topics,'[]'::JSONB),
 				c.video_analysis,
 				CAST(u.id AS TEXT), u.league,
 				(SELECT COUNT(*) FROM follows WHERE following_id = u.id),
@@ -2946,7 +3008,7 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			JOIN users u ON c.creator_id = u.id
 			WHERE c.id = $1`, contentID).Scan(
 			&subject, &prefix, &dbCategory, &dbEnergy, &emotionJSON, &tagsJSON,
-			&autoTagsJSON, &analysisJSON,
+			&autoTagsJSON, &topicsJSON, &analysisJSON,
 			&creatorID, &league, &followers, &wins, &losses, &createdAt, &respCount,
 			&chViews, &chLikes)
 		cs.ResponseCount = respCount
@@ -2996,6 +3058,12 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 				cs.TrendingScore = math.Min(0.3, viewsPerHour/30.0)
 			}
 		}
+
+		var rawTopics []string
+		json.Unmarshal(topicsJSON, &rawTopics)
+		// Stored already folded by the worker, but folded again here so a row
+		// written before that folding existed still matches one written after.
+		cs.Topics = normalizeTags(rawTopics)
 
 		var rawTags, rawAutoTags []string
 		json.Unmarshal(tagsJSON, &rawTags)
@@ -3295,14 +3363,67 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	breakdown["energyLevel"] = cs.EnergyLevel
 
 	// ── RELEVANCE ──
-	// Category match from user profile affinity. Lowercase to match the canonical
-	// casing CategoryAffinity/AvoidedCategories are stored under (miner + profile
-	// build both lowercase) — a mixed-case cs.Category would otherwise never hit a
-	// mined affinity/dislike.
+	//
+	// How well what this video is ABOUT matches what this viewer has actually
+	// engaged with. Not which of eighteen boxes it is in.
+	//
+	// The old version of this was one line: take cs.Category, look it up in
+	// CategoryAffinity. That could not express "likes nature videos", because
+	// the bee-on-a-thistle clip, the butterfly and the opening flower are
+	// filed by their creators under lifestyle, art and comedy — three
+	// unrelated preferences for what is plainly one taste. And no category
+	// fits any of them, so all three ranked on nothing at all.
+	//
+	// The category has not been thrown away. It is folded into the fingerprint
+	// as one more word describing the video, so somebody who engages with
+	// comedy still builds an affinity for "comedy" — it is simply worth what
+	// any other word is worth, instead of being the only thing that counts.
 	catKey := strings.ToLower(cs.Category)
-	relevance := 0.0
-	if affinity, ok := profile.CategoryAffinity[catKey]; ok {
-		relevance = affinity
+	fingerprint := contentFingerprint(cs.Topics, cs.Tags, catKey)
+	relevance, matched := topicRelevance(profile.TopicAffinity, fingerprint)
+
+	// Scaled by how much the score actually rests on. One word in common —
+	// "nature" turning up on a video that is really about something else —
+	// must not move a video as far as a genuine match on everything.
+	relevance *= topicConfidence(matched)
+	breakdown["topicMatches"] = float64(matched)
+
+	// FALLBACK, and it is not optional.
+	//
+	// Topic taste is learned when a profile rebuilds, and profiles rebuild on
+	// their own schedule. So at the moment this ships EVERY existing viewer has
+	// a full CategoryAffinity and an empty TopicAffinity — and reading only the
+	// new one would switch personalisation off for all of them until their
+	// profile happened to come round again.
+	//
+	// A scoring test caught this: a viewer whose affinity says comedy 1.0
+	// scored a comedy video exactly the same as one who prefers sports.
+	//
+	// This is not the old behaviour kept alongside the new one. Topics win
+	// whenever they have anything at all to say; the category is consulted
+	// only when they are silent, which is the same rule the fatigue and
+	// sequence checks use. It fades on its own as profiles fill in, and the
+	// category is inside the fingerprint anyway, so a rebuilt profile learns
+	// "comedy" as one more word without anything special happening.
+	if matched == 0 {
+		if affinity, ok := profile.CategoryAffinity[catKey]; ok {
+			relevance = affinity
+		}
+	}
+
+	// A subject pushed back on hard enough to stop offering. Same shape as the
+	// avoided-category rule below and applied first, because it is the more
+	// specific statement: "no more prank videos" is a clearer instruction than
+	// anything a category can carry.
+	if len(profile.AvoidedTopics) > 0 {
+		for _, w := range fingerprint {
+			if containsString(profile.AvoidedTopics, w) {
+				if relevance > avoidedTopicPenalty {
+					relevance = avoidedTopicPenalty
+				}
+				break
+			}
+		}
 	}
 	// Negative signal: avoided category. Use the MORE negative of the flat
 	// avoided penalty and any already-set mined negative affinity, so the -0.3
@@ -3545,13 +3666,27 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 
 	// ── FATIGUE PENALTY (conditional) ──
 	// If user has seen too much of this category in current session, penalize
+	// Counted on what the videos are ABOUT, not on their category.
+	//
+	// This is the failure that made the change necessary. Three nature clips
+	// filed by their creators under lifestyle, comedy and art read as one of
+	// each to a category counter — a perfectly varied feed — while being the
+	// same video three times. Counting shared words sees them.
+	//
+	// TopicsSeen is the same tally CategoriesSeen was, keyed by every word a
+	// shown video was described by rather than by its one category.
 	fatiguePenalty := 0.0
-	if session.CategoriesSeen != nil {
+	if sat := topicSaturation(session.TopicsSeen, fingerprint); sat > 0 {
+		fatiguePenalty = -0.4 * sat
+	} else if session.CategoriesSeen != nil {
+		// Falls back to the category count while the topics column fills in.
+		// Most of the catalogue has no description yet, and until it does a
+		// coarse repetition check beats none at all.
 		seen := session.CategoriesSeen[strings.ToLower(cs.Category)]
 		if seen >= 3 {
-			fatiguePenalty = -0.15 * float64(seen-2) // Increasing penalty
+			fatiguePenalty = -0.15 * float64(seen-2)
 			if fatiguePenalty < -0.4 {
-				fatiguePenalty = -0.4 // Hard cap at -0.4
+				fatiguePenalty = -0.4
 			}
 		}
 	}
@@ -3575,8 +3710,20 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	// ── SEQUENCE PENALTY (Tier 3.12) ──
 	// Penalise the same category/creator if it's one of the last 2 items shown
 	// — keeps the feed rhythm varied even when score ties would cluster them.
+	//
+	// Judged by how much this video has in common with the last two, rather
+	// than by whether the one word matches. Two videos can share every subject
+	// and still carry different categories — which is exactly how three
+	// near-identical nature clips used to arrive back to back.
 	sequencePenalty := 0.0
-	if n := len(session.LastCategories); n > 0 {
+	if n := len(session.LastTopics); n > 0 {
+		sequencePenalty -= 0.08 * topicOverlap(fingerprint, session.LastTopics[n-1])
+		if n >= 2 {
+			sequencePenalty -= 0.05 * topicOverlap(fingerprint, session.LastTopics[n-2])
+		}
+	} else if n := len(session.LastCategories); n > 0 {
+		// Same fallback as the fatigue penalty, for sessions whose recent
+		// items had nothing describing them.
 		if session.LastCategories[n-1] == cs.Category {
 			sequencePenalty -= 0.08
 		}
@@ -5736,6 +5883,13 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 				// Lockstep with LastCategories — same guard, same trim.
 				fresh.LastEnergies = append(fresh.LastEnergies, cscore.EnergyLevel)
 			}
+			// What the item was about, for the sequence check. Appended
+			// unconditionally — an item nothing describes contributes an empty
+			// set, which scores zero overlap against everything, and dropping
+			// it instead would slide the "last two" window out of step with
+			// what was actually shown.
+			fresh.LastTopics = append(fresh.LastTopics,
+				contentFingerprint(cscore.Topics, cscore.Tags, strings.ToLower(cscore.Category)))
 			if cscore.CreatorID != "" {
 				fresh.LastCreators = append(fresh.LastCreators, cscore.CreatorID)
 			}
@@ -5748,6 +5902,9 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if n := len(fresh.LastCreators); n > 6 {
 			fresh.LastCreators = fresh.LastCreators[n-6:]
+		}
+		if n := len(fresh.LastTopics); n > 6 {
+			fresh.LastTopics = fresh.LastTopics[n-6:]
 		}
 		saveSessionState(fresh)
 		sunlock()

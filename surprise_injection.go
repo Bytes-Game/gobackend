@@ -97,6 +97,22 @@ func applySurpriseInjection(items []ScoredItem, profile *UserProfile, cohort Coh
 			}
 		}
 	}
+	// The same, in the video's own words: a subject the viewer already
+	// engages with is not a surprise, whatever category it carries.
+	//
+	// Without this a "wildcard" only had to differ by one word out of
+	// eighteen, so a nature clip filed under lifestyle counted as unfamiliar
+	// ground for somebody who watches nothing but nature clips filed under
+	// art. Contrast measured on what videos are about is contrast a viewer
+	// would actually notice.
+	familiarTopics := make(map[string]bool)
+	if profile != nil {
+		for w, score := range profile.TopicAffinity {
+			if score > 0.20 {
+				familiarTopics[w] = true
+			}
+		}
+	}
 	// Also exclude categories present in the current feed so the wildcard
 	// genuinely contrasts with nearby items.
 	for _, si := range items {
@@ -104,6 +120,11 @@ func applySurpriseInjection(items []ScoredItem, profile *UserProfile, cohort Coh
 		cs := getContentScore(id, si.Item.Type)
 		if cs != nil && cs.Category != "" {
 			familiarCats[strings.ToLower(cs.Category)] = true
+		}
+		if cs != nil {
+			for _, w := range contentFingerprint(cs.Topics, cs.Tags, "") {
+				familiarTopics[w] = true
+			}
 		}
 	}
 
@@ -125,6 +146,21 @@ func applySurpriseInjection(items []ScoredItem, profile *UserProfile, cohort Coh
 		cs := getContentScore(e.ID, e.Type)
 		if cs == nil || cs.Category == "" {
 			continue
+		}
+		// Unfamiliar in the words that describe it, not just in its category.
+		// A candidate sharing a subject with what the viewer already watches
+		// is not a wildcard however its category is labelled.
+		if fp := contentFingerprint(cs.Topics, cs.Tags, ""); len(fp) > 0 {
+			overlapsKnown := false
+			for _, w := range fp {
+				if familiarTopics[w] {
+					overlapsKnown = true
+					break
+				}
+			}
+			if overlapsKnown {
+				continue
+			}
 		}
 		if familiarCats[strings.ToLower(cs.Category)] {
 			continue
