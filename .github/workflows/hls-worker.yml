@@ -86,10 +86,57 @@ env:
   WHISPER_RELEASE: v1.9.3
   WHISPER_MODEL_NAME: medium
 
+  # ══════════════════════════════════════════════════════════════════════
+  # AND THE MODEL THAT WORKS OUT WHAT THE VIDEO IS ABOUT
+  # ══════════════════════════════════════════════════════════════════════
+  #
+  # Hearing the words was never the hard part. Understanding them was. The
+  # worker used to decide a video's subject by looking its words up in a
+  # list of about 220 spellings, which fails in both directions and did:
+  #
+  #   - a clip about nobody knowing what the future holds earned nothing,
+  #     because whisper wrote भवि-श्-य where the word is भवि-ष्-य;
+  #   - a clip about reciting the Hanuman Chalisa when you are frightened
+  #     was filed under DANCE, because stripped of vowel marks the phrase
+  #     shares its consonants with नाच.
+  #
+  # Neither is fixable by adding more words. So a small language model
+  # reads the transcript instead — see cmd/hls-worker/understand.go.
+  #
+  # Qwen3-VL-4B-Instruct, Apache 2.0, run locally through llama.cpp. Free
+  # in the way that matters here: no API key, no bill, no rate limit, and
+  # nobody able to change the terms. Same shape as whisper above — build a
+  # C++ program once, cache it, download a model file beside it.
+  #
+  # Measured on the app's own 11 transcripts, against the keyword list it
+  # replaces:
+  #
+  #                     right   wrong   declined
+  #   keyword list        3       1        7
+  #   this                8       2        1
+  #
+  # "Declined" is the model answering "other" — it could not tell. That is
+  # a useful answer and is stored as no tag at all, because a wrong
+  # category is worse than none: it shows the video to people who asked
+  # for something else.
+  #
+  # It is a VISION model on purpose, though this pass only reads words. Of
+  # 114 videos, 79 produce no transcript at all, and nothing that only
+  # reads can help those. The same file can look at frames, so the silent
+  # half is a second pass with no second download.
+  #
+  # SIZE IS THE TUNING KNOB, exactly like WHISPER_MODEL_NAME. The name goes
+  # into the cache key and the download url, so changing this line re-fetches
+  # once and then reuses. Q4_K_M is the 4B model at ~2.4GB; Q8_0 is the same
+  # model at higher fidelity and roughly twice the size and time.
+  LLAMA_RELEASE: b10819
+  UNDERSTAND_REPO: Qwen/Qwen3-VL-4B-Instruct-GGUF
+  UNDERSTAND_MODEL_FILE: Qwen3VL-4B-Instruct-Q4_K_M.gguf
+
 jobs:
   drain:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -221,20 +268,99 @@ jobs:
           echo "WHISPER_MODEL=$HOME/whisper/model.bin"      >> "$GITHUB_ENV"
           echo "speech-to-text: ON"
 
+      # ── UNDERSTANDING WHAT THE VIDEO IS ABOUT ─────────────────────────────
+      #
+      # Same three steps as whisper, for the same reasons: cache it, build it
+      # only on a miss, then PROVE it runs before the worker relies on it.
+      # See the LLAMA_RELEASE block at the top for why this exists at all.
+      - name: cache llama.cpp
+        id: llama-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llama
+          key: llama-${{ env.LLAMA_RELEASE }}-${{ env.UNDERSTAND_MODEL_FILE }}-v1
+
+      - name: build llama.cpp
+        if: steps.llama-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$LLAMA_RELEASE" \
+            https://github.com/ggml-org/llama.cpp.git /tmp/llama-src
+          # BUILD_SHARED_LIBS=OFF rather than the RPATH dance whisper needs.
+          # One static binary has nothing to find at load time, so it cannot
+          # develop the "works today, dies on every cached run" fault that
+          # shipped once already above.
+          #
+          # Only llama-cli is built. The full project builds a couple of dozen
+          # tools and takes several times as long; nothing here uses the rest.
+          cmake -S /tmp/llama-src -B /tmp/llama-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_SERVER=OFF
+          cmake --build /tmp/llama-build --config Release -j --target llama-cli
+          mkdir -p ~/llama
+          cp /tmp/llama-build/bin/llama-cli ~/llama/llama-cli
+          curl -sSL --retry 3 -o ~/llama/model.gguf \
+            "https://huggingface.co/${UNDERSTAND_REPO}/resolve/main/${UNDERSTAND_MODEL_FILE}"
+          # Same reasoning as whisper's: delete the build tree before anything
+          # checks the install, so the first run faces the cached run's world.
+          rm -rf /tmp/llama-build /tmp/llama-src
+
+      # Same contract as the whisper check: a broken install must cost tags,
+      # never the run. The worker skips this pass when the variables are
+      # unset, so failing here quietly is the correct outcome.
+      - name: check the understanding model works
+        id: understand
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          test -x ~/llama/llama-cli
+          test -s ~/llama/model.gguf
+          # Actually ask it something. `test -x` passes on a binary that cannot
+          # start, and this one has a specific way of not starting:
+          #
+          #   -c IS NOT OPTIONAL. This model's own context is enormous and
+          #   llama.cpp reserves memory for all of it up front, so the default
+          #   is an instant out-of-memory kill (exit 137) with no message —
+          #   which on a runner is indistinguishable from the feature being
+          #   switched off. Measured: killed on a 16GB machine with the
+          #   default, answers in seconds with -c 2048.
+          #
+          # The Go side passes its own -c for the same reason; this proves the
+          # binary and the model file together before anything depends on them.
+          ~/llama/llama-cli -m ~/llama/model.gguf -c 2048 \
+            -p 'Reply with exactly: OK' -n 8 -t 2 --temp 0 -st \
+            --no-warmup --no-display-prompt
+          echo "UNDERSTAND_BIN=$HOME/llama/llama-cli"   >> "$GITHUB_ENV"
+          echo "UNDERSTAND_MODEL=$HOME/llama/model.gguf" >> "$GITHUB_ENV"
+          echo "understanding: ON"
+
       # TWO parallel workers: the backend's FOR UPDATE SKIP LOCKED claim
       # makes concurrent workers safe by construction, and the runner's
       # 4 cores comfortably fit two ffmpeg encodes — ~2x videos per run.
       #
       # The two budgets must satisfy:
       #   max-runtime + job-timeout + setup  <  timeout-minutes
-      #   12m         + 10m         + ~5m    =  27m  <  30m    ✓
+      #   12m         + 10m         + ~14m   =  36m  <  45m    ✓
       #
-      # "setup" has to cover a whisper CACHE MISS, not just apt. The cache
-      # key holds the model name, so changing the model rebuilds whisper.cpp
-      # and re-downloads the model on the next run: measured at 2m09s for
-      # the 466MB small model, and medium is 1.5GB. That build was never in
-      # this sum, which left a cache-miss run roughly a minute from the kill
-      # switch without anything saying so.
+      # "setup" has to cover a CACHE MISS, not just apt — and there are two
+      # caches now. The keys hold the model names, so changing either model
+      # rebuilds its program and re-downloads its weights on the next run:
+      #
+      #   whisper.cpp   build ~2m + 1.5GB model     (measured 2m09s at 466MB)
+      #   llama.cpp     build ~6m + 2.4GB model
+      #
+      # Both missing at once is the case this has to survive, which is why
+      # the ceiling moved from 30 to 45. The whisper build was never in this
+      # sum at all, which once left a cache-miss run roughly a minute from
+      # the kill switch with nothing saying so; adding a second, bigger
+      # download to an unchanged ceiling would have repeated that exactly.
+      #
+      # A cache HIT — every ordinary run — is unaffected: both steps skip and
+      # setup is back to about a minute.
       #
       # -max-runtime alone was NOT sufficient: it is only consulted
       # BEFORE claiming, so a job claimed at 19m59s still ran to

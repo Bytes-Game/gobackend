@@ -150,6 +150,26 @@ func analyzeVideo(ctx context.Context, src string) videoAnalysis {
 	}
 
 	a.AutoTags = tagsFromAnalysis(a)
+
+	// A fourth pass: read the words back and work out what the video is
+	// ABOUT, rather than which spellings happen to appear in it. See
+	// understand.go for why a word list could never do that.
+	//
+	// WHEN IT RUNS, IT WINS — including when it comes back with nothing.
+	// The model saying "I cannot tell what this is" is a judgement, and it
+	// is a better one than a keyword list's guess, which is how a video
+	// about reciting the Hanuman Chalisa came to be filed under dance. A
+	// wrong tag is worse than no tag: it shows the video to people who
+	// asked for something else.
+	//
+	// Shape tags survive either way. Those are measurements of the file —
+	// how often it cuts, whether anyone is talking — and are just as true
+	// whoever read the words.
+	if tags, ran := understandContent(ctx, a); ran {
+		a.Passes = append(a.Passes, "understand")
+		a.AutoTags = dedupeSorted(append(tags, shapeTags(a)...))
+	}
+
 	logAnalysis(src, a)
 	return a
 }
@@ -763,47 +783,72 @@ var analysisKeywords = map[string][]string{
 // checkable properties, where anything finer would be the analysis pretending
 // to more certainty than ffmpeg can give it.
 func tagsFromAnalysis(a videoAnalysis) []string {
-	seen := map[string]bool{}
+	out := append(keywordTags(a), shapeTags(a)...)
+	return dedupeSorted(out)
+}
+
+// keywordTags is the "what is this video about" half: the words the video
+// said, matched against the list above.
+//
+// Split out from shapeTags because the two answer different questions from
+// different evidence, and only this half has a replacement. What a video is
+// ABOUT is a question about meaning, which a word list is a poor tool for —
+// see understandContent. How a video is PUT TOGETHER is a measurement, and a
+// measurement does not need a language model.
+func keywordTags(a videoAnalysis) []string {
+	text := wordSearchable(a.ScreenText + " " + a.Speech)
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
 	var out []string
-	add := func(t string) {
+	for kw, tags := range analysisKeywords {
+		// wordSearchable pads both ends, so the keyword arrives already
+		// bounded by spaces and must not be padded again.
+		if strings.Contains(text, wordSearchable(kw)) {
+			out = append(out, tags...)
+		}
+	}
+	return out
+}
+
+// shapeTags is the "how is this video put together" half — cuts, talking,
+// silence. Measured from the file itself, so it is true whatever the video is
+// about and whoever is reading the words.
+//
+// Only emitted when the shape pass actually ran. Otherwise a video with no
+// measurement would be tagged "still", which is a claim nobody made.
+func shapeTags(a videoAnalysis) []string {
+	if !hasPass(a, "shape") {
+		return nil
+	}
+	var out []string
+	switch {
+	case a.CutsPerMinute >= 30:
+		out = append(out, "fast cuts")
+	case a.CutsPerMinute > 0 && a.CutsPerMinute < 6:
+		out = append(out, "single take")
+	}
+	if a.SpeechRatio >= 0.8 {
+		out = append(out, "talking")
+	}
+	if a.SpeechRatio > 0 && a.SpeechRatio < 0.2 {
+		out = append(out, "silent")
+	}
+	return out
+}
+
+// dedupeSorted drops repeats and sorts, so the stored value does not churn
+// between runs that found the same things in a different order.
+func dedupeSorted(tags []string) []string {
+	seen := make(map[string]bool, len(tags))
+	var out []string
+	for _, t := range tags {
 		if t != "" && !seen[t] {
 			seen[t] = true
 			out = append(out, t)
 		}
 	}
-
-	text := wordSearchable(a.ScreenText + " " + a.Speech)
-	if strings.TrimSpace(text) != "" {
-		for kw, tags := range analysisKeywords {
-			// wordSearchable pads both ends, so the keyword arrives already
-			// bounded by spaces and must not be padded again.
-			if strings.Contains(text, wordSearchable(kw)) {
-				for _, t := range tags {
-					add(t)
-				}
-			}
-		}
-	}
-
-	// Shape tags. Only emitted when the shape pass actually ran — otherwise a
-	// video with no measurement would be tagged "still", which is a claim
-	// nobody made.
-	if hasPass(a, "shape") {
-		switch {
-		case a.CutsPerMinute >= 30:
-			add("fast cuts")
-		case a.CutsPerMinute > 0 && a.CutsPerMinute < 6:
-			add("single take")
-		}
-		if a.SpeechRatio >= 0.8 {
-			add("talking")
-		}
-		if a.SpeechRatio > 0 && a.SpeechRatio < 0.2 {
-			add("silent")
-		}
-	}
-
-	sort.Strings(out) // stable order so the stored value does not churn
+	sort.Strings(out)
 	return out
 }
 
