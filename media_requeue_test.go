@@ -81,23 +81,26 @@ func TestRequeue_OnlyEverTouchesFinishedRows(t *testing.T) {
 	//
 	// Source-level because the guard is a WHERE clause, and a WHERE clause
 	// that loses a leg still compiles and still returns rows.
+	//
+	// Counted, not just found. There are two UPDATEs in this file now — the
+	// oldest-first batch and the named-ids one — and a guard present in one
+	// of them satisfies a plain Contains while the other quietly reaches rows
+	// it must not touch.
 	src := readSourceFile(t, "media_requeue.go")
 	for _, guard := range []string{
 		`hls_manifest_url <> ''`,
 		`hls_manifest_url <> 'PENDING'`,
+		// A row with no source video can never transcode; queueing it just
+		// burns attempts until it hits the retry cap.
+		`COALESCE(video_url, '') <> ''`,
 	} {
-		if !strings.Contains(src, guard) {
-			t.Errorf("the re-queue no longer requires %s.\n\nWithout it this "+
-				"can reset a row a worker is holding right now, and that "+
-				"worker's completion callback will then overwrite the reset.",
-				guard)
+		if got := strings.Count(src, guard); got < 2 {
+			t.Errorf("%s appears in %d of the 2 UPDATE statements.\n\nEvery "+
+				"path that clears the transcoded mark needs it: without it a "+
+				"re-queue can reset a row a worker is holding right now, and "+
+				"that worker's completion callback then overwrites the reset.",
+				guard, got)
 		}
-	}
-	// A row with no source video can never transcode; queueing it just burns
-	// attempts until it hits the retry cap.
-	if !strings.Contains(src, `COALESCE(video_url, '') <> ''`) {
-		t.Error("rows with no source video are being queued; they cannot " +
-			"succeed and will burn their retry budget failing")
 	}
 }
 
@@ -149,6 +152,93 @@ func TestRequeue_ReportsWhatItDid(t *testing.T) {
 	}
 	if resp.Requeued != 7 || resp.Kind != "challenges" {
 		t.Errorf("the response does not round-trip: %+v", resp)
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// RE-QUEUEING PARTICULAR VIDEOS
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The batch path walks oldest-first, which cannot reach a recent video without
+// re-running everything before it. That is how a single wrong tag on one
+// recent video came to cost a full catalogue re-run — hours of worker time to
+// correct one row.
+//
+// Naming ids is the way out, and the thing that makes it trustworthy is that
+// it says which of the named videos actually moved. A named video that is
+// unknown, still waiting, or held by a worker right now does NOT move, and a
+// caller who is not told that will sit waiting for a result that is not
+// coming.
+
+func TestRequeue_AnEmptyIDListIsARefusalNotABatch(t *testing.T) {
+	// The dangerous shape. A caller assembles a list, it comes out empty, and
+	// a handler that treats "no ids" as "no ids field" quietly re-queues the
+	// oldest fifty videos instead of the zero they asked for.
+	w := requeuePost(t, `{"ids":[]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("got %d for an empty id list, want 400. Anything else risks "+
+			"falling through to the oldest %d videos.", w.Code, requeueDefaultBatch)
+	}
+}
+
+func TestRequeue_TooManyIDsIsRefused(t *testing.T) {
+	// Same ceiling as the batch path, and for the same reason: forty seconds
+	// of worker time each.
+	ids := make([]string, requeueMaxBatch+1)
+	for i := range ids {
+		ids[i] = "1"
+	}
+	w := requeuePost(t, `{"ids":[`+strings.Join(ids, ",")+`]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("got %d for %d ids, want 400 — the ceiling is %d",
+			w.Code, len(ids), requeueMaxBatch)
+	}
+}
+
+func TestRequeue_ABadRequestIsNotBlamedOnTheDatabase(t *testing.T) {
+	// db is nil under test. A malformed request must still read as malformed:
+	// answering "service unavailable" sends whoever sent it to check the
+	// database, which is fine, while their request stays broken.
+	if w := requeuePost(t, `{"ids":[]}`); w.Code == http.StatusServiceUnavailable {
+		t.Error("an empty id list is reported as a database problem")
+	}
+	// And the reverse still holds — a well-formed request with no database is
+	// still a 503.
+	if w := requeuePost(t, `{"ids":[260,262]}`); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("got %d for a valid request with no database, want 503", w.Code)
+	}
+}
+
+func TestRequeue_SaysWhichNamedVideosDidNotMove(t *testing.T) {
+	// The whole point of naming videos. Ask for four, three come back, and
+	// the fourth has to be named — otherwise "requeued: 3" leaves the caller
+	// guessing which one they are still waiting for.
+	got := missingFrom([]int{260, 262, 999, 1000}, []int{262, 260})
+	want := []int{999, 1000}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v (asked-for order)", got, want)
+		}
+	}
+}
+
+func TestRequeue_NothingSkippedWhenEverythingMoved(t *testing.T) {
+	// A clean run must report an empty skip list, not a list of everything.
+	// omitempty then keeps it out of the response entirely, so "skippedIds"
+	// appearing at all means something needs attention.
+	if got := missingFrom([]int{1, 2, 3}, []int{3, 2, 1}); len(got) != 0 {
+		t.Errorf("got %v, want nothing skipped", got)
+	}
+}
+
+func TestRequeue_ARepeatedIDIsReportedOnce(t *testing.T) {
+	// A caller pasting a list twice should not be told the same video failed
+	// twice.
+	if got := missingFrom([]int{5, 5, 5}, nil); len(got) != 1 {
+		t.Errorf("got %v, want [5] once", got)
 	}
 }
 
