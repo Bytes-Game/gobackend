@@ -215,7 +215,7 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 		if len(resp.Accounts) == 0 && len(resp.Challenges) == 0 {
 			if rescued := searchZeroResultRescue(resp.Intent); len(rescued) > 0 {
 				resp.Related = true
-				resp.RelatedKind = "trending"
+				resp.RelatedKind = zeroResultRescueKind()
 				for _, ch := range rescued {
 					if ch.ResponseCount > 0 && len(resp.Battles) < searchBattleCap {
 						resp.Battles = append(resp.Battles, ch)
@@ -285,10 +285,48 @@ func searchZeroResultRescue(intent string) []Challenge {
 	if len(out) == 0 {
 		out = backup
 	}
+	// Realtime trending is built from what people watched in the last while.
+	// On a platform with no traffic yet that list is empty, so the promise
+	// above — never render an empty search page — was quietly broken: a query
+	// that matched nothing showed a blank screen.
+	//
+	// Measured live: 96 videos in the catalogue, zero views, zero active
+	// users, and a search for a word nobody has uploaded showed nothing at
+	// all. The newest uploads are a real answer to "we could not find that",
+	// and a blank page is not.
+	//
+	// Labelled separately from trending so the app does not claim these are
+	// popular. Nothing here has been watched by anybody.
+	if len(out) == 0 {
+		if newest := GetSearchableChallenges(); len(newest) > 0 {
+			if len(newest) > searchNewestRescueCap {
+				newest = newest[:searchNewestRescueCap]
+			}
+			out = append(out, newest...)
+		}
+	}
 	if len(out) > 0 {
 		populateTopResponsesChallenges(out)
 	}
 	return out
+}
+
+// searchNewestRescueCap bounds the last-resort fallback. Enough to fill the
+// page, few enough that a failed search does not turn into a full feed.
+const searchNewestRescueCap = 8
+
+// zeroResultRescueKind says which fallback actually produced these, so the app
+// can tell somebody the truth about what they are looking at.
+//
+// "trending" and "recent" are very different claims. On a platform with no
+// traffic the trending list is empty and everything comes from "recent" —
+// calling those popular would be inventing an engagement signal that does not
+// exist.
+func zeroResultRescueKind() string {
+	if len(fetchTrendingRealtime(1)) > 0 {
+		return "trending"
+	}
+	return "recent"
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

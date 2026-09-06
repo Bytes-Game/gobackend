@@ -214,8 +214,12 @@ func TestSearch_SaysWhichKindOfFallbackItGave(t *testing.T) {
 			"tell it apart from a trending fallback and will claim these " +
 			"genuinely related videos are merely popular")
 	}
-	if !strings.Contains(s, `resp.RelatedKind = "trending"`) {
-		t.Error("the trending rescue is not labelled")
+	// The trending rescue's label is computed rather than literal, because
+	// with no traffic the trending list is empty and the results are really
+	// just the newest uploads — see zeroResultRescueKind.
+	if !strings.Contains(s, "resp.RelatedKind = zeroResultRescueKind()") {
+		t.Error("the trending rescue is not labelled, so the app cannot tell " +
+			"the user where those results came from")
 	}
 	// Both must set Related too, or the app renders no banner at all and
 	// presents a fallback as if it were an exact match.

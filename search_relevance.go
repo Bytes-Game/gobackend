@@ -234,48 +234,109 @@ func containsWord(text, q string) bool {
 	return false
 }
 
-// dedupeSearchResults folds near-identical videos into their best copy.
+// diversifySearchResults spreads similar videos out instead of removing them.
 //
-// This catalogue holds twelve copies of some clips. Without this a search for
-// their subject fills the entire page with one video repeated, which no real
-// search does and which makes a small catalogue look even smaller.
+// ════════════════════════════════════════════════════════════════════════════
+// WHY NOTHING IS EVER HIDDEN
+// ════════════════════════════════════════════════════════════════════════════
 //
-// Judged on what the videos are ABOUT, using the same overlap the feed uses to
-// decide two things are alike — not on titles, which the duplicates also share
-// but which real distinct videos can share too.
-func dedupeSearchResults(hits []challengeHit, index map[string]searchDoc) []challengeHit {
-	out := make([]challengeHit, 0, len(hits))
-	kept := make([][]string, 0, len(hits))
-	for _, h := range hits {
-		fp := contentFingerprint(index[h.Ch.ID].Topics, index[h.Ch.ID].Tags, "")
-		dup := false
-		if len(fp) > 0 {
-			for _, k := range kept {
-				if topicOverlap(fp, k) >= searchDuplicateOverlap {
-					dup = true
-					break
+// The first version of this DELETED near-identical results, keeping one copy.
+// It was written because this app's catalogue happens to hold twelve copies of
+// some clips — which is a fact about today's test data, not about video
+// search, and building a rule around it was a mistake.
+//
+// At any real scale it is actively wrong. A trend is thousands of people doing
+// the same thing, described in the same words, and somebody searching for it
+// wants to see them all. Two genuinely different biryani recipes share almost
+// every topic — rice, spices, chicken, cooking — and one of them would have
+// been hidden permanently, invisibly, with no way for anybody to notice.
+//
+// A search result page has one job: do not lose things. So similarity costs a
+// video POSITION, never its place in the results. Ten near-identical clips
+// still all appear; they just stop occupying the whole first screen.
+//
+// Two kinds of sameness get damped, because they are the two ways a page
+// becomes monotonous:
+//
+//	SUBJECT   ten videos about the same thing in a row
+//	CREATOR   ten videos by the same person in a row
+//
+// Both damp multiplicatively, so the first repeat costs a little and the
+// fifth costs a lot — which is the shape of how tiring repetition actually
+// feels.
+func diversifySearchResults(scored []scoredHit, index map[string]searchDoc, limit int) []challengeHit {
+	if len(scored) == 0 {
+		return nil
+	}
+	taken := make([]bool, len(scored))
+	fps := make([][]string, len(scored))
+	for i, s := range scored {
+		d := index[s.hit.Ch.ID]
+		fps[i] = contentFingerprint(d.Topics, d.Tags, "")
+	}
+
+	chosenFPs := make([][]string, 0, limit)
+	seenCreator := map[string]int{}
+	out := make([]challengeHit, 0, limit)
+
+	for len(out) < limit && len(out) < len(scored) {
+		bestIdx, bestVal := -1, -1.0
+		for i, s := range scored {
+			if taken[i] {
+				continue
+			}
+			// Start from how well it answered the query, then charge it for
+			// everything already on the page that it resembles.
+			v := s.score
+			if len(fps[i]) > 0 {
+				for _, cf := range chosenFPs {
+					if topicOverlap(fps[i], cf) >= searchNearIdentical {
+						v *= searchRepeatDamping
+					}
 				}
 			}
+			for n := seenCreator[s.hit.Ch.CreatorID]; n > 0; n-- {
+				v *= searchCreatorDamping
+			}
+			if v > bestVal {
+				bestIdx, bestVal = i, v
+			}
 		}
-		if dup {
-			continue
+		if bestIdx < 0 {
+			break
 		}
-		kept = append(kept, fp)
+		taken[bestIdx] = true
+		chosenFPs = append(chosenFPs, fps[bestIdx])
+		if id := scored[bestIdx].hit.Ch.CreatorID; id != "" {
+			seenCreator[id]++
+		}
+		h := scored[bestIdx].hit
+		h.Rank = len(out) // the caller decays over position; gaps would demote unfairly
 		out = append(out, h)
-	}
-	// Ranks must be renumbered: the caller decays relevance over position, and
-	// gaps left by removed items would silently penalise everything after the
-	// first duplicate.
-	for i := range out {
-		out[i].Rank = i
 	}
 	return out
 }
 
-// searchDuplicateOverlap is how alike two videos must be to count as the same
-// result. High, because folding two genuinely different videos together hides
-// one of them completely — a worse failure than showing a near-duplicate.
-const searchDuplicateOverlap = 0.8
+const (
+	// searchNearIdentical is how alike two videos must be before one counts as
+	// a repeat of the other. Deliberately high: this only costs position, but
+	// pushing genuinely different videos down is still a real cost.
+	searchNearIdentical = 0.8
+	// searchRepeatDamping is what each earlier near-identical result costs.
+	// One repeat barely moves a strong match; five bury it — while still
+	// leaving every one of them on the page.
+	searchRepeatDamping = 0.55
+	// searchCreatorDamping is the same idea for one person dominating. Gentler,
+	// because searching a creator's subject and getting their videos is often
+	// exactly right.
+	searchCreatorDamping = 0.75
+)
+
+// scoredHit is a candidate and how well it answered the query.
+type scoredHit struct {
+	hit   challengeHit
+	score float64
+}
 
 // rankByRelevance scores the whole searchable catalogue against a query and
 // returns the best, most relevant first.
@@ -291,28 +352,14 @@ func rankByRelevance(query string, limit int) []challengeHit {
 	index := searchTextIndex()
 	related := relatedSearches(q, topicGraphMaxRelated)
 
-	type sc struct {
-		hit   challengeHit
-		score float64
-	}
-	scored := make([]sc, 0, 32)
+	scored := make([]scoredHit, 0, 32)
 	for _, ch := range GetSearchableChallenges() {
 		s := searchRelevance(ch, index[ch.ID], q, related)
 		if s <= 0 {
 			continue
 		}
-		scored = append(scored, sc{challengeHit{Ch: ch}, s})
+		scored = append(scored, scoredHit{challengeHit{Ch: ch}, s})
 	}
 	sort.SliceStable(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
-
-	out := make([]challengeHit, 0, len(scored))
-	for i, s := range scored {
-		s.hit.Rank = i
-		out = append(out, s.hit)
-	}
-	out = dedupeSearchResults(out, index)
-	if len(out) > limit {
-		out = out[:limit]
-	}
-	return out
+	return diversifySearchResults(scored, index, limit)
 }
