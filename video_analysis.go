@@ -246,3 +246,10 @@ func analysisText(a *VideoAnalysis) string {
 	}
 	return a.ScreenText + " " + a.Speech
 }
+
+// jsonUnmarshalQuiet decodes into v and reports success, for the many callers
+// that treat unreadable stored analysis as "not measured" rather than as an
+// error worth failing a request over.
+func jsonUnmarshalQuiet(raw []byte, v interface{}) bool {
+	return json.Unmarshal(raw, v) == nil
+}

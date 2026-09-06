@@ -584,38 +584,15 @@ func meiliSearchChallenges(query string, limit int) []challengeHit {
 	return out
 }
 
+// postgresSearchChallengesFallback is the search when Meilisearch is not
+// configured — which, on the deployed server, is every search.
+//
+// It used to scan titles for a substring and return whatever matched in date
+// order. See search_relevance.go for what replaced it and why: a title match,
+// a topic match and a word said once in passing all scored the same, and the
+// reranker's position decay was decaying over an order nothing had set.
 func postgresSearchChallengesFallback(query string, limit int) []challengeHit {
-	q := strings.ToLower(strings.TrimSpace(query))
-	allChallenges := GetArenaChallenges()
-
-	// Which videos are ABOUT this word. One query for the whole search rather
-	// than one per candidate — the topics column is GIN-indexed for exactly
-	// this question (migration 006).
-	//
-	// Without it this fallback could only match a title or a username, so
-	// while Meilisearch is down a search for "jellyfish" returns nothing even
-	// though the app knows perfectly well which video that is.
-	// Widened to the subjects that go with the query, so "aquarium" finds the
-	// jellyfish video. The original term is always first and never dropped.
-	aboutQ := map[string]bool{}
-	for _, term := range expandQuery(q) {
-		for id := range challengeIDsAboutTopic(term) {
-			aboutQ[id] = true
-		}
-	}
-
-	out := make([]challengeHit, 0)
-	for _, c := range allChallenges {
-		title := strings.ToLower(c.Prefix + " " + c.Subject)
-		creator := strings.ToLower(c.CreatorUsername)
-		if strings.Contains(title, q) || strings.Contains(creator, q) || aboutQ[c.ID] {
-			out = append(out, challengeHit{Ch: c, Rank: len(out)})
-			if len(out) >= limit {
-				break
-			}
-		}
-	}
-	return out
+	return rankByRelevance(query, limit)
 }
 
 // challengeIDsAboutTopic finds videos whose topics or machine tags contain the
