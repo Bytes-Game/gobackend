@@ -44,16 +44,33 @@ type UserSimilarity struct {
 func computeAllSimilarities() {
 	start := time.Now()
 
-	// Load all user profiles with category affinity
+	// Load what each user likes, in the words videos are described by.
+	//
+	// This used to compare people across eighteen categories, which is far too
+	// coarse to say two people have the same taste: somebody who watches
+	// nothing but wildlife clips and somebody who watches nothing but stand-up
+	// both register as "comedy" if that is what the uploads happened to be
+	// filed under. Comparing the subjects themselves is the difference between
+	// "you both like videos" and "you both like jellyfish".
+	//
+	// Topic affinity falls back to the category one per user, so somebody
+	// whose profile has not rebuilt since topics existed still takes part
+	// instead of dropping out of collaborative filtering entirely.
 	rows, err := db.Query(`
-		SELECT user_id, category_affinity FROM user_profiles
-		WHERE event_count >= $1`, coldStartThreshold)
+		SELECT user_id,
+		       CASE WHEN COALESCE(topic_affinity, '{}'::jsonb) <> '{}'::jsonb
+		            THEN topic_affinity ELSE category_affinity END
+		  FROM user_profiles
+		 WHERE event_count >= $1`, coldStartThreshold)
 	if err != nil {
 		log.Printf("Collaborative: failed to load profiles: %v", err)
 		return
 	}
 	defer rows.Close()
 
+	// Named affinity still, but the keys are now subjects rather than one of
+	// eighteen category names — cosineSimilarity below does not care which,
+	// it compares whatever keys the two maps share.
 	type userVector struct {
 		id       string
 		affinity map[string]float64

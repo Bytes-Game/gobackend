@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/meilisearch/meilisearch-go"
 )
@@ -33,7 +34,17 @@ func InitMeilisearch() {
 	// secondary match surfaces ("funny" finds emotion-tagged content
 	// even when no title contains the word).
 	ci := meili.Index("challenges")
-	ci.UpdateSearchableAttributes(&[]string{"prefix", "subject", "creatorUsername", "category", "emotionTags"})
+	// Order is weight: Meili scores an earlier attribute higher.
+	//
+	// "topics" sits right behind the title because it is what the video is
+	// ACTUALLY about — a jellyfish clip has the word "jellyfish" nowhere else,
+	// and before this it could not be found at all. "spoken" is last on
+	// purpose: a word said once in passing should never outrank a video whose
+	// title is that word.
+	ci.UpdateSearchableAttributes(&[]string{
+		"prefix", "subject", "topics", "creatorUsername",
+		"tags", "category", "emotionTags", "spoken",
+	})
 	filterAttrs := []interface{}{"visibility", "status"}
 	ci.UpdateFilterableAttributes(&filterAttrs)
 	ci.UpdateSortableAttributes(&[]string{"views", "likes", "engagementScore"})
@@ -92,6 +103,7 @@ func seedMeilisearchData() {
 
 // challengeToMeiliDoc converts a Challenge to a Meilisearch document.
 func challengeToMeiliDoc(c Challenge) map[string]interface{} {
+	topics, spoken := challengeSearchText(c.ID)
 	return map[string]interface{}{
 		"id":              c.ID,
 		"creatorId":       c.CreatorID,
@@ -113,7 +125,48 @@ func challengeToMeiliDoc(c Challenge) map[string]interface{} {
 		"category":        c.Category,
 		"emotionTags":     c.EmotionTags,
 		"engagementScore": c.Views + 5*c.Likes,
+		// What the video is about and what is said in it. Everything the
+		// worker learned by reading, listening and looking was stored and
+		// then unreachable from search: somebody who says "biryani" out loud
+		// could not be found by searching biryani, and the jellyfish clip had
+		// that word in no searchable field at all.
+		"topics": topics,
+		"tags":   c.Tags,
+		"spoken": spoken,
 	}
+}
+
+// challengeSearchText fetches what a video is about and what is said in it.
+//
+// Read at index time rather than carried on the Challenge struct, because
+// every query that builds a Challenge would otherwise have to load two more
+// columns for a value only search uses.
+//
+// Silent on every failure. A video that has not been analysed yet — which is
+// most of them, briefly — simply has nothing extra to match on, and search
+// must not break because a description is missing.
+func challengeSearchText(id string) (topics []string, spoken string) {
+	if db == nil {
+		return nil, ""
+	}
+	var topicsJSON, analysisJSON []byte
+	err := db.QueryRow(`
+		SELECT COALESCE(content_topics, '[]'::jsonb), video_analysis
+		  FROM challenges WHERE CAST(id AS TEXT) = $1`, id).Scan(&topicsJSON, &analysisJSON)
+	if err != nil {
+		return nil, ""
+	}
+	_ = json.Unmarshal(topicsJSON, &topics)
+	if len(analysisJSON) > 0 {
+		var a VideoAnalysis
+		if json.Unmarshal(analysisJSON, &a) == nil {
+			// Screen text as well as speech: a caption burned onto the video
+			// is often the clearest statement of what it is, and plenty of
+			// videos have one and no sound at all.
+			spoken = strings.TrimSpace(a.ScreenText + " " + a.Speech)
+		}
+	}
+	return topics, spoken
 }
 
 // IndexChallenge adds or updates a challenge in Meilisearch.
