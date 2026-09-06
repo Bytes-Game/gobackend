@@ -288,7 +288,7 @@ func searchNearbySubjects(query string) []Challenge {
 		return nil
 	}
 	var out []Challenge
-	for _, c := range GetArenaChallenges() {
+	for _, c := range GetSearchableChallenges() {
 		if ids[c.ID] {
 			out = append(out, c)
 			if len(out) >= searchBattleCap+searchShortCap {

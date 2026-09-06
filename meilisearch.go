@@ -90,7 +90,7 @@ func seedMeilisearchData() {
 	}
 
 	// Index all arena challenges
-	challenges := GetArenaChallenges()
+	challenges := GetSearchableChallenges()
 	if len(challenges) > 0 {
 		docs := make([]map[string]interface{}, len(challenges))
 		for i, c := range challenges {

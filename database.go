@@ -1806,6 +1806,38 @@ func GetArenaChallenges() []Challenge {
 	  ORDER BY c.created_at DESC`)
 }
 
+// GetSearchableChallenges returns every public video, for search and the
+// search index.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY THIS IS NOT GetArenaChallenges
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The arena list drops an unanswered challenge 24 hours after it is posted.
+// That is a sensible rule for a BATTLE TAB — an open challenge nobody has
+// taken up is stale after a day, and the tab exists to show live contests.
+//
+// It is a catastrophic rule for search, and search was using it.
+//
+// A video becomes 'active' only when somebody responds to it. So every upload
+// nobody answered vanished from that list a day later — and search, the search
+// INDEX, and the related-subject fallback all read it. Measured on the live
+// server: 96 videos in the catalogue, and this returned an empty list, so no
+// search could return a video no matter how good the matching was and
+// Meilisearch was being seeded with nothing at all.
+//
+// Nobody noticed because the For You feed uses its own query with no such
+// clause. The app looked healthy while search was empty.
+//
+// Searching is not browsing a tab. A video somebody uploaded last month is
+// exactly what a person is looking for when they type its subject.
+func GetSearchableChallenges() []Challenge {
+	return queryChallenges(challengeBaseQuery + `
+	  WHERE c.visibility = 'arena'
+	    AND c.status IN ('open','active','completed')
+	  ORDER BY c.created_at DESC`)
+}
+
 // GetFriendsChallenges returns challenges visible to a specific user (friends-only).
 // This includes: challenges by people the user follows with visibility=friends,
 // where the user is either in the visible_to list OR the list is empty (all friends).
