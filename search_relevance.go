@@ -105,7 +105,7 @@ func searchTextIndex() map[string]searchDoc {
 		       COALESCE(custom_tags::text, '[]'),
 		       video_analysis
 		  FROM challenges
-		 WHERE visibility = 'arena'`)
+		 WHERE ` + searchableWhere(""))
 	if err != nil {
 		return out
 	}

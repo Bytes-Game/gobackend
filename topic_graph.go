@@ -129,7 +129,8 @@ func buildTopicGraph() *topicGraph {
 	rows, err := db.Query(`
 		SELECT COALESCE(content_topics::text, '[]')
 		  FROM challenges
-		 WHERE content_topics IS NOT NULL
+		 WHERE ` + searchableWhere("") + `
+		   AND content_topics IS NOT NULL
 		   AND content_topics <> '[]'::jsonb`)
 	if err != nil {
 		log.Printf("topic graph: %v", err)
