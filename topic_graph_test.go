@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -208,12 +209,16 @@ func TestGraph_SuggestionsDoNotShuffle(t *testing.T) {
 	// box reorder themselves on every keystroke.
 	g := catalogueGraph(t, seaAndGarden())
 	first := g.relatedTopics("jellyfish", 4)
+	if len(first) == 0 {
+		t.Fatal("no suggestions at all, so this proves nothing about ordering")
+	}
 	for i := 0; i < 5; i++ {
 		again := g.relatedTopics("jellyfish", 4)
-		for j := range first {
-			if first[j] != again[j] {
-				t.Fatalf("order changed between calls: %v then %v", first, again)
-			}
+		// Compared as whole slices rather than element by element: a shorter
+		// or longer answer is just as much a change as a reordered one, and
+		// indexing one against the other would read past the end of it.
+		if strings.Join(again, "|") != strings.Join(first, "|") {
+			t.Fatalf("order changed between calls: %v then %v", first, again)
 		}
 	}
 }
