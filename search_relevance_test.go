@@ -121,82 +121,167 @@ func TestRelevance_EmptyQueryMatchesNothing(t *testing.T) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// ONE VIDEO SHOULD APPEAR ONCE
+// SIMILAR VIDEOS COST POSITION, NEVER THEIR PLACE
 // ════════════════════════════════════════════════════════════════════════════
+//
+// The first version of this DELETED near-identical results. It was written
+// around a fact about today's test catalogue — twelve copies of some clips —
+// rather than around how video search works, which was the wrong instinct.
+//
+// At real scale it destroys results. A trend is thousands of people doing the
+// same thing in the same words. Two different biryani recipes share rice,
+// spices, chicken and cooking. Removing "duplicates" would hide one of them
+// permanently, invisibly, with nobody able to tell.
 
-func TestDedupe_TwelveCopiesBecomeOneResult(t *testing.T) {
-	// This catalogue really does hold twelve copies of some clips. Without
-	// this, searching their subject fills the whole page with one video.
+func fakeHits(ids ...string) []scoredHit {
+	out := make([]scoredHit, 0, len(ids))
+	for i, id := range ids {
+		out = append(out, scoredHit{
+			hit:   challengeHit{Ch: Challenge{ID: id, CreatorID: "c" + id}},
+			score: 100 - float64(i), // already in relevance order
+		})
+	}
+	return out
+}
+
+func TestDiversity_NothingIsEverHidden(t *testing.T) {
+	// The property that matters most. Ten near-identical videos must all still
+	// be reachable — somebody searching a trend wants the trend.
 	index := map[string]searchDoc{}
-	var hits []challengeHit
+	ids := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}
+	for _, id := range ids {
+		index[id] = doc([]string{"jellyfish", "aquarium", "marine life"}, nil, "")
+	}
+	got := diversifySearchResults(fakeHits(ids...), index, 20)
+	if len(got) != 10 {
+		t.Fatalf("got %d of 10 near-identical videos. Similar is not the same "+
+			"as duplicate: two different recipes share every topic, and "+
+			"dropping one hides it from everybody, permanently and "+
+			"invisibly.", len(got))
+	}
+}
+
+func TestDiversity_RepetitionIsPushedDownNotOut(t *testing.T) {
+	// Five copies of one subject and one different video. The different one
+	// should climb — the page stops being one thing — but all six survive.
+	index := map[string]searchDoc{}
 	for _, id := range []string{"1", "2", "3", "4", "5"} {
 		index[id] = doc([]string{"jellyfish", "aquarium", "marine life"}, nil, "")
-		hits = append(hits, challengeHit{Ch: Challenge{ID: id}})
 	}
 	index["9"] = doc([]string{"cricket", "bat", "stadium"}, nil, "")
-	hits = append(hits, challengeHit{Ch: Challenge{ID: "9"}})
 
-	got := dedupeSearchResults(hits, index)
-	if len(got) != 2 {
-		t.Fatalf("got %d results from five identical videos plus one "+
-			"different, want 2", len(got))
+	got := diversifySearchResults(fakeHits("1", "2", "3", "4", "5", "9"), index, 10)
+	if len(got) != 6 {
+		t.Fatalf("got %d, want all 6 kept", len(got))
 	}
 	if got[0].Ch.ID != "1" {
-		t.Errorf("kept %q rather than the best-scoring copy, which is first",
-			got[0].Ch.ID)
+		t.Errorf("the best match is no longer first; it is %q", got[0].Ch.ID)
+	}
+	// "9" scored lowest of the six and should still have climbed past most of
+	// the repeats.
+	pos := -1
+	for i, h := range got {
+		if h.Ch.ID == "9" {
+			pos = i
+		}
+	}
+	if pos > 2 {
+		t.Errorf("the one different video sits at position %d of 6. Repetition "+
+			"is supposed to cost position, so a fresh subject should rise.", pos)
 	}
 }
 
-func TestDedupe_DifferentVideosSurvive(t *testing.T) {
-	// Folding two genuinely different videos together hides one completely —
-	// a worse failure than showing a near-duplicate, which is why the
-	// threshold is high.
+func TestDiversity_OnePersonDoesNotOwnThePage(t *testing.T) {
+	// The other way a page turns monotonous. Gentler than subject damping,
+	// because searching a creator's subject and getting their videos is often
+	// exactly right.
+	index := map[string]searchDoc{}
+	hits := make([]scoredHit, 0, 6)
+	for i, id := range []string{"1", "2", "3", "4", "5"} {
+		index[id] = doc([]string{"topic" + id}, nil, "") // all different subjects
+		hits = append(hits, scoredHit{
+			hit:   challengeHit{Ch: Challenge{ID: id, CreatorID: "same"}},
+			score: 100 - float64(i),
+		})
+	}
+	index["9"] = doc([]string{"other"}, nil, "")
+	hits = append(hits, scoredHit{
+		hit:   challengeHit{Ch: Challenge{ID: "9", CreatorID: "someone-else"}},
+		score: 80,
+	})
+
+	got := diversifySearchResults(hits, index, 10)
+	if len(got) != 6 {
+		t.Fatalf("got %d, want all 6 — one creator dominating is a reason to "+
+			"reorder, never to delete", len(got))
+	}
+	pos := -1
+	for i, h := range got {
+		if h.Ch.ID == "9" {
+			pos = i
+		}
+	}
+	if pos > 2 {
+		t.Errorf("the only other creator sits at position %d; one person owns "+
+			"the page", pos)
+	}
+}
+
+func TestDiversity_TheBestMatchAlwaysLeads(t *testing.T) {
+	// Diversity must never cost the top spot. Somebody typed a word; the thing
+	// that best answers it goes first, whatever else is on the page.
 	index := map[string]searchDoc{
-		"1": doc([]string{"jellyfish", "aquarium"}, nil, ""),
-		"2": doc([]string{"cricket", "stadium"}, nil, ""),
-		"3": doc([]string{"biryani", "rice"}, nil, ""),
+		"1": doc([]string{"jellyfish"}, nil, ""),
+		"2": doc([]string{"cricket"}, nil, ""),
 	}
-	hits := []challengeHit{
-		{Ch: Challenge{ID: "1"}}, {Ch: Challenge{ID: "2"}}, {Ch: Challenge{ID: "3"}},
-	}
-	if got := dedupeSearchResults(hits, index); len(got) != 3 {
-		t.Errorf("got %d, want all 3 kept — these share nothing", len(got))
+	got := diversifySearchResults(fakeHits("1", "2"), index, 10)
+	if got[0].Ch.ID != "1" {
+		t.Errorf("the best match is %q, not the top result", got[0].Ch.ID)
 	}
 }
 
-func TestDedupe_VideosWithNoDescriptionAreNotAllTheSame(t *testing.T) {
+func TestDiversity_VideosWithNoDescriptionAreNotAllAlike(t *testing.T) {
 	// Most of the catalogue has no topics yet. An empty description must not
-	// match every other empty description, or one unanalysed video would hide
-	// all the rest.
+	// count as resembling every other empty one, or unanalysed videos would
+	// damp each other for no reason.
 	index := map[string]searchDoc{"1": {}, "2": {}, "3": {}}
-	hits := []challengeHit{
-		{Ch: Challenge{ID: "1"}}, {Ch: Challenge{ID: "2"}}, {Ch: Challenge{ID: "3"}},
+	got := diversifySearchResults(fakeHits("1", "2", "3"), index, 10)
+	if len(got) != 3 {
+		t.Fatalf("got %d, want 3", len(got))
 	}
-	if got := dedupeSearchResults(hits, index); len(got) != 3 {
-		t.Errorf("got %d, want 3 — knowing nothing about two videos does not "+
-			"make them the same video", len(got))
+	for i, h := range got {
+		if h.Ch.ID != []string{"1", "2", "3"}[i] {
+			t.Errorf("order changed to %v; knowing nothing about two videos "+
+				"does not make them alike", []string{got[0].Ch.ID, got[1].Ch.ID, got[2].Ch.ID})
+			break
+		}
 	}
 }
 
-func TestDedupe_RanksAreRenumbered(t *testing.T) {
-	// The caller decays relevance over position. Gaps left by removed
-	// duplicates would silently penalise everything after the first one.
+func TestDiversity_RanksAreRenumbered(t *testing.T) {
+	// The caller decays relevance over position, so a gap would silently
+	// demote everything after it.
 	index := map[string]searchDoc{
 		"1": doc([]string{"a", "b", "c"}, nil, ""),
 		"2": doc([]string{"a", "b", "c"}, nil, ""),
 		"3": doc([]string{"x", "y", "z"}, nil, ""),
 	}
-	hits := []challengeHit{
-		{Ch: Challenge{ID: "1"}, Rank: 0},
-		{Ch: Challenge{ID: "2"}, Rank: 1},
-		{Ch: Challenge{ID: "3"}, Rank: 2},
-	}
-	got := dedupeSearchResults(hits, index)
+	got := diversifySearchResults(fakeHits("1", "2", "3"), index, 10)
 	for i, h := range got {
 		if h.Rank != i {
-			t.Errorf("result %d has rank %d; a gap here quietly demotes "+
-				"everything after a removed duplicate", i, h.Rank)
+			t.Errorf("result %d carries rank %d", i, h.Rank)
 		}
+	}
+}
+
+func TestDiversity_RespectsTheLimit(t *testing.T) {
+	index := map[string]searchDoc{}
+	ids := []string{"1", "2", "3", "4", "5"}
+	for _, id := range ids {
+		index[id] = doc([]string{"t" + id}, nil, "")
+	}
+	if got := diversifySearchResults(fakeHits(ids...), index, 3); len(got) != 3 {
+		t.Errorf("got %d, want 3", len(got))
 	}
 }
 
