@@ -35,6 +35,7 @@ package main
 
 import (
 	"log"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -48,20 +49,40 @@ import (
 // something new is reachable the same afternoon.
 const topicGraphTTL = 30 * time.Minute
 
-// topicGraphMinPairs is how many videos two subjects must share before they
-// count as related.
+// topicGraphMinPairs is the least evidence from which any relationship can be
+// inferred at all.
 //
-// One shared video is a coincidence. It is deliberately low because the
-// platform is small — on a catalogue of a hundred videos, demanding five
-// co-occurrences would produce an empty graph and the feature would look
-// broken rather than cautious.
+// Two, and it is not a tuning knob. One shared video is a single coincidence
+// and says nothing; two is the smallest number that can show a pattern. Making
+// it larger would not make the graph safer — it would make it silent on a new
+// platform and no more correct on a large one, because a subject pair sharing
+// five videos out of ten million is still noise.
+//
+// What actually keeps this honest at any size is not a count. It is
+// topicSpecificity below: a subject that appears on half the catalogue cannot
+// tell you much about anything, however many videos it co-occurs with, and one
+// that appears on a hundredth of it tells you a great deal. That ratio behaves
+// identically on a hundred videos and on a hundred million, which a threshold
+// picked for "our catalogue is small" never could.
 const topicGraphMinPairs = 2
+
+// topicGraphMinStrength is how much of a subject's videos must also be about
+// the other one before they count as related.
+//
+// A proportion rather than a count, so it means the same thing at every scale.
+// Below this the two things merely brush past each other.
+const topicGraphMinStrength = 0.15
 
 // topicGraphMaxRelated bounds how far a query is widened. Past a handful the
 // extra subjects are weakly related and start pulling in everything.
 const topicGraphMaxRelated = 6
 
 type topicGraph struct {
+	// How many videos each subject appears on, and how many were counted.
+	// Kept so specificity can be measured — see topicSpecificity.
+	freq map[string]int
+	docs int
+
 	// related[a][b] is how strongly b follows from a, 0..1. Asymmetric on
 	// purpose: nearly every video about "thistle" is also about "nature", but
 	// hardly any video about "nature" is about thistles, and collapsing that
@@ -97,7 +118,11 @@ func getTopicGraph() *topicGraph {
 // buildTopicGraph reads every described video and counts which subjects share
 // one.
 func buildTopicGraph() *topicGraph {
-	g := &topicGraph{related: map[string]map[string]float64{}, builtAt: time.Now()}
+	g := &topicGraph{
+		related: map[string]map[string]float64{},
+		freq:    map[string]int{},
+		builtAt: time.Now(),
+	}
 	if db == nil {
 		return g
 	}
@@ -112,7 +137,7 @@ func buildTopicGraph() *topicGraph {
 	}
 	defer rows.Close()
 
-	freq := map[string]int{}
+	freq := g.freq
 	pair := map[string]map[string]int{}
 	sets := 0
 	for rows.Next() {
@@ -167,6 +192,9 @@ func buildTopicGraph() *topicGraph {
 			if s > 1 {
 				s = 1
 			}
+			if s < topicGraphMinStrength {
+				continue
+			}
 			row[b] = s
 		}
 		if len(row) > 0 {
@@ -174,8 +202,48 @@ func buildTopicGraph() *topicGraph {
 		}
 	}
 
+	g.docs = sets
 	log.Printf("topic graph: %d subjects from %d described videos", len(g.related), sets)
 	return g
+}
+
+// topicSpecificity is how much knowing a subject actually tells you, from 0
+// (on everything) to 1 (on almost nothing).
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY THIS EXISTS
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Searching "thistle" returned a video about a TREE HOUSE. Both are described
+// as being about "nature", so the graph linked them and the search followed
+// the link. The link is real; it just carries almost no information, because
+// "nature" sits on a large share of the catalogue and "pollination" sits on
+// almost none.
+//
+// This is the standard measure for that — the rarer a term, the more a match
+// on it means — and its great virtue here is that it is a RATIO. It behaves
+// the same way on a hundred videos and on a hundred million, so nothing about
+// it needs revisiting as the app grows. That is the opposite of a threshold
+// chosen because the catalogue happens to be small today.
+//
+// Unknown subjects score 1: on a graph that has not been built, or a word from
+// outside it, treating a match as fully informative is the same behaviour as
+// before this existed rather than a silent downgrade of everything.
+func (g *topicGraph) topicSpecificity(word string) float64 {
+	if g == nil || g.docs <= 1 {
+		return 1
+	}
+	df := g.freq[word]
+	if df <= 0 {
+		return 1
+	}
+	if df >= g.docs {
+		return 0 // on everything: knowing it separates nothing from anything
+	}
+	// log(N/df) over log(N) puts the rarest subject at 1 and the commonest
+	// near 0, with the curve that matters: the drop from "on 1%" to "on 10%"
+	// is far larger than from "on 40%" to "on 50%".
+	return math.Log(float64(g.docs)/float64(df)) / math.Log(float64(g.docs))
 }
 
 // relatedTopics returns the subjects that go with this one, strongest first.
@@ -200,7 +268,13 @@ func (g *topicGraph) relatedTopics(word string, n int) []string {
 	}
 	all := make([]kv, 0, len(row))
 	for k, v := range row {
-		all = append(all, kv{k, v})
+		// Weighted by how much the related subject actually tells you.
+		//
+		// Without this, "thistle" leads with "nature" — a real link that
+		// carries almost no information, because nature sits on a large share
+		// of the catalogue. "pollination" sits on almost none and is what
+		// somebody searching thistle actually meant.
+		all = append(all, kv{k, v * g.topicSpecificity(k)})
 	}
 	sort.Slice(all, func(i, j int) bool {
 		if all[i].v != all[j].v {

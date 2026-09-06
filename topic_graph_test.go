@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -220,5 +221,139 @@ func TestGraph_SuggestionsDoNotShuffle(t *testing.T) {
 		if strings.Join(again, "|") != strings.Join(first, "|") {
 			t.Fatalf("order changed between calls: %v then %v", first, again)
 		}
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// A COMMON SUBJECT TELLS YOU ALMOST NOTHING
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Searching "thistle" returned a video about a TREE HOUSE. Both are described
+// as being about "nature", the graph linked them, and the search followed the
+// link. The link is real and carries almost no information: "nature" sits on
+// a large share of the catalogue and "pollination" sits on almost none.
+//
+// This also replaced the reason the co-occurrence floor was set to two. That
+// was justified in the code as "the platform is small", which is a rule fitted
+// to today's data — it would have needed revisiting at every scale. Specificity
+// is a RATIO and behaves identically on a hundred videos and a hundred million.
+
+func specGraph(t *testing.T, sets [][]string) *topicGraph {
+	t.Helper()
+	g := catalogueGraph(t, sets)
+	g.freq = map[string]int{}
+	for _, ws := range sets {
+		for _, w := range ws {
+			g.freq[w]++
+		}
+	}
+	g.docs = len(sets)
+	return g
+}
+
+func TestSpecificity_ACommonSubjectCountsForLess(t *testing.T) {
+	// "nature" on most videos, "pollination" on two.
+	sets := [][]string{
+		{"bee", "pollination", "thistle", "nature"},
+		{"bee", "pollination", "thistle", "nature"},
+		{"tree house", "forest", "nature"},
+		{"jellyfish", "aquarium", "nature"},
+		{"cricket", "stadium", "nature"},
+		{"biryani", "rice", "nature"},
+	}
+	g := specGraph(t, sets)
+
+	common := g.topicSpecificity("nature")
+	rare := g.topicSpecificity("pollination")
+	if rare <= common {
+		t.Errorf("pollination scored %.2f and nature %.2f. A subject on almost "+
+			"nothing has to tell you more than one on almost everything, or "+
+			"searching thistle keeps returning tree houses.", rare, common)
+	}
+	if common < 0 || rare > 1 {
+		t.Errorf("outside 0..1: nature %.2f, pollination %.2f", common, rare)
+	}
+}
+
+func TestSpecificity_TheSpecificRelatedSubjectLeads(t *testing.T) {
+	// The visible effect. Measured on the real catalogue before and after:
+	//   thistle -> pollination, nature, insect, flower, bee
+	//   thistle -> pollination, bee, insect, flower, nature
+	sets := [][]string{
+		{"bee", "pollination", "thistle", "nature"},
+		{"bee", "pollination", "thistle", "nature"},
+		{"tree house", "forest", "nature"},
+		{"jellyfish", "aquarium", "nature"},
+		{"cricket", "stadium", "nature"},
+	}
+	g := specGraph(t, sets)
+	got := g.relatedTopics("thistle", 5)
+	if len(got) == 0 {
+		t.Fatal("no related subjects at all")
+	}
+	posOf := func(w string) int {
+		for i, v := range got {
+			if v == w {
+				return i
+			}
+		}
+		return -1
+	}
+	p, n := posOf("pollination"), posOf("nature")
+	if p < 0 {
+		t.Fatalf("pollination is missing from %v", got)
+	}
+	if n >= 0 && p > n {
+		t.Errorf("got %v — nature outranks pollination, so the vaguest link "+
+			"leads and the search follows it into unrelated videos", got)
+	}
+}
+
+func TestSpecificity_OnEverythingIsWorthNothing(t *testing.T) {
+	// A subject every video carries separates nothing from anything.
+	sets := [][]string{
+		{"video", "a"}, {"video", "b"}, {"video", "c"},
+	}
+	g := specGraph(t, sets)
+	if got := g.topicSpecificity("video"); got != 0 {
+		t.Errorf("a subject on every video scored %.2f, want 0", got)
+	}
+}
+
+func TestSpecificity_UnknownSubjectsAreNotSilentlyDowngraded(t *testing.T) {
+	// A word outside the graph, or a graph that has not been built, must
+	// behave as it did before this existed — not quietly weaken every match.
+	var empty *topicGraph
+	if got := empty.topicSpecificity("anything"); got != 1 {
+		t.Errorf("nil graph gave %.2f, want 1", got)
+	}
+	g := specGraph(t, [][]string{{"a", "b"}, {"a", "c"}})
+	if got := g.topicSpecificity("never seen"); got != 1 {
+		t.Errorf("unknown subject gave %.2f, want 1", got)
+	}
+}
+
+func TestGraph_ThresholdIsNotFittedToCatalogueSize(t *testing.T) {
+	// The floor was set to two and justified in the comment as "the platform
+	// is small". That is a rule tuned to today's data: it would need
+	// revisiting at every scale, and nobody would notice when it should have
+	// been.
+	//
+	// Two is now defended as the least evidence from which ANY pattern can be
+	// inferred — one shared video is a single coincidence — and the work of
+	// staying honest at scale is done by specificity, which is a ratio.
+	src, err := os.ReadFile("topic_graph.go")
+	if err != nil {
+		t.Fatalf("read topic_graph.go: %v", err)
+	}
+	s := string(src)
+	if strings.Contains(s, "deliberately low because the") {
+		t.Error("the co-occurrence floor is still justified by how small this " +
+			"platform is, which is a rule fitted to the current catalogue")
+	}
+	if !strings.Contains(s, "topicGraphMinStrength") {
+		t.Error("there is no proportional strength floor, so relatedness rests " +
+			"on an absolute count — which means something different at every " +
+			"scale")
 	}
 }

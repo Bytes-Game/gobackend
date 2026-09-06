@@ -208,17 +208,26 @@ func searchRelevance(ch Challenge, doc searchDoc, q string, related []string) fl
 	// Below every direct match on purpose: "aquarium" should find the
 	// jellyfish video, and should never rank it above a video actually
 	// called aquarium.
+	// Weighted by how much the related subject tells you. Matching on
+	// "pollination" is near proof; matching on "nature" is barely a hint, and
+	// treating them the same is why searching "thistle" returned a tree house.
+	//
+	// The strongest available related match counts, not the sum, so a video
+	// sharing three vague subjects cannot outscore one sharing a precise one.
 	if len(related) > 0 && best == 0 {
+		g := getTopicGraph()
+		bestRelated := 0.0
 		for _, r := range related {
 			for _, t := range doc.Topics {
 				if t == r {
-					score += matchRelatedTopic
-					goto doneRelated
+					if w := matchRelatedTopic * g.topicSpecificity(r); w > bestRelated {
+						bestRelated = w
+					}
 				}
 			}
 		}
+		score += bestRelated
 	}
-doneRelated:
 
 	return score
 }
