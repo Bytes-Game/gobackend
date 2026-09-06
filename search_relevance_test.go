@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 // ════════════════════════════════════════════════════════════════════════════
 // WHERE THE WORD WAS FOUND IS THE WHOLE ANSWER
@@ -193,5 +197,56 @@ func TestDedupe_RanksAreRenumbered(t *testing.T) {
 			t.Errorf("result %d has rank %d; a gap here quietly demotes "+
 				"everything after a removed duplicate", i, h.Rank)
 		}
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// A SEARCH THAT FINDS NOTHING STILL SHOWS SOMETHING
+// ════════════════════════════════════════════════════════════════════════════
+
+func TestRescue_NeverAnEmptyPage(t *testing.T) {
+	// The rescue's own comment promises "never render an empty search page",
+	// and the promise was quietly broken. Trending is built from what people
+	// watched recently, held in Redis. On a platform with no traffic that list
+	// is empty — measured live: 96 videos, zero views, zero active users — so
+	// a query matching nothing showed a blank screen.
+	//
+	// The newest uploads are a real answer to "we could not find that".
+	src, err := os.ReadFile("search.go")
+	if err != nil {
+		t.Fatalf("read search.go: %v", err)
+	}
+	s := string(src)
+	if !strings.Contains(s, "if newest := GetSearchableChallenges(); len(newest) > 0 {") {
+		t.Error("a search that matches nothing and finds no trending content " +
+			"shows a blank page. Trending is empty whenever nobody has " +
+			"watched anything, which is the normal state before launch.")
+	}
+	if !strings.Contains(s, "searchNewestRescueCap") {
+		t.Error("the last-resort fallback is unbounded, so a failed search " +
+			"turns into the entire catalogue")
+	}
+}
+
+func TestRescue_DoesNotCallNewVideosPopular(t *testing.T) {
+	// "Trending" and "recent" are different claims. With no traffic every
+	// rescue is really "here is what is new", and labelling those popular
+	// invents an engagement signal that does not exist — the app renders this
+	// label directly to the user.
+	src, err := os.ReadFile("search.go")
+	if err != nil {
+		t.Fatalf("read search.go: %v", err)
+	}
+	s := string(src)
+	if !strings.Contains(s, "func zeroResultRescueKind() string") {
+		t.Fatal("the rescue kind is not computed, so recent uploads are " +
+			"announced as trending")
+	}
+	if strings.Contains(s, `resp.RelatedKind = "trending"`) {
+		t.Error("the trending label is still hardcoded; it has to depend on " +
+			"whether a trending list actually exists")
+	}
+	if !strings.Contains(s, `return "recent"`) {
+		t.Error("there is no honest label for the no-traffic case")
 	}
 }
