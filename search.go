@@ -187,11 +187,19 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 	// Zero-result rescue: never render an empty search page. Fall back
 	// to realtime-trending content (category-filtered when the query
 	// smells like a topic), flagged so the client can label it honestly.
-	if len(resp.Accounts) == 0 && len(resp.Battles) == 0 && len(resp.Shorts) == 0 {
-		// Before falling back to whatever is trending, try the subjects that
-		// go with what they asked for. Somebody searching a word this
-		// catalogue has never seen gets trending — fair enough. Somebody
-		// searching "aquarium" should get the jellyfish video, not a shrug.
+	// Two rescues with DIFFERENT conditions, and the difference matters.
+	//
+	// Near subjects fire whenever no VIDEO matched, whatever the accounts lane
+	// did. Somebody searching "jellyfish" is asking about jellyfish, and this
+	// app knows exactly which video that is — showing them nothing because an
+	// account happened to turn up is the app refusing to answer a question it
+	// can answer. Measured against the live search: "jellyfish" returned ten
+	// accounts, none of which contain the word, and zero videos.
+	//
+	// Trending stays gated on finding NOTHING at all, accounts included. It is
+	// the weakest possible answer — "here is what is popular" — and padding a
+	// perfectly good username search with unrelated videos would be noise.
+	if len(resp.Battles) == 0 && len(resp.Shorts) == 0 {
 		if near := searchNearbySubjects(query); len(near) > 0 {
 			resp.Related = true
 			resp.RelatedKind = "subjects"
@@ -204,7 +212,7 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			resp.Challenges = append(append([]Challenge{}, resp.Battles...), resp.Shorts...)
 		}
-		if len(resp.Challenges) == 0 {
+		if len(resp.Accounts) == 0 && len(resp.Challenges) == 0 {
 			if rescued := searchZeroResultRescue(resp.Intent); len(rescued) > 0 {
 				resp.Related = true
 				resp.RelatedKind = "trending"
