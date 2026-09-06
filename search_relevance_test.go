@@ -235,6 +235,9 @@ func TestDiversity_TheBestMatchAlwaysLeads(t *testing.T) {
 		"2": doc([]string{"cricket"}, nil, ""),
 	}
 	got := diversifySearchResults(fakeHits("1", "2"), index, 10)
+	if len(got) == 0 {
+		t.Fatal("no results at all, so this proves nothing about ordering")
+	}
 	if got[0].Ch.ID != "1" {
 		t.Errorf("the best match is %q, not the top result", got[0].Ch.ID)
 	}
