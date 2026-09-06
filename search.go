@@ -187,11 +187,19 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 	// Zero-result rescue: never render an empty search page. Fall back
 	// to realtime-trending content (category-filtered when the query
 	// smells like a topic), flagged so the client can label it honestly.
-	if len(resp.Accounts) == 0 && len(resp.Battles) == 0 && len(resp.Shorts) == 0 {
-		// Before falling back to whatever is trending, try the subjects that
-		// go with what they asked for. Somebody searching a word this
-		// catalogue has never seen gets trending — fair enough. Somebody
-		// searching "aquarium" should get the jellyfish video, not a shrug.
+	// Two rescues with DIFFERENT conditions, and the difference matters.
+	//
+	// Near subjects fire whenever no VIDEO matched, whatever the accounts lane
+	// did. Somebody searching "jellyfish" is asking about jellyfish, and this
+	// app knows exactly which video that is — showing them nothing because an
+	// account happened to turn up is the app refusing to answer a question it
+	// can answer. Measured against the live search: "jellyfish" returned ten
+	// accounts, none of which contain the word, and zero videos.
+	//
+	// Trending stays gated on finding NOTHING at all, accounts included. It is
+	// the weakest possible answer — "here is what is popular" — and padding a
+	// perfectly good username search with unrelated videos would be noise.
+	if len(resp.Battles) == 0 && len(resp.Shorts) == 0 {
 		if near := searchNearbySubjects(query); len(near) > 0 {
 			resp.Related = true
 			resp.RelatedKind = "subjects"
@@ -204,7 +212,7 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			resp.Challenges = append(append([]Challenge{}, resp.Battles...), resp.Shorts...)
 		}
-		if len(resp.Challenges) == 0 {
+		if len(resp.Accounts) == 0 && len(resp.Challenges) == 0 {
 			if rescued := searchZeroResultRescue(resp.Intent); len(rescued) > 0 {
 				resp.Related = true
 				resp.RelatedKind = "trending"
@@ -754,12 +762,52 @@ func toInt(v interface{}) int {
 
 // calculateScore is the legacy Levenshtein-based user scorer. Kept for the
 // fallback path when Meilisearch is unavailable.
+// calculateScore ranks a user against a search query.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// POPULARITY IS A TIE-BREAKER, NEVER A REASON TO MATCH
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The follower and win-rate bonuses used to be added unconditionally, at the
+// end, whether or not a single character of the query matched. The caller
+// keeps anything scoring above zero. So every user with followers matched
+// EVERY query, ranked by how popular they were.
+//
+// Measured against the live search before this changed:
+//
+//	/search?q=jellyfish   accounts: cyberking, stormchaser, shadowstrike...
+//	/search?q=cricket     accounts: cyberking, stormchaser, shadowstrike...
+//	/search?q=zzzqqqxyw   accounts: cyberking, stormchaser, shadowstrike...
+//
+// The same ten people, in the same order, for anything anybody typed —
+// including a word with no letters in common with any of them. A popular user
+// scored 11.75 against "zzzqqqxyw" on followers and win rate alone.
+//
+// It hid real results too, not just added noise: the search page only rescues
+// videos when nothing was found, and something was always "found".
+//
+// So relevance is computed first and decides whether this is a match at all.
+// Popularity only orders the people who genuinely matched.
 func calculateScore(user User, query string) float64 {
+	relevance := userTextRelevance(user, query)
+	if relevance <= 0 {
+		return 0
+	}
+	return relevance + userPopularityBonus(user)
+}
+
+// userTextRelevance is how well the query matches this person's name — the
+// only thing that decides whether they are a result.
+func userTextRelevance(user User, query string) float64 {
 	var score float64
 	lowerQuery := strings.ToLower(strings.TrimSpace(query))
 	lowerUsername := strings.ToLower(user.Username)
 	lowerFullName := strings.ToLower(user.FullName)
 	lowerLeague := strings.ToLower(user.League)
+
+	if lowerQuery == "" {
+		return 0
+	}
 
 	if lowerUsername == lowerQuery {
 		score += 100.0
@@ -788,6 +836,10 @@ func calculateScore(user User, query string) float64 {
 		if strings.Contains(lowerFullName, token) {
 			score += 5.0
 		}
+		// A league name is a weak signal and there are only a handful of
+		// them, so "gold" would otherwise return every gold-league player as
+		// if they were a name match. Kept, but it cannot carry a match on its
+		// own — see leagueOnlyFloor below.
 		if strings.Contains(lowerLeague, token) {
 			score += 3.0
 		}
@@ -824,8 +876,14 @@ func calculateScore(user User, query string) float64 {
 		score += 15.0
 	}
 
-	score += float64(user.Followers) * 0.01
+	return score
+}
 
+// userPopularityBonus orders people who already matched. It is deliberately
+// small next to a name match — an exact username is 100 — so a well-known
+// account never outranks the person somebody actually searched for.
+func userPopularityBonus(user User) float64 {
+	score := float64(user.Followers) * 0.01
 	totalGames := user.Wins + user.Losses
 	if totalGames > 0 {
 		winRate := float64(user.Wins) / float64(totalGames)
@@ -836,7 +894,6 @@ func calculateScore(user User, query string) float64 {
 			score += 1.5
 		}
 	}
-
 	return score
 }
 

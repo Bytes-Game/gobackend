@@ -259,3 +259,52 @@ func TestSearch_SuggestionsOnlyNameThingsTheAppHas(t *testing.T) {
 			"could name a subject nothing is about")
 	}
 }
+
+func TestSearch_AnAccountHitDoesNotHideTheVideos(t *testing.T) {
+	// Found by running the live search rather than by reading the code.
+	//
+	//   /search?q=jellyfish
+	//   accounts: 10  (cyberking, stormchaser, shadowstrike, frostbyte, ...)
+	//   videos:    0
+	//
+	// None of those usernames contains "jellyfish". The accounts lane returns
+	// ten users for any query, including pure nonsense — a separate problem in
+	// code this change does not touch. But its effect here was total: the
+	// rescue was gated on accounts being empty too, so it never ran, and a
+	// person asking about jellyfish got ten strangers and none of the four
+	// jellyfish videos this app is holding.
+	//
+	// Somebody searching a word is asking about that word. Whether an account
+	// also turned up says nothing about whether we should answer.
+	src, err := os.ReadFile("search.go")
+	if err != nil {
+		t.Fatalf("read search.go: %v", err)
+	}
+	s := string(src)
+	if strings.Contains(s, "if len(resp.Accounts) == 0 && len(resp.Battles) == 0 && len(resp.Shorts) == 0 {") {
+		t.Error("the video rescue is gated on the accounts lane being empty. " +
+			"One irrelevant account hit and the app refuses to answer a " +
+			"question it can answer.")
+	}
+	if !strings.Contains(s, "if len(resp.Battles) == 0 && len(resp.Shorts) == 0 {") {
+		t.Error("the video rescue is no longer gated on there being no videos")
+	}
+}
+
+func TestSearch_TrendingStaysTheLastResort(t *testing.T) {
+	// The other half of the same decision. Near subjects are a real answer and
+	// should fire freely; trending is "here is what is popular", and padding a
+	// perfectly good username search with unrelated videos is just noise.
+	//
+	// So trending keeps the stricter gate: nothing matched at all.
+	src, err := os.ReadFile("search.go")
+	if err != nil {
+		t.Fatalf("read search.go: %v", err)
+	}
+	if !strings.Contains(string(src),
+		"if len(resp.Accounts) == 0 && len(resp.Challenges) == 0 {") {
+		t.Error("the trending fallback no longer requires that nothing at all " +
+			"matched, so a successful account search now gets unrelated " +
+			"videos stapled underneath it")
+	}
+}
