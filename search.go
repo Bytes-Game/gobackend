@@ -490,6 +490,67 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 		Ch    Challenge
 		Score float64
 	}
+	// ════════════════════════════════════════════════════════════════════
+	// WHY RELEVANCE IS MEASURED HERE, AND WHY IT MULTIPLIES
+	// ════════════════════════════════════════════════════════════════════
+	//
+	// Searching "pollination" used to return the same videos as searching
+	// "thistle", "bee", or anything else that did not match a title: a tree
+	// house, a caption contest, a prop challenge. Always the same three at
+	// the top. It read like the ranking was broken. It was worse than that
+	// — the ranking was working exactly as written.
+	//
+	// The old score was a sum:
+	//
+	//	score := lex + 0.20*eng + 0.20*recency + personal + ...
+	//
+	// with `lex` being exp(-position/8) — the POSITION a result came back
+	// in, not how relevant it actually was. That threw the magnitude away.
+	// A video matching the search term exactly and a video sharing one
+	// vague word came back at positions 0 and 1, so they scored 1.00 and
+	// 0.88 — near enough identical, even though one was about the thing
+	// and the other was not.
+	//
+	// A gap that small is bought back by 0.20 of engagement without
+	// noticing. Our seeded videos carry a few thousand views each, so they
+	// won every query on popularity, whatever anyone typed.
+	//
+	// So relevance is now measured here, from the actual match, and
+	// everything else MULTIPLIES it:
+	//
+	//	score := relevance * (1 + boosts)
+	//
+	// The difference is the whole point. Being popular can reorder results
+	// that are already about what you asked for. It cannot make a video
+	// about something else into an answer, because anything multiplied by
+	// no relevance is still nothing.
+	//
+	// Measuring it here also means both ways of finding candidates — the
+	// search engine when it is configured, the database scan when it is
+	// not — get ranked by the same rule, instead of each carrying its own
+	// idea of what "relevant" means.
+	index := searchTextIndex()
+	related := relatedSearches(query, topicGraphMaxRelated)
+	rels := make([]float64, len(hits))
+	maxRel := 0.0
+	for i, hit := range hits {
+		rels[i] = searchRelevance(hit.Ch, index[hit.Ch.ID], query, related)
+		if rels[i] > maxRel {
+			maxRel = rels[i]
+		}
+	}
+	if maxRel <= 0 {
+		// Nothing here is about the query in any way this code can see.
+		// Hand back what retrieval found, in the order it found it, rather
+		// than dropping results on the strength of one scoring function
+		// failing to have an opinion.
+		out := make([]Challenge, 0, len(hits))
+		for _, h := range hits {
+			out = append(out, h.Ch)
+		}
+		return out
+	}
+
 	out := make([]scored, 0, len(hits))
 	now := time.Now()
 
@@ -509,8 +570,13 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 	for i, hit := range hits {
 		ch := hit.Ch
 
-		// Lexical (rank-position decay).
-		lex := math.Exp(-float64(i) / 8.0)
+		// How much this result is actually about the query, on a 0..1 scale
+		// against the best match in this set. A result with none of the
+		// query in it scores 0 and stays at 0 however popular it is.
+		rel := rels[i] / maxRel
+		if rel <= 0 {
+			continue
+		}
 
 		// Engagement — log-normalized views + likes. Likes weighted 5x because
 		// they're an explicit positive signal vs. passive views.
@@ -542,8 +608,11 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 			// come from a query that does not load content_topics, so for now
 			// the fingerprint is the category plus whatever tags the row
 			// carries. As topics reach search, this widens on its own.
+			// The index carries what the video is ABOUT, so taste can be
+			// matched on the video's own words here now, not only on its
+			// category and tags.
 			if w, matched := topicRelevance(profile.TopicAffinity,
-				contentFingerprint(nil, ch.Tags, cat)); matched > 0 && w > 0 {
+				contentFingerprint(index[ch.ID].Topics, ch.Tags, cat)); matched > 0 && w > 0 {
 				personalBoost += w * topicConfidence(matched) * 0.15
 			} else if cat != "" {
 				// Category-affinity match — the coarse answer, for viewers and
@@ -586,14 +655,35 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 			intentBoost = 0.15
 		}
 
-		score := lex + 0.20*eng + 0.20*recency + personalBoost + qualityNudge + ctr + intentBoost
-		out = append(out, scored{Ch: ch, Score: score})
+		// Everything that is not relevance is a boost, and boosts are
+		// capped together. The ceiling is what stops popularity quietly
+		// becoming the ranking again: a result can be lifted by half, so
+		// two comparably relevant videos are separated by how well they
+		// have done, and a video half as relevant as another cannot buy
+		// its way past it however many views it has.
+		boost := 0.20*eng + 0.20*recency + personalBoost + qualityNudge + ctr + intentBoost
+		if boost > searchBoostCeiling {
+			boost = searchBoostCeiling
+		}
+		if boost < 0 {
+			boost = 0
+		}
+		out = append(out, scored{Ch: ch, Score: rel * (1 + boost)})
 	}
 
-	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
-	chs := make([]Challenge, len(out))
-	for i, s := range out {
-		chs[i] = s.Ch
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+
+	// Spread out near-identical results and repeated creators, once, on the
+	// final order. Doing it before this point would have been undone by the
+	// re-ranking above.
+	final := make([]scoredHit, 0, len(out))
+	for _, s := range out {
+		final = append(final, scoredHit{hit: challengeHit{Ch: s.Ch}, score: s.Score})
+	}
+	spread := diversifySearchResults(final, index, len(final))
+	chs := make([]Challenge, len(spread))
+	for i, h := range spread {
+		chs[i] = h.Ch
 	}
 	return chs
 }
