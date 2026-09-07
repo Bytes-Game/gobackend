@@ -565,6 +565,11 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 		return out
 	}
 
+	// What people actually did with these videos — shares, comments,
+	// rewatches, how much of them got watched. One query for the whole result
+	// set rather than one per video.
+	aggs := searchEngagementAggregates(hits)
+
 	out := make([]scored, 0, len(hits))
 	now := time.Now()
 
@@ -593,9 +598,11 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 		}
 		rel := rels[i] / maxRel
 
-		// Engagement — log-normalized views + likes. Likes weighted 5x because
-		// they're an explicit positive signal vs. passive views.
-		eng := logSafe(float64(ch.Views)+5*float64(ch.Likes)+1) / 8.0 // 0..~1
+		// Engagement — everything people did, priced by engagementWeight, the
+		// same table the feed and the taste profiles use. See
+		// search_engagement.go for why search no longer has its own opinion
+		// about what a like is worth.
+		eng := searchEngagementScore(aggs[ch.ID], ch.Views, ch.Likes)
 
 		// Recency — 14-day half-life. Search expects fresher results than For
 		// You does (you typically search for a current trend, not an

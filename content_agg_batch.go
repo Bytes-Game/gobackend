@@ -29,11 +29,11 @@ import (
 // contentEventAggregates carries exactly the fields the two per-item
 // queries in computeContentScore produce.
 type contentEventAggregates struct {
-	ViewCount, LikeCount, CommentCount        int
-	SkipCount, RewatchCount, ShareCount       int
-	NotInterestedCount                        int
-	AvgCompletion, AvgWatchMs                 float64
-	RecentEng, RecentViews                    int
+	ViewCount, LikeCount, CommentCount  int
+	SkipCount, RewatchCount, ShareCount int
+	NotInterestedCount                  int
+	AvgCompletion, AvgWatchMs           float64
+	RecentEng, RecentViews              int
 }
 
 var contentAggCache = NewSignalCache[*contentEventAggregates](contentScoreCacheTTL)
@@ -83,41 +83,13 @@ func warmContentAggregates(items []HomeFeedItem) {
 		}
 
 		// Batch #1: the 90-day engagement aggregates.
-		rows, err := db.Query(`
-			SELECT content_id,
-				COUNT(*) FILTER (WHERE event_type = 'view'),
-				COUNT(*) FILTER (WHERE event_type = 'like'),
-				COUNT(*) FILTER (WHERE event_type = 'comment'),
-				COUNT(*) FILTER (WHERE event_type = 'skip'),
-				COUNT(*) FILTER (WHERE event_type = 'rewatch'),
-				COUNT(*) FILTER (WHERE event_type = 'share'),
-				COUNT(*) FILTER (WHERE event_type = 'not_interested'),
-				COALESCE(AVG(completion_rate) FILTER (WHERE event_type = 'view'), 0),
-				COALESCE(AVG(watch_duration_ms) FILTER (WHERE event_type = 'view'), 0)
-			FROM feed_events
-			WHERE content_id = ANY($1) AND content_type = $2
-			  AND created_at > NOW() - INTERVAL '90 days'
-			GROUP BY content_id`, pq.Array(ids), typ)
-		if err != nil {
+		if err := loadEngagementAggregates(typ, ids, aggs); err != nil {
 			log.Printf("warmContentAggregates 90d batch error: %v", err)
 			return // fall back to per-item queries for everything
 		}
-		for rows.Next() {
-			var id string
-			a := &contentEventAggregates{}
-			if err := rows.Scan(&id, &a.ViewCount, &a.LikeCount, &a.CommentCount,
-				&a.SkipCount, &a.RewatchCount, &a.ShareCount, &a.NotInterestedCount,
-				&a.AvgCompletion, &a.AvgWatchMs); err != nil {
-				continue
-			}
-			if prev, ok := aggs[id]; ok {
-				*prev = *a
-			}
-		}
-		rows.Close()
 
 		// Batch #2: the 2-hour trending window.
-		rows, err = db.Query(`
+		rows, err := db.Query(`
 			SELECT content_id,
 				COUNT(*) FILTER (WHERE event_type IN ('like','comment','share','save')),
 				COUNT(*) FILTER (WHERE event_type = 'view')
@@ -145,4 +117,58 @@ func warmContentAggregates(items []HomeFeedItem) {
 			contentAggCache.Set(contentAggKey(typ, id), a)
 		}
 	}
+}
+
+// loadEngagementAggregates fills in what people actually did with a set of
+// videos over the last ninety days.
+//
+// Pulled out so the feed and search read the same counts from the same query.
+// They used to be one place; the moment search needed shares and comments too,
+// a second copy of this SELECT would have been the obvious thing to write —
+// and the first time anybody added an event type, only one of them would have
+// learned about it.
+//
+// Note what is NOT here: saves. feed_events records them and engagementWeight
+// prices them, but this aggregate has never counted them, so nothing that
+// reads it can see a save. Left as-is rather than quietly added, because
+// changing what the feed counts is a scoring change and belongs in its own
+// decision.
+func loadEngagementAggregates(typ string, ids []string, into map[string]*contentEventAggregates) error {
+	if db == nil || len(ids) == 0 {
+		return nil
+	}
+	rows, err := db.Query(`
+		SELECT content_id,
+			COUNT(*) FILTER (WHERE event_type = 'view'),
+			COUNT(*) FILTER (WHERE event_type = 'like'),
+			COUNT(*) FILTER (WHERE event_type = 'comment'),
+			COUNT(*) FILTER (WHERE event_type = 'skip'),
+			COUNT(*) FILTER (WHERE event_type = 'rewatch'),
+			COUNT(*) FILTER (WHERE event_type = 'share'),
+			COUNT(*) FILTER (WHERE event_type = 'not_interested'),
+			COALESCE(AVG(completion_rate) FILTER (WHERE event_type = 'view'), 0),
+			COALESCE(AVG(watch_duration_ms) FILTER (WHERE event_type = 'view'), 0)
+		FROM feed_events
+		WHERE content_id = ANY($1) AND content_type = $2
+		  AND created_at > NOW() - INTERVAL '90 days'
+		GROUP BY content_id`, pq.Array(ids), typ)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		a := &contentEventAggregates{}
+		if err := rows.Scan(&id, &a.ViewCount, &a.LikeCount, &a.CommentCount,
+			&a.SkipCount, &a.RewatchCount, &a.ShareCount, &a.NotInterestedCount,
+			&a.AvgCompletion, &a.AvgWatchMs); err != nil {
+			continue
+		}
+		if prev, ok := into[id]; ok {
+			*prev = *a
+		} else {
+			into[id] = a
+		}
+	}
+	return rows.Err()
 }
