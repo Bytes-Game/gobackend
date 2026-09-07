@@ -488,10 +488,11 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 
 	type scored struct {
 		Ch    Challenge
+		Tier  int
 		Score float64
 	}
 	// ════════════════════════════════════════════════════════════════════
-	// WHY RELEVANCE IS MEASURED HERE, AND WHY IT MULTIPLIES
+	// WHY RELEVANCE IS MEASURED HERE, AND HOW POPULARITY GETS ITS ROOM
 	// ════════════════════════════════════════════════════════════════════
 	//
 	// Searching "pollination" used to return the same videos as searching
@@ -515,15 +516,27 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 	// noticing. Our seeded videos carry a few thousand views each, so they
 	// won every query on popularity, whatever anyone typed.
 	//
-	// So relevance is now measured here, from the actual match, and
-	// everything else MULTIPLIES it:
+	// The first attempt at a fix multiplied relevance by a CAPPED boost.
+	// That fixed the ordering and broke something else: it also held
+	// popular videos down, and people genuinely want to be shown what
+	// everyone is watching. Capping is picking one exchange rate between
+	// "is about this" and "is loved", and every rate is wrong somewhere.
 	//
-	//	score := relevance * (1 + boosts)
+	// So relevance is measured here, from the actual match, and used to put
+	// each result in one of three plain classes:
 	//
-	// The difference is the whole point. Being popular can reorder results
-	// that are already about what you asked for. It cannot make a video
-	// about something else into an answer, because anything multiplied by
-	// no relevance is still nothing.
+	//	about it  →  partly it  →  merely related to it
+	//
+	// Popularity, freshness and personal fit then sort results INSIDE a
+	// class, with no cap at all. They can never move a result between
+	// classes.
+	//
+	// That gives both things at once. Among videos genuinely about bees,
+	// the one people actually watch comes first — which is most of why
+	// anybody enjoys a short-video app. And a video that merely shares the
+	// word "nature" cannot reach the top of a search for bees however many
+	// views it has, because it is in a lower class and nothing it can do
+	// will promote it.
 	//
 	// Measuring it here also means both ways of finding candidates — the
 	// search engine when it is configured, the database scan when it is
@@ -532,9 +545,10 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 	index := searchTextIndex()
 	related := relatedSearches(query, topicGraphMaxRelated)
 	rels := make([]float64, len(hits))
+	tiers := make([]int, len(hits))
 	maxRel := 0.0
 	for i, hit := range hits {
-		rels[i] = searchRelevance(hit.Ch, index[hit.Ch.ID], query, related)
+		rels[i], tiers[i] = searchRelevanceDetail(hit.Ch, index[hit.Ch.ID], query, related)
 		if rels[i] > maxRel {
 			maxRel = rels[i]
 		}
@@ -570,13 +584,14 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 	for i, hit := range hits {
 		ch := hit.Ch
 
-		// How much this result is actually about the query, on a 0..1 scale
-		// against the best match in this set. A result with none of the
-		// query in it scores 0 and stays at 0 however popular it is.
-		rel := rels[i] / maxRel
-		if rel <= 0 {
+		// Which class this result is in, and how strong a match it was.
+		// A result with none of the query in it is not a result at all,
+		// however popular.
+		tier := tiers[i]
+		if tier >= matchTierNone || rels[i] <= 0 {
 			continue
 		}
+		rel := rels[i] / maxRel
 
 		// Engagement — log-normalized views + likes. Likes weighted 5x because
 		// they're an explicit positive signal vs. passive views.
@@ -655,23 +670,33 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 			intentBoost = 0.15
 		}
 
-		// Everything that is not relevance is a boost, and boosts are
-		// capped together. The ceiling is what stops popularity quietly
-		// becoming the ranking again: a result can be lifted by half, so
-		// two comparably relevant videos are separated by how well they
-		// have done, and a video half as relevant as another cannot buy
-		// its way past it however many views it has.
-		boost := 0.20*eng + 0.20*recency + personalBoost + qualityNudge + ctr + intentBoost
-		if boost > searchBoostCeiling {
-			boost = searchBoostCeiling
+		// Uncapped on purpose. Inside a class this is exactly what should
+		// decide the order — people want to be shown what is being watched.
+		// Letting it run is safe because it cannot cross a class boundary.
+		//
+		// Relevance is added at a fraction of its weight, purely as a
+		// tiebreak, so two equally popular videos are separated by which
+		// one matches better.
+		popularity := 0.20*eng + 0.20*recency + personalBoost + qualityNudge + ctr + intentBoost
+		if popularity < 0 {
+			popularity = 0
 		}
-		if boost < 0 {
-			boost = 0
-		}
-		out = append(out, scored{Ch: ch, Score: rel * (1 + boost)})
+		out = append(out, scored{
+			Ch:    ch,
+			Tier:  tier,
+			Score: popularity + rel*searchRelevanceTiebreak,
+		})
 	}
 
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	// Class first, and only then how well it is doing. This one ordering is
+	// what stops "show me popular things" and "show me the right things"
+	// from having to be traded off against each other.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Tier != out[j].Tier {
+			return out[i].Tier < out[j].Tier
+		}
+		return out[i].Score > out[j].Score
+	})
 
 	// Spread out near-identical results and repeated creators, once, on the
 	// final order. Doing it before this point would have been undone by the

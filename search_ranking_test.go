@@ -1,146 +1,225 @@
 package main
 
 import (
-	"math"
+	"sort"
 	"strings"
 	"testing"
 )
 
 // ════════════════════════════════════════════════════════════════════════════
-// The bug this file exists for
+// What this ranking has to do, which is two things at once
 // ════════════════════════════════════════════════════════════════════════════
 //
-// Searching "pollination" on the live server returned a tree house, a caption
-// contest and a prop challenge — the same three videos as searching "thistle",
-// or "bee", or anything else that did not match a title.
+//  1. Show people what everyone is watching. Popular videos being easy to
+//     find is most of why anybody enjoys a short-video app, and holding them
+//     back to protect a relevance score makes a worse product.
 //
-// It looked like relevance was broken. It was not. Relevance was one term in a
-// sum, and it had already been flattened into a position before it got there,
-// so a couple of thousand seeded views beat it every time.
+//  2. Never let being popular turn a video about something else into an
+//     answer. Searching "bee" must not lead with a tree house because the
+//     tree house has more views.
+//
+// A single blended score cannot do both — it has to pick one exchange rate
+// between "is about this" and "is loved", and every rate is wrong somewhere.
+// Classes do both: popularity runs free inside a class and cannot cross one.
 
-// searchScore mirrors the shape of the final ranking: relevance decides, and
-// everything else is a capped multiplier on it.
-func searchScore(rel, boost float64) float64 {
-	if boost > searchBoostCeiling {
-		boost = searchBoostCeiling
-	}
-	if boost < 0 {
-		boost = 0
-	}
-	return rel * (1 + boost)
+type ranked struct {
+	id         string
+	tier       int
+	popularity float64
+	rel        float64
 }
 
-// The headline: being popular must not turn a video about something else into
-// an answer.
-func TestSearchRank_PopularityCannotBeatBeingAboutIt(t *testing.T) {
-	// The video that is actually about the query, with no engagement at all.
-	onTopic := searchScore(1.0, 0)
-	// A seeded favourite with thousands of views, fresh, and personally apt —
-	// but only faintly related to what was typed.
-	popular := searchScore(0.25, 10.0) // boost far past the ceiling
-
-	if popular >= onTopic {
-		t.Fatalf("a barely-related video with every boost going scored %.3f "+
-			"and the video actually about the query scored %.3f. This is the "+
-			"live bug: searching \"pollination\" returned a tree house.",
-			popular, onTopic)
-	}
-}
-
-// A video with nothing of the query in it scores nothing, whatever else is
-// true about it. This is what multiplying buys that adding never could.
-func TestSearchRank_NoRelevanceIsNoResult(t *testing.T) {
-	if got := searchScore(0, 10.0); got != 0 {
-		t.Errorf("a video with no relevance scored %.3f. Under the old sum, "+
-			"engagement and recency alone were worth ~0.4, which is how "+
-			"unrelated videos reached the top of every search.", got)
-	}
-}
-
-// Boosts still have a job: separating results that are about equally relevant.
-func TestSearchRank_PopularityStillBreaksTiesAmongRelevantResults(t *testing.T) {
-	plain := searchScore(1.0, 0)
-	loved := searchScore(1.0, 0.4)
-	if loved <= plain {
-		t.Error("between two equally relevant results, the more popular and " +
-			"fresher one should win — that is what these signals are for")
-	}
-}
-
-// The ceiling is the line between "reorders relevant results" and "is the
-// ranking".
-func TestSearchRank_TheCeilingHoldsTheLine(t *testing.T) {
-	// Half as relevant, with everything going for it, must still lose.
-	if searchScore(0.5, 100) >= searchScore(1.0, 0) {
-		t.Error("a video half as relevant as another climbed past it on " +
-			"boosts alone. The ceiling is not holding.")
-	}
-	// A near-tie on relevance should be winnable.
-	if searchScore(0.9, 0.5) <= searchScore(1.0, 0) {
-		t.Error("a result almost as relevant, and much more popular, could " +
-			"not overtake — boosts have stopped mattering at all")
-	}
-	if searchBoostCeiling <= 0 || searchBoostCeiling >= 1 {
-		t.Fatalf("the ceiling is %v; outside 0..1 it is either switched off "+
-			"or lets popularity double a score", searchBoostCeiling)
-	}
-}
-
-// Relevance is normalised against the best match in the set, so the ordering
-// depends on how results compare to each other rather than on the raw weights
-// happening to land in any particular range.
-func TestSearchRank_NormalisingKeepsTheOrder(t *testing.T) {
-	raw := []float64{120, 55, 12, 3}
-	maxRel := raw[0]
-	var prev float64 = math.Inf(1)
-	for i, r := range raw {
-		got := searchScore(r/maxRel, 0)
-		if got > prev {
-			t.Errorf("normalising reordered results at %d: %.3f after %.3f",
-				i, got, prev)
+// order mirrors the real sort: class first, then how well it is doing.
+func order(in []ranked) []string {
+	out := append([]ranked(nil), in...)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].tier != out[j].tier {
+			return out[i].tier < out[j].tier
 		}
-		prev = got
+		return out[i].popularity+out[i].rel*searchRelevanceTiebreak >
+			out[j].popularity+out[j].rel*searchRelevanceTiebreak
+	})
+	ids := make([]string, len(out))
+	for i, r := range out {
+		ids[i] = r.id
+	}
+	return ids
+}
+
+// ── What the user asked for ─────────────────────────────────────────────────
+
+func TestSearchRank_PopularityDecidesAmongEquallyGoodMatches(t *testing.T) {
+	got := order([]ranked{
+		{id: "obscure", tier: matchTierAbout, popularity: 0.05, rel: 1.0},
+		{id: "loved", tier: matchTierAbout, popularity: 0.90, rel: 0.9},
+	})
+	if got[0] != "loved" {
+		t.Errorf("got %v; among videos that are all about the thing, the one "+
+			"people actually watch should lead — that is most of the point of "+
+			"a short-video app", got)
 	}
 }
 
-// A guard on the shape of the thing, so the sum cannot quietly come back.
-func TestSearchRank_RelevanceIsNotJustAnotherTerm(t *testing.T) {
-	// Under the old sum, a zero-relevance video still scored ~0.4 from
-	// engagement and recency alone. Under the current shape it scores 0.
-	oldStyle := 0.0 + 0.20*1.0 + 0.20*1.0 // lex=0, full eng, full recency
-	if got := searchScore(0, 0.4); got >= oldStyle {
-		t.Errorf("an irrelevant video scores %.3f, which is no better than "+
-			"the %.3f it got under the sum this replaced", got, oldStyle)
+// There is no ceiling inside a class. A hugely popular video should be able to
+// climb past a slightly better match by any margin.
+func TestSearchRank_PopularityIsNotHeldBackInsideAClass(t *testing.T) {
+	got := order([]ranked{
+		{id: "best-match", tier: matchTierAbout, popularity: 0.0, rel: 1.0},
+		{id: "runaway-hit", tier: matchTierAbout, popularity: 5.0, rel: 0.2},
+	})
+	if got[0] != "runaway-hit" {
+		t.Errorf("got %v; inside one class popularity is deliberately "+
+			"uncapped, so a runaway hit should be able to lead", got)
 	}
 }
 
-// The real code, not a mirror of it. The mirror above can drift; this cannot.
-func TestSearchRank_TheRealCodeStillMultiplies(t *testing.T) {
-	// Only the code. This file explains the old formula in a comment, and a
-	// guard that matched its own explanation would fire forever.
+// ── The line it must never cross ────────────────────────────────────────────
+
+func TestSearchRank_APopularNearMissNeverBeatsARealMatch(t *testing.T) {
+	got := order([]ranked{
+		// A tree house. Shares only the word "nature" with a search for bees.
+		{id: "treehouse", tier: matchTierRelated, popularity: 100.0, rel: 0.2},
+		// The actual bee video, with nothing going for it but being right.
+		{id: "bees", tier: matchTierAbout, popularity: 0.0, rel: 1.0},
+	})
+	if got[0] != "bees" {
+		t.Fatalf("got %v; a merely-related video reached the top on views "+
+			"alone. This is the whole thing the classes exist to prevent.", got)
+	}
+}
+
+func TestSearchRank_ClassesHoldAtEveryLevel(t *testing.T) {
+	got := order([]ranked{
+		{id: "related-huge", tier: matchTierRelated, popularity: 999},
+		{id: "partial-big", tier: matchTierPartial, popularity: 50},
+		{id: "about-tiny", tier: matchTierAbout, popularity: 0.01},
+	})
+	want := []string{"about-tiny", "partial-big", "related-huge"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v — classes must hold however lopsided "+
+				"the popularity is", got, want)
+		}
+	}
+}
+
+// The case from the live server that started this.
+func TestSearchRank_TheLiveCaseComesOutRight(t *testing.T) {
+	// Searching "pollination".
+	got := order([]ranked{
+		// tree house, forest, moss, nature — shares only "nature"
+		{id: "120-treehouse", tier: matchTierRelated, popularity: 0.80},
+		// plant, flower, petals, nature — shares "flower", a real topic match
+		{id: "119-flowers", tier: matchTierPartial, popularity: 0.10},
+		// bee, flower, pollination, thistle — the actual answer
+		{id: "117-bees", tier: matchTierAbout, popularity: 0.50},
+	})
+	want := []string{"117-bees", "119-flowers", "120-treehouse"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v. The bee video answers the question, "+
+				"the flower video is closer than the tree house, and the tree "+
+				"house should not outrank either on views.", got, want)
+		}
+	}
+}
+
+// ── Tiebreak ────────────────────────────────────────────────────────────────
+
+func TestSearchRank_ABetterMatchBreaksATie(t *testing.T) {
+	got := order([]ranked{
+		{id: "weaker", tier: matchTierAbout, popularity: 0.5, rel: 0.3},
+		{id: "stronger", tier: matchTierAbout, popularity: 0.5, rel: 1.0},
+	})
+	if got[0] != "stronger" {
+		t.Errorf("got %v; with popularity level, the better match should edge "+
+			"ahead", got)
+	}
+}
+
+func TestSearchRank_TheTiebreakStaysATiebreak(t *testing.T) {
+	if searchRelevanceTiebreak <= 0 || searchRelevanceTiebreak > 0.2 {
+		t.Fatalf("the tiebreak is %v. Above a small fraction it stops being a "+
+			"tiebreak and starts holding popular videos back again, which is "+
+			"the thing the classes were introduced to stop needing.",
+			searchRelevanceTiebreak)
+	}
+}
+
+// ── The classes themselves ──────────────────────────────────────────────────
+
+func TestSearchTier_TheQueryBeingOneOfItsWordsIsTheTopClass(t *testing.T) {
+	cases := []struct {
+		name string
+		ch   Challenge
+		doc  searchDoc
+		want int
+	}{
+		{"exact topic", Challenge{Subject: "x"},
+			searchDoc{Topics: []string{"bee", "pollination"}}, matchTierAbout},
+		{"word in title", Challenge{Subject: "the bee and the thistle"},
+			searchDoc{}, matchTierAbout},
+		{"exact tag", Challenge{Subject: "x"},
+			searchDoc{Tags: []string{"bee"}}, matchTierAbout},
+		{"part of a topic", Challenge{Subject: "x"},
+			searchDoc{Topics: []string{"beekeeping"}}, matchTierPartial},
+		{"only said aloud", Challenge{Subject: "x"},
+			searchDoc{Spoken: "look at that bee go"}, matchTierRelated},
+		{"nothing at all", Challenge{Subject: "x"}, searchDoc{}, matchTierNone},
+	}
+	for _, c := range cases {
+		_, got := searchRelevanceDetail(c.ch, c.doc, "bee", nil)
+		if got != c.want {
+			t.Errorf("%s: class %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+func TestSearchTier_NoMatchIsNeverAResult(t *testing.T) {
+	score, tier := searchRelevanceDetail(
+		Challenge{Subject: "something else"}, searchDoc{}, "bee", nil)
+	if score != 0 || tier != matchTierNone {
+		t.Errorf("a video with none of the query scored %v in class %d; it "+
+			"must be no result at all", score, tier)
+	}
+}
+
+// The plain scorer must keep working — plenty of code and tests still use it.
+func TestSearchTier_ThePlainScorerStillAgrees(t *testing.T) {
+	ch := Challenge{Subject: "x"}
+	doc := searchDoc{Topics: []string{"bee"}}
+	plain := searchRelevance(ch, doc, "bee", nil)
+	detailed, _ := searchRelevanceDetail(ch, doc, "bee", nil)
+	if plain != detailed {
+		t.Errorf("the two scorers disagree: %v vs %v", plain, detailed)
+	}
+}
+
+// ── Guard on the real code ──────────────────────────────────────────────────
+
+func TestSearchRank_TheRealCodeStillSortsByClassFirst(t *testing.T) {
+	// Only the code. This file and search.go both explain the old formulas in
+	// comments, and a guard matching its own explanation would fire forever.
 	src := codeOnly(funcBody(readSourceFile(t, "search.go"), "func rankSearchChallenges("))
 
 	if strings.Contains(src, "lex + 0.20*eng") {
-		t.Error("the old sum is back in rankSearchChallenges. Relevance is a " +
-			"term in it again, so a few thousand views will once more decide " +
-			"every search regardless of what was typed.")
+		t.Error("the old sum is back: relevance is a term in it again, so a " +
+			"few thousand views will once more decide every search")
 	}
 	if strings.Contains(src, "math.Exp(-float64(i) / 8.0)") {
 		t.Error("ranking is back to decaying a result's POSITION instead of " +
-			"using how relevant it actually is. That throws away the " +
-			"difference between an exact match and a vague one.")
+			"using how relevant it actually is")
 	}
-	if !strings.Contains(src, "rel * (1 + boost)") {
-		t.Error("rankSearchChallenges no longer multiplies relevance by its " +
-			"boosts, so something with no relevance can score above zero again")
+	if !strings.Contains(src, "out[i].Tier != out[j].Tier") {
+		t.Error("results are no longer sorted by match class first. Without " +
+			"that, popularity can promote a merely-related video above one " +
+			"that actually answers the query.")
 	}
-	if !strings.Contains(src, "searchBoostCeiling") {
-		t.Error("the boost ceiling is gone from rankSearchChallenges")
+	if !strings.Contains(src, "searchRelevanceDetail(") {
+		t.Error("the ranker no longer asks which class a match is in")
 	}
 }
 
-// codeOnly strips whole-line comments so a guard checks what runs, not what is
-// written about what used to run.
 func codeOnly(src string) string {
 	var b strings.Builder
 	for _, line := range strings.Split(src, "\n") {
