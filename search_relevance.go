@@ -143,10 +143,51 @@ func searchTextIndex() map[string]searchDoc {
 // mixing them in here would let a popular video match a word it has nothing to
 // do with, which is exactly the bug that made every search return the same ten
 // accounts.
+// ════════════════════════════════════════════════════════════════════════════
+// HOW CLOSE A MATCH IS, AS A CLASS RATHER THAN A NUMBER
+// ════════════════════════════════════════════════════════════════════════════
+//
+// A number alone cannot answer "should this popular video outrank that
+// obscure one". Any single scale forces one exchange rate between being
+// relevant and being loved, and every rate is wrong somewhere.
+//
+// So matches are also sorted into three plain classes, and popularity is let
+// loose INSIDE a class but can never move a result between them. That is what
+// lets the feed lean hard on what people actually watch — which is most of why
+// anybody enjoys a short-video app — without a video that merely shares the
+// word "nature" ever landing above the video that is actually about bees.
+const (
+	// matchTierAbout: the query IS one of this video's own words — its title,
+	// what it is about, its tags, or who made it.
+	matchTierAbout = 0
+	// matchTierPartial: the query is PART of one of those words.
+	matchTierPartial = 1
+	// matchTierRelated: the video is only related to the query, or happens to
+	// say it aloud. Real signal, much weaker claim.
+	matchTierRelated = 2
+	// matchTierNone: no match at all. Never shown for this query.
+	matchTierNone = 3
+)
+
+// searchRelevance scores how well one video answers the query.
 func searchRelevance(ch Challenge, doc searchDoc, q string, related []string) float64 {
+	score, _ := searchRelevanceDetail(ch, doc, q, related)
+	return score
+}
+
+// searchRelevanceDetail also says WHICH CLASS the match falls in, so the
+// ranker can let popularity decide inside a class without ever letting it
+// decide across classes.
+func searchRelevanceDetail(ch Challenge, doc searchDoc, q string, related []string) (float64, int) {
 	q = strings.ToLower(strings.TrimSpace(q))
 	if q == "" {
-		return 0
+		return 0, matchTierNone
+	}
+	tier := matchTierNone
+	closer := func(t int) {
+		if t < tier {
+			tier = t
+		}
 	}
 	title := strings.ToLower(strings.TrimSpace(ch.Prefix + " " + ch.Subject))
 	var score float64
@@ -155,10 +196,13 @@ func searchRelevance(ch Challenge, doc searchDoc, q string, related []string) fl
 	switch {
 	case title == q:
 		score += matchTitleExact
+		closer(matchTierAbout)
 	case containsWord(title, q):
 		score += matchTitleWord
+		closer(matchTierAbout)
 	case strings.Contains(title, q):
 		score += matchTitlePart
+		closer(matchTierPartial)
 	}
 
 	// ── WHAT IT IS ABOUT ──
@@ -170,8 +214,10 @@ func searchRelevance(ch Challenge, doc searchDoc, q string, related []string) fl
 		switch {
 		case t == q:
 			best = math.Max(best, matchTopicExact)
+			closer(matchTierAbout)
 		case strings.Contains(t, q) || strings.Contains(q, t):
 			best = math.Max(best, matchTopicPart)
+			closer(matchTierPartial)
 		}
 	}
 	score += best
@@ -181,8 +227,10 @@ func searchRelevance(ch Challenge, doc searchDoc, q string, related []string) fl
 		switch {
 		case t == q:
 			bestTag = math.Max(bestTag, matchTagExact)
+			closer(matchTierAbout)
 		case strings.Contains(t, q):
 			bestTag = math.Max(bestTag, matchTagPart)
+			closer(matchTierPartial)
 		}
 	}
 	score += bestTag
@@ -190,6 +238,7 @@ func searchRelevance(ch Challenge, doc searchDoc, q string, related []string) fl
 	// ── WHO MADE IT ──
 	if u := strings.ToLower(ch.CreatorUsername); u != "" && strings.Contains(u, q) {
 		score += matchCreator
+		closer(matchTierAbout)
 	}
 
 	// ── WHAT WAS SAID ──
@@ -199,9 +248,11 @@ func searchRelevance(ch Challenge, doc searchDoc, q string, related []string) fl
 	// longest transcript.
 	if doc.Spoken != "" && strings.Contains(doc.Spoken, q) {
 		score += matchSpoken
+		closer(matchTierRelated)
 	}
 	if doc.Screen != "" && strings.Contains(doc.Screen, q) {
 		score += matchScreenText
+		closer(matchTierRelated)
 	}
 
 	// ── SUBJECTS THAT GO WITH IT ──
@@ -227,9 +278,15 @@ func searchRelevance(ch Challenge, doc searchDoc, q string, related []string) fl
 			}
 		}
 		score += bestRelated
+		if bestRelated > 0 {
+			closer(matchTierRelated)
+		}
 	}
 
-	return score
+	if score <= 0 {
+		return 0, matchTierNone
+	}
+	return score, tier
 }
 
 // containsWord reports whether q appears in text as a whole word, so
@@ -342,18 +399,19 @@ const (
 )
 
 // scoredHit is a candidate and how well it answered the query.
-// searchBoostCeiling is the most that everything-except-relevance can lift a
-// result.
+// searchRelevanceTiebreak is how much a better match is worth WITHIN a class,
+// once the class has already been decided.
 //
-// Half. So two results that are about equally relevant get separated by how
-// popular, fresh and personally apt they are — which is what those signals are
-// for — while a result half as relevant as another cannot climb past it no
-// matter how many views it has.
+// Small on purpose. Inside a class every result is the same kind of answer —
+// all of them are about the thing, or all of them are merely related to it —
+// so what people actually watch should decide the order. This only separates
+// results that are otherwise level, so a better match still edges ahead of an
+// equally popular worse one.
 //
-// This is a statement about how much popularity should be allowed to matter
-// next to actually answering the question, not a number tuned to any
-// particular catalogue, so it means the same thing at any size.
-const searchBoostCeiling = 0.5
+// It does not need to be balanced against popularity, because the thing it
+// used to be protecting against is now impossible: no amount of popularity
+// moves a result out of its class.
+const searchRelevanceTiebreak = 0.05
 
 type scoredHit struct {
 	hit   challengeHit
