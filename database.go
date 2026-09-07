@@ -1799,6 +1799,11 @@ func queryChallenges(query string, args ...interface{}) []Challenge {
 }
 
 // GetArenaChallenges returns all non-expired open arena challenges (within 24h).
+//
+// This is deliberately not the search population. The battle tab shows live
+// contests, so an open challenge nobody has answered in a day is stale and
+// drops off. Search has to keep it — see GetSearchableChallenges just below
+// for what happened when these two were the same query.
 func GetArenaChallenges() []Challenge {
 	return queryChallenges(challengeBaseQuery + `
 	  WHERE c.visibility = 'arena' 
@@ -1833,8 +1838,7 @@ func GetArenaChallenges() []Challenge {
 // exactly what a person is looking for when they type its subject.
 func GetSearchableChallenges() []Challenge {
 	return queryChallenges(challengeBaseQuery + `
-	  WHERE c.visibility = 'arena'
-	    AND c.status IN ('open','active','completed')
+	  WHERE ` + searchableWhere("c") + `
 	  ORDER BY c.created_at DESC`)
 }
 

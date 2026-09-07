@@ -2967,7 +2967,10 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		  AND created_at > NOW() - INTERVAL '2 hours'`,
 			contentID, contentType).Scan(&recentEng, &recentViews)
 	}
-	velocity := math.Min(1.0, float64(recentEng)/15.0)
+	// Measured against the platform's own current pace, not a typed-in
+	// number — see trending_reference.go for why fifteen stopped being an
+	// answer the moment the platform changed size.
+	velocity := trendingVelocity(recentEng, trendingReference())
 	rate := 0.0
 	if recentViews >= 3 {
 		rate = wilsonLowerBound(float64(recentEng), float64(recentViews))
@@ -3050,13 +3053,12 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 
 		// Synthetic trending fallback: when there's no recent feed_events
 		// engagement, use raw recent view velocity as a proxy for fresh content.
-		if cs.TrendingScore == 0 && cs.ViewCount >= 20 {
-			ageHours := time.Since(createdAt).Hours()
-			if ageHours <= 48 && ageHours > 0 {
-				viewsPerHour := float64(cs.ViewCount) / ageHours
-				// 10 views/hour ≈ noteworthy for a small platform; cap at 0.3
-				cs.TrendingScore = math.Min(0.3, viewsPerHour/30.0)
-			}
+		if cs.TrendingScore == 0 {
+			// Compared against how fast other recent videos are being
+			// watched, rather than against a fixed views-per-hour that only
+			// ever suited one platform size.
+			cs.TrendingScore = rowTrendingScore(
+				cs.ViewCount, time.Since(createdAt).Hours(), viewVelocityReference())
 		}
 
 		var rawTopics []string
