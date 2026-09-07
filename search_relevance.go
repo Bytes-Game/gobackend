@@ -342,17 +342,35 @@ const (
 )
 
 // scoredHit is a candidate and how well it answered the query.
+// searchBoostCeiling is the most that everything-except-relevance can lift a
+// result.
+//
+// Half. So two results that are about equally relevant get separated by how
+// popular, fresh and personally apt they are — which is what those signals are
+// for — while a result half as relevant as another cannot climb past it no
+// matter how many views it has.
+//
+// This is a statement about how much popularity should be allowed to matter
+// next to actually answering the question, not a number tuned to any
+// particular catalogue, so it means the same thing at any size.
+const searchBoostCeiling = 0.5
+
 type scoredHit struct {
 	hit   challengeHit
 	score float64
 }
 
-// rankByRelevance scores the whole searchable catalogue against a query and
-// returns the best, most relevant first.
+// rankByRelevance finds the candidates: every searchable video with anything
+// of the query in it, best first.
 //
 // This replaced a substring scan over titles that returned matches in date
-// order. That is why the reranker's position decay meant nothing: nothing had
-// ordered the list by how well anything matched.
+// order, which is why the old reranker's position decay meant nothing —
+// nothing had ordered the list by how well anything matched.
+//
+// It deliberately stops at finding and ordering. It does NOT spread out
+// similar results, because rankSearchChallenges re-ranks everything it returns
+// and any spreading done here would simply be undone. Spreading happens once,
+// on the final order.
 func rankByRelevance(query string, limit int) []challengeHit {
 	q := strings.ToLower(strings.TrimSpace(query))
 	if q == "" {
@@ -370,5 +388,12 @@ func rankByRelevance(query string, limit int) []challengeHit {
 		scored = append(scored, scoredHit{challengeHit{Ch: ch}, s})
 	}
 	sort.SliceStable(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
-	return diversifySearchResults(scored, index, limit)
+	if limit > 0 && len(scored) > limit {
+		scored = scored[:limit]
+	}
+	out := make([]challengeHit, 0, len(scored))
+	for _, s := range scored {
+		out = append(out, s.hit)
+	}
+	return out
 }
