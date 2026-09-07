@@ -2949,11 +2949,14 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 	cs.QualityScore = (completionScore*0.25 + likeQ*0.15 + shareQ*0.25 +
 		rewatchQ*0.20 + commentQ*0.15) * (1.0 - cs.SkipRate*0.5)
 
-	// Trending: blends absolute VELOCITY (engagement in the last 2h — catches
-	// established viral) with engagement RATE (Wilson lower bound of
-	// engagement-per-view — lets a NEW video with a strong rate break out from a
-	// small audience, the way TikTok escalates a high-performing test). Either
-	// path can trend an item, so capable content isn't gated behind raw volume.
+	// Trending asks one question: of the people who saw this in the last two
+	// hours, how many acted, and is that better than other videos being shown
+	// to about as many people right now.
+	//
+	// It used to also blend in a raw engagement COUNT, which sounds like it
+	// helps established hits and in fact just meant the biggest audiences set
+	// the bar for everybody. That is gone — size is already rewarded elsewhere
+	// in the score, and it does not also get to be "trending".
 	var recentEng, recentViews int
 	if warmAgg != nil {
 		recentEng, recentViews = warmAgg.RecentEng, warmAgg.RecentViews
@@ -2967,15 +2970,10 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		  AND created_at > NOW() - INTERVAL '2 hours'`,
 			contentID, contentType).Scan(&recentEng, &recentViews)
 	}
-	// Measured against the platform's own current pace, not a typed-in
-	// number — see trending_reference.go for why fifteen stopped being an
-	// answer the moment the platform changed size.
-	velocity := trendingVelocity(recentEng, trendingReference())
-	rate := 0.0
-	if recentViews >= 3 {
-		rate = wilsonLowerBound(float64(recentEng), float64(recentViews))
-	}
-	cs.TrendingScore = math.Max(velocity, rate)
+	// How well it is doing with the people who saw it, against other videos
+	// being shown to about as many people right now. See trending_reference.go
+	// for why counting engagements instead meant a new video could never win.
+	cs.TrendingScore = trendingBreakout(recentEng, recentViews, trendingBenchmarksNow())
 
 	// Energy level inference (rewatch/share/completion-modulated; the engagement
 	// stats it reads are already populated above). Captured here so it can serve
