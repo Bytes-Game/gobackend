@@ -677,10 +677,27 @@ func main() {
 	r.Handle("/metrics", MetricsHandler()).Methods("GET")
 
 	// Health check endpoint for Render and uptime monitors
+	// Health also says WHICH build is answering.
+	//
+	// Without this there is no way to ask the running server what code it is
+	// on. Working out whether a fix had reached production meant poking an
+	// endpoint and trying to infer the answer from its behaviour, which only
+	// works when the change is visible from outside and is guesswork even
+	// then. Render sets RENDER_GIT_COMMIT; anywhere else this is empty and the
+	// field simply says "unknown" rather than pretending.
+	buildCommit := os.Getenv("RENDER_GIT_COMMIT")
+	if buildCommit == "" {
+		buildCommit = "unknown"
+	}
+	startedAt := time.Now().UTC().Format(time.RFC3339)
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":    "ok",
+			"commit":    buildCommit,
+			"startedAt": startedAt,
+		})
 	}).Methods("GET")
 
 	port := os.Getenv("PORT")
