@@ -490,6 +490,10 @@ func main() {
 	startNotificationTriggers()
 	// Reset HLS transcode jobs orphaned at 'PENDING' by crashed workers.
 	startHLSReaper()
+	// Start the video worker when videos are waiting. An upload already does
+	// this; the scheduled run that was supposed to cover everything else fires
+	// about one time in five. See hls_dispatch.go.
+	startHLSDispatcher()
 	// Clear the bucket for content that has been deleted. Deleting a
 	// challenge or an account drops the rows and queues the storage paths;
 	// this drains that queue. Without it every delete leaks its video.

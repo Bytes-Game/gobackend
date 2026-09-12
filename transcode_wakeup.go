@@ -126,6 +126,13 @@ func claimWakeupSlot(now time.Time) bool {
 }
 
 func dispatchWorkerRun(ctx context.Context, token string) error {
+	// Every path that starts a worker comes through here — an upload, an
+	// admin re-queue, and the backlog timer in hls_dispatch.go. Recording it
+	// in one place is what lets that timer stay quiet when something else has
+	// just put a worker on the queue. Recorded on the attempt, not on
+	// success: a failing call still must not be repeated every two minutes.
+	noteHLSDispatch()
+
 	repo := envOrDefault(githubWorkerRepoEnv, defaultWorkerRepo)
 	workflow := envOrDefault(githubWorkerWorkflowEnv, defaultWorkerWorkflow)
 	ref := envOrDefault(githubWorkerRefEnv, defaultWorkerRef)
