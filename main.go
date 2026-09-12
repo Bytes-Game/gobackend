@@ -635,6 +635,10 @@ func main() {
 	// Put already-transcoded videos back through the worker so they pick up
 	// what it has learned since — see media_requeue.go.
 	api.HandleFunc("/admin/media/requeue", adminOnly(AdminRequeueMediaHandler)).Methods("POST", "OPTIONS")
+	// Delete a video that is not the caller's own — the one irreversible
+	// endpoint here. Only ever deletes ids it is given, and says what else
+	// went with them. See admin_media_delete.go.
+	api.HandleFunc("/admin/media/delete", adminOnly(AdminDeleteMediaHandler)).Methods("POST", "OPTIONS")
 	// Why is this video not watchable yet? Every other list collapses
 	// "waiting", "a worker has it" and "given up on" into one blank field —
 	// see admin_hls_queue.go.
