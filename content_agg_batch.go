@@ -31,6 +31,7 @@ import (
 type contentEventAggregates struct {
 	ViewCount, LikeCount, CommentCount  int
 	SkipCount, RewatchCount, ShareCount int
+	SaveCount                           int
 	NotInterestedCount                  int
 	AvgCompletion, AvgWatchMs           float64
 	RecentEng, RecentViews              int
@@ -89,29 +90,10 @@ func warmContentAggregates(items []HomeFeedItem) {
 		}
 
 		// Batch #2: the 2-hour trending window.
-		rows, err := db.Query(`
-			SELECT content_id,
-				COUNT(*) FILTER (WHERE event_type IN ('like','comment','share','save')),
-				COUNT(*) FILTER (WHERE event_type = 'view')
-			FROM feed_events
-			WHERE content_id = ANY($1) AND content_type = $2
-			  AND created_at > NOW() - INTERVAL '2 hours'
-			GROUP BY content_id`, pq.Array(ids), typ)
-		if err != nil {
+		if err := loadRecentEngagement(typ, ids, aggs); err != nil {
 			log.Printf("warmContentAggregates 2h batch error: %v", err)
 			return
 		}
-		for rows.Next() {
-			var id string
-			var eng, views int
-			if err := rows.Scan(&id, &eng, &views); err != nil {
-				continue
-			}
-			if a, ok := aggs[id]; ok {
-				a.RecentEng, a.RecentViews = eng, views
-			}
-		}
-		rows.Close()
 
 		for id, a := range aggs {
 			contentAggCache.Set(contentAggKey(typ, id), a)
@@ -128,11 +110,10 @@ func warmContentAggregates(items []HomeFeedItem) {
 // and the first time anybody added an event type, only one of them would have
 // learned about it.
 //
-// Note what is NOT here: saves. feed_events records them and engagementWeight
-// prices them, but this aggregate has never counted them, so nothing that
-// reads it can see a save. Left as-is rather than quietly added, because
-// changing what the feed counts is a scoring change and belongs in its own
-// decision.
+// Saves are counted here now. They were recorded in feed_events and priced by
+// engagementWeight, but this aggregate never selected them, so nothing that
+// scored content could see one. A save is the second-strongest thing a viewer
+// does — they intend to come back — and it was worth exactly nothing.
 func loadEngagementAggregates(typ string, ids []string, into map[string]*contentEventAggregates) error {
 	if db == nil || len(ids) == 0 {
 		return nil
@@ -145,6 +126,7 @@ func loadEngagementAggregates(typ string, ids []string, into map[string]*content
 			COUNT(*) FILTER (WHERE event_type = 'skip'),
 			COUNT(*) FILTER (WHERE event_type = 'rewatch'),
 			COUNT(*) FILTER (WHERE event_type = 'share'),
+			COUNT(*) FILTER (WHERE event_type = 'save'),
 			COUNT(*) FILTER (WHERE event_type = 'not_interested'),
 			COALESCE(AVG(completion_rate) FILTER (WHERE event_type = 'view'), 0),
 			COALESCE(AVG(watch_duration_ms) FILTER (WHERE event_type = 'view'), 0)
@@ -160,7 +142,8 @@ func loadEngagementAggregates(typ string, ids []string, into map[string]*content
 		var id string
 		a := &contentEventAggregates{}
 		if err := rows.Scan(&id, &a.ViewCount, &a.LikeCount, &a.CommentCount,
-			&a.SkipCount, &a.RewatchCount, &a.ShareCount, &a.NotInterestedCount,
+			&a.SkipCount, &a.RewatchCount, &a.ShareCount, &a.SaveCount,
+			&a.NotInterestedCount,
 			&a.AvgCompletion, &a.AvgWatchMs); err != nil {
 			continue
 		}
@@ -168,6 +151,42 @@ func loadEngagementAggregates(typ string, ids []string, into map[string]*content
 			*prev = *a
 		} else {
 			into[id] = a
+		}
+	}
+	return rows.Err()
+}
+
+// loadRecentEngagement fills in the last two hours, which is what trending
+// asks about.
+//
+// Separate from the ninety-day figures because they answer different
+// questions, and shared for the same reason as those: this was a third copy
+// of a very similar SELECT, and copies of these are how a whole event type
+// came to be counted by none of them.
+func loadRecentEngagement(typ string, ids []string, into map[string]*contentEventAggregates) error {
+	if db == nil || len(ids) == 0 {
+		return nil
+	}
+	rows, err := db.Query(`
+		SELECT content_id,
+			COUNT(*) FILTER (WHERE event_type IN ('like','comment','share','save')),
+			COUNT(*) FILTER (WHERE event_type = 'view')
+		FROM feed_events
+		WHERE content_id = ANY($1) AND content_type = $2
+		  AND created_at > NOW() - INTERVAL '2 hours'
+		GROUP BY content_id`, pq.Array(ids), typ)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var eng, views int
+		if err := rows.Scan(&id, &eng, &views); err != nil {
+			continue
+		}
+		if a, ok := into[id]; ok {
+			a.RecentEng, a.RecentViews = eng, views
 		}
 	}
 	return rows.Err()
