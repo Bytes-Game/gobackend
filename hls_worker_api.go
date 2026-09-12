@@ -132,6 +132,11 @@ type hlsCompleteRequest struct {
 	// and from any worker where none of the optional passes could run at
 	// all, so this being empty is ordinary rather than an error.
 	Analysis json.RawMessage `json:"analysis,omitempty"`
+	// Public URL of a still frame from the video, for the app to show while
+	// the video itself is still opening. Optional: a worker that could not
+	// make one sends nothing, and older workers do not know about it at all.
+	// See cmd/hls-worker/poster.go.
+	ThumbnailURL string `json:"thumbnailUrl,omitempty"`
 	// Our own progressive MP4s, label ("480p"/"720p") → public URL. The app
 	// already picks from this map by network and device, so filling it in is
 	// all that is needed for it to play our encode instead of the phone's
@@ -316,6 +321,7 @@ func HLSCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	// a bonus. Losing one reading is much cheaper than that.
 	storeVideoAnalysis(table, cid, req.Analysis)
 	storeVideoVariants(table, cid, req.VideoVariants)
+	storeVideoThumbnail(table, cid, req.ThumbnailURL)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -480,4 +486,27 @@ func startHLSReaper() {
 			}
 		}
 	}()
+}
+
+// storeVideoThumbnail records the still frame the worker pulled out of the
+// video, so the app has something to paint while the video opens.
+//
+// Same rules as the two above it: written separately, and a failure is logged
+// rather than returned. The manifest is what the worker must be told landed —
+// 500ing here would send it back to re-download and re-transcode a video that
+// is already done, to re-save a picture.
+//
+// Empty is the ordinary case for an older worker or a video too short for the
+// grab, and it must not wipe a thumbnail something else already set: the
+// import script writes one, and a re-queue through a worker whose poster step
+// failed would otherwise take it away.
+func storeVideoThumbnail(table string, id int, url string) {
+	if db == nil || strings.TrimSpace(url) == "" {
+		return
+	}
+	if _, err := db.Exec(
+		`UPDATE `+table+` SET thumbnail_url = $2 WHERE id = $1`, id, url,
+	); err != nil {
+		log.Printf("storeVideoThumbnail: could not save for %s=%d: %v", table, id, err)
+	}
 }
