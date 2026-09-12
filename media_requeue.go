@@ -75,6 +75,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/lib/pq"
@@ -293,11 +294,42 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 // requeueByID clears the "already transcoded" mark on the named rows and
 // reports which ones it actually cleared.
 //
-// Same guard as the batch path — a row still waiting (”) or held by the
-// worker ('PENDING') is left alone, so naming a video cannot disturb work in
-// flight. RETURNING is what makes the difference visible: a caller who names
-// five videos and gets three back knows two did not move, which is the
-// question they were asking by naming them.
+// It will move a row in one of two states, and only those two.
+//
+// The first is a video that FINISHED — same as the batch path. That is the
+// re-encode case: the worker got better, send it round again.
+//
+// The second is a video the queue has GIVEN UP ON: no transcode was ever
+// produced and it has used every attempt it is allowed. That row is stranded.
+// The worker will not offer it again (the claim query skips rows at the cap)
+// and nothing else was willing to touch it either, so it sat there with no
+// video anyone could play and no way back. Naming a stranded video is the
+// single most likely reason anybody calls this endpoint by id, and until now
+// it was the one thing the endpoint refused to do:
+//
+//	{"requeued":1,"requeuedIds":[8],
+//	 "skippedIds":[2,4,9,10,11,27,28,29,30,31,32,33,34,35,46]}
+//
+// Fifteen videos, every one of them invisible in the app, every one of them
+// reported back as "not moved" with no way to move it. The automatic rescue
+// in InitDatabase does eventually free them, but only 24 hours after the last
+// attempt AND only when the backend happens to restart. That is the right
+// safety net for an infrastructure blip and much too slow to be an answer to
+// somebody standing there asking for a video back.
+//
+// Everything else is still left alone, deliberately:
+//
+//   - 'PENDING' means a worker is holding it right now. Resetting it would
+//     let a second worker claim the same video, and the first one's
+//     completion callback would then write a manifest over the reset.
+//   - An empty manifest with attempts still on the clock means the row is
+//     already queued and its turn is coming. Nothing to fix, so nothing to
+//     do, and saying "requeued" would be a lie.
+//   - No source video at all can never transcode.
+//
+// RETURNING is what makes the difference visible: a caller who names five
+// videos and gets three back knows two did not move, which is the question
+// they were asking by naming them.
 func requeueByID(table string, ids []int) ([]int, error) {
 	rows, err := db.Query(`
 		UPDATE `+table+`
@@ -305,9 +337,10 @@ func requeueByID(table string, ids []int) ([]int, error) {
 		       hls_attempts     = 0,
 		       hls_claimed_at    = NULL
 		 WHERE id = ANY($1)
-		   AND hls_manifest_url <> ''
 		   AND hls_manifest_url <> 'PENDING'
 		   AND COALESCE(video_url, '') <> ''
+		   AND (hls_manifest_url <> ''
+		        OR hls_attempts >= `+strconv.Itoa(maxHLSAttempts)+`)
 		RETURNING id`, pq.Array(ids))
 	if err != nil {
 		return nil, err

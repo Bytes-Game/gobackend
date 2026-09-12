@@ -43,6 +43,37 @@ import (
 // this many tries instead of being re-claimed and re-failed forever.
 const maxHLSAttempts = 5
 
+// hlsRetryCooloff is how long a video rests after a failed attempt before
+// the worker may pick it up again.
+//
+// Without it, "five attempts" was not five chances spread over time. It was
+// five chances spent in one second. The claim query hands back the newest
+// eligible row, and a failure puts that row straight back at the front of
+// the queue, so the worker re-claimed the same video the instant it failed.
+// Measured in production, one video used up its whole allowance inside a
+// single second:
+//
+//	11:40:49 claimed job id=46 ... download: source GET status 403
+//	11:40:49 claimed job id=46 ... download: source GET status 403
+//	11:40:49 claimed job id=46 ... download: source GET status 403
+//	11:40:49 claimed job id=46 ... download: source GET status 403
+//	11:40:49 claimed job id=46 ... download: source GET status 403
+//
+// For a source that answers 403 forever, that is only wasteful. For a video
+// that hit one bad moment — the storage upload failing part way, the network
+// dropping, the run being cut off by its own time limit — it is fatal: the
+// same bad moment is still there a millisecond later, so all five tries fail
+// and a perfectly good video is retired for good. One such upload error is
+// in the same day's logs; that video happened to survive because its second
+// try landed after the blip had passed.
+//
+// Ten minutes puts real time between tries. The worker's own run is twelve
+// minutes and the schedule is every thirty, so a failing video now gets about
+// one try per run instead of eating the run, and its five tries stretch over
+// roughly two hours. A video that fails five times two hours apart really is
+// broken; a video that fails five times in a second has told us nothing.
+const hlsRetryCooloff = 10 * time.Minute
+
 // hlsKindResponse marks a job/report as targeting the
 // challenge_responses table; anything else (including the empty string
 // older workers send) means the challenges table. Battle responses get
@@ -143,23 +174,28 @@ func HLSNextPendingHandler(w http.ResponseWriter, r *http.Request) {
 	// hls_attempts is incremented AT CLAIM so crashes count as attempts;
 	// rows that reach maxHLSAttempts stop being offered. hls_claimed_at
 	// lets startHLSReaper reset jobs orphaned by a worker that died
-	// mid-transcode (state stuck at 'PENDING').
+	// mid-transcode (state stuck at 'PENDING'), and it is also what keeps
+	// a video that just failed from being handed straight back — see
+	// hlsRetryCooloff, without which the five attempts were spendable in
+	// a single second.
 	claim := func(table string) (int, string, bool) {
 		row := db.QueryRow(`
-			UPDATE ` + table + `
+			UPDATE `+table+`
 			   SET hls_manifest_url = 'PENDING',
 			       hls_claimed_at   = NOW(),
 			       hls_attempts     = hls_attempts + 1
 			 WHERE id = (
-			   SELECT id FROM ` + table + `
+			   SELECT id FROM `+table+`
 			    WHERE hls_manifest_url = ''
 			      AND video_url <> ''
-			      AND hls_attempts < ` + strconv.Itoa(maxHLSAttempts) + `
+			      AND hls_attempts < `+strconv.Itoa(maxHLSAttempts)+`
+			      AND (hls_claimed_at IS NULL
+			           OR hls_claimed_at < NOW() - INTERVAL '1 second' * $1)
 			    ORDER BY created_at DESC
 			    LIMIT 1
 			    FOR UPDATE SKIP LOCKED
 			 )
-			 RETURNING id, video_url`)
+			 RETURNING id, video_url`, int(hlsRetryCooloff.Seconds()))
 		var idInt int
 		var srcURL string
 		if err := row.Scan(&idInt, &srcURL); err != nil {
