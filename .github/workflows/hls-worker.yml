@@ -153,7 +153,7 @@ env:
 jobs:
   drain:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -420,13 +420,28 @@ jobs:
           echo "UNDERSTAND_PROJECTOR=$HOME/llama/mmproj.gguf"     >> "$GITHUB_ENV"
           echo "looking: ON"
 
-      # TWO parallel workers: the backend's FOR UPDATE SKIP LOCKED claim
-      # makes concurrent workers safe by construction, and the runner's
-      # 4 cores comfortably fit two ffmpeg encodes — ~2x videos per run.
+      # ONE worker — see the drain step below for why two starved each other.
       #
       # The two budgets must satisfy:
       #   max-runtime + job-timeout + setup  <  timeout-minutes
-      #   12m         + 10m         + ~14m   =  36m  <  45m    ✓
+      #   12m         + 16m         + ~14m   =  42m  <  50m    ✓
+      #
+      # job-timeout went 10m→16m because a ten-minute ceiling is not one
+      # video's worth of work for the longest sources. The surf-film trailer
+      # in the seed set spends about eight minutes downloading and encoding
+      # five rungs, and was then hard-killed mid-analysis at exactly 10m00s:
+      #
+      #   12:04:15 claimed job id=8
+      #   12:14:15 analyze: speech pass failed: signal: killed
+      #
+      # Transcode succeeded, so the row looked finished — it just had no
+      # description of what was in it, and so could not be searched for.
+      # Sixteen minutes covers that eight-minute encode plus both model
+      # passes (two minutes each) with room to spare.
+      #
+      # timeout-minutes went 45→50 to keep the margin the sum above is
+      # supposed to guarantee. Raising job-timeout alone would have eaten
+      # the headroom that exists for a two-cache miss.
       #
       # "setup" has to cover a CACHE MISS, not just apt — and there are two
       # caches now. The keys hold the model names, so changing either model
@@ -487,4 +502,4 @@ jobs:
         # whole ones.
         run: |
           go build -o /tmp/hls-worker ./cmd/hls-worker
-          /tmp/hls-worker -drain -max-runtime 12m -job-timeout 10m
+          /tmp/hls-worker -drain -max-runtime 12m -job-timeout 16m
