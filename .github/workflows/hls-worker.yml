@@ -26,7 +26,18 @@ name: hls-worker
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    # 7 and 37, not */30 — same half-hour spacing, off the top of the hour.
+    #
+    # GitHub drops scheduled runs under load and :00 is the most contended
+    # minute on the platform. Measured on this repo: this asks for every
+    # thirty minutes and actually ran every two to four hours, so about nine
+    # in ten runs never happened. For a transcode queue that means video sits
+    # unwatchable for hours after upload, and nothing anywhere says why.
+    #
+    # A mitigation rather than a fix: GitHub cron is best-effort at any
+    # minute. Anything that must happen promptly should dispatch this
+    # workflow directly, which the backend already does on upload.
+    - cron: '7,37 * * * *'
   workflow_dispatch: {}
 
 concurrency:
