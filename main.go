@@ -631,6 +631,10 @@ func main() {
 	// Put already-transcoded videos back through the worker so they pick up
 	// what it has learned since — see media_requeue.go.
 	api.HandleFunc("/admin/media/requeue", adminOnly(AdminRequeueMediaHandler)).Methods("POST", "OPTIONS")
+	// Why is this video not watchable yet? Every other list collapses
+	// "waiting", "a worker has it" and "given up on" into one blank field —
+	// see admin_hls_queue.go.
+	api.HandleFunc("/admin/media/queue", adminOnly(AdminHLSQueueHandler)).Methods("GET", "OPTIONS")
 	// Read back what the worker heard and read. Admin-only because a
 	// transcript is somebody's speech — see media_analysis_read.go.
 	api.HandleFunc("/admin/media/analysis", adminOnly(AdminReadAnalysisHandler)).Methods("GET", "OPTIONS")
