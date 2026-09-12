@@ -708,7 +708,9 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 	// re-ranking above.
 	final := make([]scoredHit, 0, len(out))
 	for _, s := range out {
-		final = append(final, scoredHit{hit: challengeHit{Ch: s.Ch}, score: s.Score})
+		final = append(final, scoredHit{
+			hit: challengeHit{Ch: s.Ch}, score: s.Score, tier: s.Tier,
+		})
 	}
 	spread := diversifySearchResults(final, index, len(final))
 	chs := make([]Challenge, len(spread))
