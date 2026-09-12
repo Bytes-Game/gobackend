@@ -133,17 +133,31 @@ func main() {
 	// /internal/hls/next-pending uses FOR UPDATE SKIP LOCKED on the
 	// backend side — two workers will never claim the same row.
 	emptyPolls := 0
+	// Did the backend ever answer us at all?
+	//
+	// It matters because of how this run ends. When the backend is down,
+	// claimJob returns an error, we log it, sleep, and go round again — and
+	// after max-runtime we return normally, exit zero, and the workflow goes
+	// GREEN. That is what happened while the backend was down for four days:
+	// every scheduled run burned twelve minutes reaching nothing and reported
+	// success, so the one thing watching this pipeline said it was fine.
+	//
+	// An empty queue is success. Never once getting an answer is not.
+	backendAnswered := false
+	var lastClaimErr error
 	for {
 		if *maxRuntime > 0 && time.Since(start) > *maxRuntime {
 			log.Printf("max runtime %v reached — exiting cleanly (remaining queue picked up by the next run)", *maxRuntime)
-			return
+			break
 		}
 		job, err := claimJob(cfg)
 		if err != nil {
+			lastClaimErr = err
 			log.Printf("claim error: %v (sleeping)", err)
 			time.Sleep(*pollInterval)
 			continue
 		}
+		backendAnswered = true
 		if job == nil {
 			if *drain {
 				// Two consecutive empty polls = genuinely drained (one
@@ -151,7 +165,7 @@ func main() {
 				emptyPolls++
 				if emptyPolls >= 2 {
 					log.Println("queue drained — exiting (drain mode)")
-					return
+					break
 				}
 			}
 			time.Sleep(*pollInterval)
@@ -171,6 +185,16 @@ func main() {
 		}
 		log.Printf("completed %s=%s manifest=%s mp4=%d", jobKind(*job),
 			job.ChallengeID, res.ManifestURL, len(res.VideoVariants))
+	}
+
+	// A run that never got a single answer out of the backend is a broken
+	// pipeline, not a quiet queue, and it has to be reported as one. Exiting
+	// zero here is how four days of a dead backend went unnoticed by the only
+	// job that talks to it every half hour.
+	if !backendAnswered {
+		log.Printf("FAILED: never reached the backend at %s in this whole run; "+
+			"last error: %v", cfg.BackendURL, lastClaimErr)
+		os.Exit(1)
 	}
 }
 
