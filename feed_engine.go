@@ -2879,9 +2879,18 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 	if a, ok := contentAggCache.Get(contentAggKey(contentType, contentID)); ok {
 		warmAgg = a
 	} else {
+		// BOTH windows. The ninety-day figures answer "how has this done",
+		// the two-hour ones answer "is it moving right now", and trending
+		// reads the second. Loading only the first here would leave trending
+		// reading zero for anything not already cached — no error, just a
+		// signal quietly switched off for cache misses.
+		ids := []string{contentID}
 		one := map[string]*contentEventAggregates{contentID: {}}
-		if err := loadEngagementAggregates(contentType, []string{contentID}, one); err != nil {
+		if err := loadEngagementAggregates(contentType, ids, one); err != nil {
 			log.Printf("computeContentScore aggregates for %s/%s: %v", contentType, contentID, err)
+		}
+		if err := loadRecentEngagement(contentType, ids, one); err != nil {
+			log.Printf("computeContentScore recent for %s/%s: %v", contentType, contentID, err)
 		}
 		warmAgg = one[contentID]
 	}
@@ -2963,19 +2972,9 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 	// helps established hits and in fact just meant the biggest audiences set
 	// the bar for everybody. That is gone — size is already rewarded elsewhere
 	// in the score, and it does not also get to be "trending".
-	var recentEng, recentViews int
-	if warmAgg != nil {
-		recentEng, recentViews = warmAgg.RecentEng, warmAgg.RecentViews
-	} else {
-		db.QueryRow(`
-		SELECT
-			COUNT(*) FILTER (WHERE event_type IN ('like','comment','share','save')),
-			COUNT(*) FILTER (WHERE event_type = 'view')
-		FROM feed_events
-		WHERE content_id = $1 AND content_type = $2
-		  AND created_at > NOW() - INTERVAL '2 hours'`,
-			contentID, contentType).Scan(&recentEng, &recentViews)
-	}
+	// Always set by now, from the cache or from the two loads above. This used
+	// to fall back to a fourth copy of the trending query living right here.
+	recentEng, recentViews := warmAgg.RecentEng, warmAgg.RecentViews
 	// How well it is doing with the people who saw it, against other videos
 	// being shown to about as many people right now. See trending_reference.go
 	// for why counting engagements instead meant a new video could never win.

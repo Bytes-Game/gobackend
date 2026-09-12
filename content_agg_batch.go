@@ -90,29 +90,10 @@ func warmContentAggregates(items []HomeFeedItem) {
 		}
 
 		// Batch #2: the 2-hour trending window.
-		rows, err := db.Query(`
-			SELECT content_id,
-				COUNT(*) FILTER (WHERE event_type IN ('like','comment','share','save')),
-				COUNT(*) FILTER (WHERE event_type = 'view')
-			FROM feed_events
-			WHERE content_id = ANY($1) AND content_type = $2
-			  AND created_at > NOW() - INTERVAL '2 hours'
-			GROUP BY content_id`, pq.Array(ids), typ)
-		if err != nil {
+		if err := loadRecentEngagement(typ, ids, aggs); err != nil {
 			log.Printf("warmContentAggregates 2h batch error: %v", err)
 			return
 		}
-		for rows.Next() {
-			var id string
-			var eng, views int
-			if err := rows.Scan(&id, &eng, &views); err != nil {
-				continue
-			}
-			if a, ok := aggs[id]; ok {
-				a.RecentEng, a.RecentViews = eng, views
-			}
-		}
-		rows.Close()
 
 		for id, a := range aggs {
 			contentAggCache.Set(contentAggKey(typ, id), a)
@@ -170,6 +151,42 @@ func loadEngagementAggregates(typ string, ids []string, into map[string]*content
 			*prev = *a
 		} else {
 			into[id] = a
+		}
+	}
+	return rows.Err()
+}
+
+// loadRecentEngagement fills in the last two hours, which is what trending
+// asks about.
+//
+// Separate from the ninety-day figures because they answer different
+// questions, and shared for the same reason as those: this was a third copy
+// of a very similar SELECT, and copies of these are how a whole event type
+// came to be counted by none of them.
+func loadRecentEngagement(typ string, ids []string, into map[string]*contentEventAggregates) error {
+	if db == nil || len(ids) == 0 {
+		return nil
+	}
+	rows, err := db.Query(`
+		SELECT content_id,
+			COUNT(*) FILTER (WHERE event_type IN ('like','comment','share','save')),
+			COUNT(*) FILTER (WHERE event_type = 'view')
+		FROM feed_events
+		WHERE content_id = ANY($1) AND content_type = $2
+		  AND created_at > NOW() - INTERVAL '2 hours'
+		GROUP BY content_id`, pq.Array(ids), typ)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var eng, views int
+		if err := rows.Scan(&id, &eng, &views); err != nil {
+			continue
+		}
+		if a, ok := into[id]; ok {
+			a.RecentEng, a.RecentViews = eng, views
 		}
 	}
 	return rows.Err()
