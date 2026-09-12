@@ -443,7 +443,8 @@ jobs:
       # download or encode happens to be.
       #
       # Dropping max-runtime 20m→12m costs no throughput on a real
-      # backlog: whatever is left is claimed by the next run.
+      # backlog: whatever is left is claimed by the next run. The same is
+      # true of dropping from two workers to one, below.
       - name: drain transcode queue
         env:
           BACKEND_URL: https://gobackend-9nd8.onrender.com
@@ -453,8 +454,26 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
+        # ONE worker, not two.
+        #
+        # Two of these used to run side by side on the same runner. Each can
+        # be running Whisper and a four-billion-parameter vision model, on two
+        # shared cores, while ffmpeg encodes five quality rungs next to it.
+        # A model pass that takes ninety seconds on its own does not finish in
+        # its two-minute budget against that, so it was hard-killed:
+        #
+        #   analyze: frames pass failed: signal: killed
+        #   analyze: speech pass failed: signal: killed
+        #
+        # Three kills in one run, measured on 2026-09-12. Every one of them is
+        # a video that came out with no description of what is in it — so
+        # nothing to search it by, silently, because the transcode itself
+        # succeeded and the row looked finished.
+        #
+        # Parallelism was not buying much anyway. A killed pass still spends
+        # the whole cost of getting there and throws it away, so two workers
+        # producing broken results is worse per minute than one producing
+        # whole ones.
         run: |
           go build -o /tmp/hls-worker ./cmd/hls-worker
-          /tmp/hls-worker -drain -max-runtime 12m -job-timeout 10m &
-          /tmp/hls-worker -drain -max-runtime 12m -job-timeout 10m &
-          wait
+          /tmp/hls-worker -drain -max-runtime 12m -job-timeout 10m
