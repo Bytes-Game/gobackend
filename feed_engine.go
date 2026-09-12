@@ -64,13 +64,13 @@ type SessionState struct {
 	// The same tally, keyed by every word a shown video was described by.
 	// Three nature clips filed under three different categories look varied
 	// to CategoriesSeen and repetitive here, which is the point.
-	TopicsSeen        map[string]int `json:"topicsSeen"`
-	CreatorsSeen      map[string]int `json:"creatorsSeen"`      // creatorId -> count (diversity)
-	LastEmotions      []string       `json:"lastEmotions"`      // Last ~10 items, ONE negative-priority emotion each (wellbeing spiral detection)
-	LastMoodEmotions  []string       `json:"lastMoodEmotions"`  // Last ~10 items, FIRST/dominant emotion each (mood-transition learner — must match the serve-time "to" key)
-	DopamineBudget    float64        `json:"dopamineBudget"`    // 1.0=fresh, depletes to 0
-	ResistanceLevel   int            `json:"resistanceLevel"`   // 0-3, triggers strategy switches
-	CurrentStrategy   string         `json:"currentStrategy"`   // see strategy constants below
+	TopicsSeen       map[string]int `json:"topicsSeen"`
+	CreatorsSeen     map[string]int `json:"creatorsSeen"`     // creatorId -> count (diversity)
+	LastEmotions     []string       `json:"lastEmotions"`     // Last ~10 items, ONE negative-priority emotion each (wellbeing spiral detection)
+	LastMoodEmotions []string       `json:"lastMoodEmotions"` // Last ~10 items, FIRST/dominant emotion each (mood-transition learner — must match the serve-time "to" key)
+	DopamineBudget   float64        `json:"dopamineBudget"`   // 1.0=fresh, depletes to 0
+	ResistanceLevel  int            `json:"resistanceLevel"`  // 0-3, triggers strategy switches
+	CurrentStrategy  string         `json:"currentStrategy"`  // see strategy constants below
 	// === Impression resistance (new) ===
 	ImpressionCount int `json:"impressionCount"` // Impressions collected this session
 	BounceCount     int `json:"bounceCount"`     // Impressions with dwell < 500ms
@@ -116,8 +116,8 @@ type SessionState struct {
 	// What the last few items were about, in lockstep with LastCategories, so
 	// the sequence penalty can ask how ALIKE two items are instead of whether
 	// one word matches.
-	LastTopics [][]string `json:"lastTopics"`
-	LastCreators   []string `json:"lastCreators"`
+	LastTopics   [][]string `json:"lastTopics"`
+	LastCreators []string   `json:"lastCreators"`
 	// LastEnergies runs in lockstep with LastCategories (same indices,
 	// same trim) so the trajectory model's CATEGORY × ENERGY from-state
 	// uses the REAL energy of the prior item. Before this field both
@@ -163,11 +163,11 @@ type UserProfile struct {
 	// negative rather than clamped away and pasted back later.
 	TopicAffinity map[string]float64 `json:"topicAffinity"`
 	// Subjects pushed back on hard enough to stop offering.
-	AvoidedTopics []string `json:"avoidedTopics"`
-	EnergyPreference float64            `json:"energyPreference"` // 0=chill, 1=intense
-	SocialDrive      float64            `json:"socialDrive"`      // 0=solo, 1=social
-	NoveltyTolerance float64            `json:"noveltyTolerance"` // 0=loyalist, 1=explorer
-	EgoSensitivity   float64            `json:"egoSensitivity"`   // 0=unbothered, 1=highly reactive
+	AvoidedTopics    []string `json:"avoidedTopics"`
+	EnergyPreference float64  `json:"energyPreference"` // 0=chill, 1=intense
+	SocialDrive      float64  `json:"socialDrive"`      // 0=solo, 1=social
+	NoveltyTolerance float64  `json:"noveltyTolerance"` // 0=loyalist, 1=explorer
+	EgoSensitivity   float64  `json:"egoSensitivity"`   // 0=unbothered, 1=highly reactive
 	// === Extended personality (new dimensions) ===
 	AttentionSpan        float64  `json:"attentionSpan"`        // 0=scanner/skimmer, 1=deep watcher
 	BingeIntensity       float64  `json:"bingeIntensity"`       // 0=casual dipper, 1=binger (long tail sessions)
@@ -232,14 +232,14 @@ type ContentScore struct {
 	CategorySource string `json:"categorySource,omitempty"`
 	// True when the creator and the model both had an opinion and
 	// they differ — see categoryVerdict.Disputed.
-	CategoryDisputed bool               `json:"categoryDisputed,omitempty"`
+	CategoryDisputed bool `json:"categoryDisputed,omitempty"`
 	// What the video is ABOUT, in the model's own words — "thistle",
 	// "street food", "dark fantasy". Open vocabulary, so this is the half
 	// that can describe a video the eighteen categories have no word for.
 	// Read from content_topics; see migration 006.
-	Topics           []string           `json:"topics,omitempty"`
-	Tags             []string           `json:"tags,omitempty"` // Creator's own words — see content_tags.go
-	EmotionVector    map[string]float64 `json:"emotionVector"`  // "happy":0.5, "competitive":0.3
+	Topics        []string           `json:"topics,omitempty"`
+	Tags          []string           `json:"tags,omitempty"` // Creator's own words — see content_tags.go
+	EmotionVector map[string]float64 `json:"emotionVector"`  // "happy":0.5, "competitive":0.3
 	// === Creator info (denormalized for speed) ===
 	CreatorID        string  `json:"creatorId"`
 	CreatorLeague    string  `json:"creatorLeague"`
@@ -2831,10 +2831,14 @@ func getContentScore(contentID, contentType string) *ContentScore {
 // by RATE with confidence — instead of absolute counts that bury low-volume
 // content. ratePriorStrength is measured in pseudo-impressions.
 const (
-	priorLikeRate     = 0.05
-	priorShareRate    = 0.01
-	priorCommentRate  = 0.02
-	priorRewatchRate  = 0.05
+	priorLikeRate    = 0.05
+	priorShareRate   = 0.01
+	priorCommentRate = 0.02
+	priorRewatchRate = 0.05
+	// A save is rarer than a like and rarer than a comment: it takes
+	// deciding you want this again later. Priced between a share and a
+	// comment, which is where engagementWeight puts the act itself.
+	priorSaveRate     = 0.015
 	ratePriorStrength = 20.0
 )
 
@@ -2866,36 +2870,29 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 	// Get aggregate engagement metrics — batch-warmed cache first
 	// (warmContentAggregates loads the whole candidate pool in one
 	// GROUP BY), per-item query as fallback for uncached callers.
-	var viewCount, likeCount, commentCount int
-	var avgCompletion, avgWatchMs float64
-	var skipCount, rewatchCount, shareCount, notIntCount int
+	// One query, defined once in content_agg_batch.go. This used to be a
+	// second copy of that SELECT living here, and the two of them are exactly
+	// how saves went missing: feed_events recorded them, engagementWeight
+	// priced them, and neither of these two lists asked for them — so nothing
+	// that scored content could see a save at all.
 	var warmAgg *contentEventAggregates
 	if a, ok := contentAggCache.Get(contentAggKey(contentType, contentID)); ok {
 		warmAgg = a
-		viewCount, likeCount, commentCount = a.ViewCount, a.LikeCount, a.CommentCount
-		skipCount, rewatchCount, shareCount, notIntCount = a.SkipCount, a.RewatchCount, a.ShareCount, a.NotInterestedCount
-		avgCompletion, avgWatchMs = a.AvgCompletion, a.AvgWatchMs
 	} else {
-		db.QueryRow(`
-		SELECT
-			COUNT(*) FILTER (WHERE event_type = 'view'),
-			COUNT(*) FILTER (WHERE event_type = 'like'),
-			COUNT(*) FILTER (WHERE event_type = 'comment'),
-			COUNT(*) FILTER (WHERE event_type = 'skip'),
-			COUNT(*) FILTER (WHERE event_type = 'rewatch'),
-			COUNT(*) FILTER (WHERE event_type = 'share'),
-			COUNT(*) FILTER (WHERE event_type = 'not_interested'),
-			COALESCE(AVG(completion_rate) FILTER (WHERE event_type = 'view'), 0),
-			COALESCE(AVG(watch_duration_ms) FILTER (WHERE event_type = 'view'), 0)
-		FROM feed_events
-		WHERE content_id = $1 AND content_type = $2
-		  AND created_at > NOW() - INTERVAL '90 days'`,
-			contentID, contentType).Scan(
-			&viewCount, &likeCount, &commentCount,
-			&skipCount, &rewatchCount, &shareCount, &notIntCount,
-			&avgCompletion, &avgWatchMs,
-		)
+		one := map[string]*contentEventAggregates{contentID: {}}
+		if err := loadEngagementAggregates(contentType, []string{contentID}, one); err != nil {
+			log.Printf("computeContentScore aggregates for %s/%s: %v", contentType, contentID, err)
+		}
+		warmAgg = one[contentID]
 	}
+	if warmAgg == nil {
+		warmAgg = &contentEventAggregates{}
+	}
+	viewCount, likeCount, commentCount := warmAgg.ViewCount, warmAgg.LikeCount, warmAgg.CommentCount
+	skipCount, rewatchCount := warmAgg.SkipCount, warmAgg.RewatchCount
+	shareCount, saveCount := warmAgg.ShareCount, warmAgg.SaveCount
+	notIntCount := warmAgg.NotInterestedCount
+	avgCompletion, avgWatchMs := warmAgg.AvgCompletion, warmAgg.AvgWatchMs
 
 	cs.ViewCount = viewCount
 	cs.LikeCount = likeCount
@@ -2924,6 +2921,7 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 	shareRate := smoothedRate(float64(shareCount), trials, priorShareRate, ratePriorStrength)
 	commentRate := smoothedRate(float64(commentCount), trials, priorCommentRate, ratePriorStrength)
 	rewatchRate := smoothedRate(float64(rewatchCount), trials, priorRewatchRate, ratePriorStrength)
+	saveRate := smoothedRate(float64(saveCount), trials, priorSaveRate, ratePriorStrength)
 
 	// Completion is neutral until we actually have watch data — don't punish a
 	// video for having no views yet.
@@ -2946,8 +2944,16 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 	shareQ := math.Min(1.0, shareRate/(priorShareRate*3))
 	commentQ := math.Min(1.0, commentRate/(priorCommentRate*3))
 	rewatchQ := math.Min(1.0, rewatchRate/(priorRewatchRate*3))
-	cs.QualityScore = (completionScore*0.25 + likeQ*0.15 + shareQ*0.25 +
-		rewatchQ*0.20 + commentQ*0.15) * (1.0 - cs.SkipRate*0.5)
+	saveQ := math.Min(1.0, saveRate/(priorSaveRate*3))
+
+	// Saving is the second-strongest thing somebody can do — they are saying
+	// they want this again later — and until now it was worth nothing here.
+	// The event was recorded and priced everywhere else in the app; the two
+	// copies of the aggregate query simply never asked for it. Weighted below
+	// sharing (telling someone else) and above liking.
+	cs.QualityScore = (completionScore*0.25 + likeQ*0.12 + shareQ*0.22 +
+		rewatchQ*0.18 + commentQ*0.13 + saveQ*0.10) *
+		(1.0 - cs.SkipRate*0.5) * notInterestedPenalty(notIntCount, viewCount)
 
 	// Trending asks one question: of the people who saw this in the last two
 	// hours, how many acted, and is that better than other videos being shown
@@ -3452,7 +3458,19 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 
 	// ── QUALITY ──
 	// Creator reputation + content engagement metrics
-	quality := cs.QualityScore
+	// A battle counts as three times a short — the one rule, in
+	// battle_preference.go.
+	//
+	// Applied HERE, in the ranking, rather than where the quality figure is
+	// built. Not every ranked item comes through computeContentScore: some
+	// callers assemble a ContentScore themselves, and putting the preference
+	// in the loader meant those items silently got none at all. This function
+	// is the one thing every ranked item goes through.
+	//
+	// It replaces a flat +0.30 to +0.50 added further down, which was far
+	// larger than three times anything and could not be checked against a
+	// claim.
+	quality := math.Min(1, cs.QualityScore*battleEngagementMultiplier(cs.ResponseCount))
 	// League bonus
 	switch cs.CreatorLeague {
 	case "Diamond":
@@ -3529,38 +3547,22 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	}
 	breakdown["dwellIntentBoost"] = dwellBoost
 
-	// ── BATTLE BOOST (core product bias) ──
-	// devf is a head-to-head challenge app. A challenge with at least one
-	// response (a "battle") is the main event — two creators going at it,
-	// votable, watchable end-to-end. A challenge with zero responses is a
-	// "short": surfaced for content volume but not the primary surface we
-	// want users to associate with the app. Without an explicit battle bias,
-	// shorts dominate the feed because (a) every challenge starts as a short
-	// before it gets a response and (b) shorts vastly outnumber battles in
-	// any normal content library. This term makes the ranker prefer battles
-	// strongly — never a hard filter (we still need shorts to fill volume),
-	// but a thumb on the scale that's hard to outweigh.
+	// ── BATTLE BOOST ──
+	//
+	// Gone from here, on purpose. It used to add +0.30 to +0.50 to a battle
+	// and take 0.10 off a short, which is a large, unexplained thumb on the
+	// scale — and it disagreed with the two other places in the app that also
+	// preferred battles, each by a different amount.
+	//
+	// The preference now lives in one place, battle_preference.go, and says
+	// something checkable: a battle counts as three times the engagement of
+	// the same video posted as a short. It is applied to the quality figure
+	// in computeContentScore, so it is already inside baseScore by the time
+	// this runs.
+	//
+	// Kept as a zero so the diagnostics breakdown still has the key and
+	// anything reading it keeps working.
 	battleBoost := 0.0
-	if cs.ContentType == "challenge" {
-		if cs.ResponseCount > 0 {
-			// Base battle bonus is large enough to lift a battle one or two
-			// rank steps over a comparable short. Logarithmic scaling on
-			// response count: a battle with 1 response gets +0.30; one with
-			// 5 responses gets ~+0.41; with 20+ ~+0.50 cap. Coefficient 0.20 (not
-			// 0.10) so the log term spans the full 0.30→0.50 range over the ~21-
-			// response window; at 0.10 the boost topped out near 0.40 and the 0.50
-			// clamp was effectively dead (only reached at ~442 responses).
-			battleBoost = 0.30 + 0.20*math.Log1p(float64(cs.ResponseCount-1))/math.Log1p(20)
-			if battleBoost > 0.50 {
-				battleBoost = 0.50
-			}
-		} else {
-			// Light penalty on shorts so two equally-scored items always tie
-			// in favor of the battle. -0.10 is enough to break ties without
-			// pushing shorts off the feed entirely.
-			battleBoost = -0.10
-		}
-	}
 	breakdown["battleBoost"] = battleBoost
 
 	// ── SOCIAL-DRIVE WEIGHTING ──
@@ -6903,3 +6905,41 @@ func getContentEmotions(contentID, contentType string) []string {
 // query per call and were called per event/impression. Callers now read
 // cs.Category / cs.CreatorID off the cached getContentScore, which also applies
 // inferCategory so the category key matches what the ranker reads.)
+
+// notInterestedPenalty is how much a video is held back by people explicitly
+// saying they do not want it.
+//
+// "Not interested" was recorded, carried all the way into ContentScore, and
+// then read by nothing. A skip is ambiguous — people scroll past things they
+// like — but tapping not-interested is unambiguous, and it counted for
+// nothing at all.
+//
+// A rate, not a count, so it means the same on a video shown ten times and one
+// shown ten million. Floored so that even heavily disliked content is damped
+// rather than erased: it still has to be rankable, because it is somebody's
+// upload and other people may want it.
+func notInterestedPenalty(notInterested, views int) float64 {
+	if notInterested <= 0 || views <= 0 {
+		return 1
+	}
+	rate := float64(notInterested) / float64(views)
+	if rate > 1 {
+		rate = 1
+	}
+	// At a 10% not-interested rate a video keeps about two thirds of its
+	// quality; at 50% it keeps the floor.
+	p := 1 - rate*notInterestedSeverity
+	if p < notInterestedFloor {
+		p = notInterestedFloor
+	}
+	return p
+}
+
+const (
+	// notInterestedSeverity turns the rate into how much is taken away.
+	notInterestedSeverity = 3.0
+	// notInterestedFloor is the least a video can be left with. Damped, not
+	// erased — a hard zero would make one brigade of taps delete an upload
+	// from the platform.
+	notInterestedFloor = 0.35
+)

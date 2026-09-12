@@ -602,7 +602,8 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 		// same table the feed and the taste profiles use. See
 		// search_engagement.go for why search no longer has its own opinion
 		// about what a like is worth.
-		eng := searchEngagementScore(aggs[ch.ID], ch.Views, ch.Likes)
+		eng := searchEngagementScore(aggs[ch.ID], ch.Views, ch.Likes,
+			battleEngagementMultiplier(ch.ResponseCount))
 
 		// Recency — 14-day half-life. Search expects fresher results than For
 		// You does (you typically search for a current trend, not an
@@ -660,14 +661,11 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 		}
 		_ = userID // per-user CTR could key on (user, query) later; global CTR ships first
 
-		// Quality nudge — a battle (responseCount > 0) is more interactive
-		// content than a static short. Tiny bonus so battles edge out shorts
-		// at near-tie lexical score, mirroring TikTok's preference for
-		// interactive results in search.
-		qualityNudge := 0.0
-		if ch.ResponseCount > 0 {
-			qualityNudge = 0.05
-		}
+		// A battle counts as three times a short — the one rule, in
+		// battle_preference.go, applied to the engagement figure above
+		// rather than as a bonus of search's own invention. The +0.05 that
+		// used to sit here worked out to roughly a HUNDRED times audience
+		// advantage, which nothing said and nobody would have guessed.
 
 		// Learned click-through prior for THIS query + intent-category
 		// nudge — the two additions that make search self-correct.
@@ -684,7 +682,7 @@ func rankSearchChallenges(query, userID string, profile *UserProfile, following 
 		// Relevance is added at a fraction of its weight, purely as a
 		// tiebreak, so two equally popular videos are separated by which
 		// one matches better.
-		popularity := 0.20*eng + 0.20*recency + personalBoost + qualityNudge + ctr + intentBoost
+		popularity := 0.20*eng + 0.20*recency + personalBoost + ctr + intentBoost
 		if popularity < 0 {
 			popularity = 0
 		}

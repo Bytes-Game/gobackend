@@ -71,7 +71,11 @@ const searchViewSquash = 4.0
 // floor: whichever source knows more about a video is the one that decides.
 // Without that, every video uploaded before events were recorded would look
 // like nobody had ever watched it.
-func searchEngagementScore(agg *contentEventAggregates, views, likes int) float64 {
+// weight multiplies the audience before it is compressed, so a caller can say
+// "count this as three times the video it is" and get exactly that — three
+// times the engagement, not three times the score, which after a logarithm are
+// very different things.
+func searchEngagementScore(agg *contentEventAggregates, views, likes int, weight float64) float64 {
 	audience, reaction := 0.0, 0.0
 	if agg != nil {
 		audience = float64(agg.ViewCount) * searchViewValue(agg.AvgCompletion)
@@ -79,6 +83,7 @@ func searchEngagementScore(agg *contentEventAggregates, views, likes int) float6
 		// Each action priced by the one table the whole app uses.
 		reaction += float64(agg.ShareCount) * engagementWeight("share", 0)
 		reaction += float64(agg.RewatchCount) * engagementWeight("rewatch", 0)
+		reaction += float64(agg.SaveCount) * engagementWeight("save", 0)
 		reaction += float64(agg.CommentCount) * engagementWeight("comment", 0)
 		reaction += float64(agg.LikeCount) * engagementWeight("like", 0)
 		// And what people did that was not positive. A video most people
@@ -108,6 +113,10 @@ func searchEngagementScore(agg *contentEventAggregates, views, likes int) float6
 		// audience keeps a real signal instead of discarding it because the
 		// log is incomplete.
 		audience = reaction
+	}
+
+	if weight > 0 {
+		audience *= weight
 	}
 
 	rate := reaction / audience

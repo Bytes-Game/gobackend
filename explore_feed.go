@@ -358,6 +358,11 @@ func exploreScore(cs *ContentScore, ns *negativeSignals, rewatchPenalty float64)
 	quality := cs.QualityScore
 	views := float64(cs.ViewCount)
 	likes := float64(cs.LikeCount)
+	// A battle counts as three times a short — the one rule, in
+	// battle_preference.go, applied to the audience before it is compressed
+	// so it means three times the engagement rather than three times the
+	// score. Those are very different things once a logarithm is involved.
+	views *= battleEngagementMultiplier(cs.ResponseCount)
 	popularity := 0.0
 	if views > 0 {
 		// log10(views) + 3 * (likes/views)
@@ -385,22 +390,10 @@ func exploreScore(cs *ContentScore, ns *negativeSignals, rewatchPenalty float64)
 	breakdown["popularity"] = popularity
 	breakdown["recency"] = recency
 
-	// Battle vs short bias — same product reasoning as scoreForUser's
-	// battleBoost. Explore is even more vulnerable to the short flood
-	// because it has no follow-graph or collaborative lanes to pull battles
-	// in from. Magnitude here is half of For You's so explore stays
-	// recency-led overall, but battles still beat shorts at parity.
+	// The battle preference itself is no longer a bonus of explore's own
+	// invention. It is the multiplier above, so explore, the For You feed and
+	// search all mean the same thing by "a battle is worth more".
 	battleBoost := 0.0
-	if cs.ContentType == "challenge" {
-		if cs.ResponseCount > 0 {
-			battleBoost = 0.15
-			if cs.ResponseCount >= 5 {
-				battleBoost = 0.20
-			}
-		} else {
-			battleBoost = -0.05
-		}
-	}
 	breakdown["battleBoost"] = battleBoost
 
 	// Freshness-to-this-user nudge, mirroring scoreForUser's unseenBonus and
