@@ -1905,6 +1905,11 @@ func GetChallengeByID(idStr string) (Challenge, bool) {
 // Authorization (creator-only) is enforced at the handler layer,
 // NOT here, so internal callers (admin moderation, scheduled GC)
 // can use this directly.
+// errChallengeNotFound is returned, wrapped, when an id names no challenge.
+// A sentinel rather than a message so a caller deciding what to report can
+// use errors.Is instead of comparing text that is free to change.
+var errChallengeNotFound = errors.New("no such challenge")
+
 func DeleteChallengeByID(idStr string) error {
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
@@ -1923,7 +1928,9 @@ func DeleteChallengeByID(idStr string) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("no challenge with id %d", id)
+		// Wrapped so callers can tell "that id names nothing" from a real
+		// failure without matching on the wording — see isNoSuchChallenge.
+		return fmt.Errorf("%w: %d", errChallengeNotFound, id)
 	}
 
 	// Queued, not done here: clearing a bucket is slow and can fail, and
