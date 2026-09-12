@@ -269,7 +269,10 @@ type pendingJob struct {
 type reportPayload struct {
 	ChallengeID string `json:"challengeId"`
 	ManifestURL string `json:"manifestUrl"`
-	Kind        string `json:"kind"`
+	// Public URL of the still frame, empty when one could not be made.
+	// Optional on the wire so an older backend simply ignores it.
+	ThumbnailURL string `json:"thumbnailUrl,omitempty"`
+	Kind         string `json:"kind"`
 	// What the video turned out to be, from looking at it — see analyze.go.
 	// Omitted entirely when no pass produced anything, so a backend that
 	// does not understand the field, or a worker with no optional binaries
@@ -318,6 +321,7 @@ func reportComplete(cfg *workerConfig, job pendingJob, done jobResult) error {
 	body, _ := json.Marshal(reportPayload{
 		ChallengeID:   job.ChallengeID,
 		ManifestURL:   done.ManifestURL,
+		ThumbnailURL:  done.ThumbnailURL,
 		Kind:          jobKind(job),
 		Analysis:      done.Analysis,
 		VideoVariants: done.VideoVariants,
@@ -360,6 +364,7 @@ func reportFail(cfg *workerConfig, job pendingJob, reason string) error {
 // positional returns stop saying which is which somewhere around the third.
 type jobResult struct {
 	ManifestURL   string
+	ThumbnailURL  string
 	Analysis      json.RawMessage
 	VideoVariants map[string]string
 }
@@ -480,8 +485,25 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (jobResu
 	// either way — a missing optional binary must not block an upload.
 	analysis := analysisJSON(analyzeVideo(ctx, srcPath))
 
+	// One still frame, so the app has something to show while the video
+	// opens. Never fatal, for the same reason analysis is not: a video with
+	// no poster is the video people already had, and failing the job over a
+	// picture would trade a working reel for a black rectangle.
+	thumbURL := ""
+	if posterPath, err := makePoster(ctx, srcPath, work); err != nil {
+		log.Printf("poster for %s=%s: %v", jobKind(job), job.ChallengeID, err)
+	} else {
+		key := prefix + "/poster.jpg"
+		if err := uploadFile(ctx, cfg, posterPath, key); err != nil {
+			log.Printf("poster upload for %s=%s: %v", jobKind(job), job.ChallengeID, err)
+		} else {
+			thumbURL = base + "/" + key
+		}
+	}
+
 	return jobResult{
 		ManifestURL:   manifestURL,
+		ThumbnailURL:  thumbURL,
 		Analysis:      analysis,
 		VideoVariants: variants,
 	}, nil
