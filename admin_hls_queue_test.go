@@ -128,7 +128,7 @@ func TestHLSQueueState_CoversEveryLegOfTheClaimQuery(t *testing.T) {
 	// The test above can only check legs it knows about. This one notices a
 	// NEW leg being added to the claim query, so nobody has to remember that
 	// this endpoint exists.
-	sql := claimSQL(t)
+	sql := claimWhere(t)
 	legs := regexp.MustCompile(`\bAND\b`).FindAllString(sql, -1)
 	// hls_manifest_url = '' is the first condition, so it has no AND; the
 	// cool-off leg is a single AND holding an OR of two.

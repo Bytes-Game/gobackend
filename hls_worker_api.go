@@ -74,6 +74,30 @@ const maxHLSAttempts = 5
 // broken; a video that fails five times in a second has told us nothing.
 const hlsRetryCooloff = 10 * time.Minute
 
+// hlsAgeOut is how long a video may sit unconverted before it stops going to
+// the back of the queue.
+//
+// The worker takes the NEWEST waiting video, which is the right instinct: a
+// video somebody just posted should become watchable in minutes, not after
+// everything older has been dealt with.
+//
+// Taken absolutely it starves the old ones. A video loses to every upload
+// that arrives after it, so on a busy day it never reaches the front at all,
+// and nothing anywhere reports that. Measured here: eleven videos had been
+// waiting with the try counter still on zero — never offered to a worker even
+// once. The oldest had been waiting a week.
+//
+// So newest-first is a preference, not a rule. Past this age a video jumps
+// ahead of the fresh ones, and among those the longest wait goes first.
+//
+// One hour is a product decision, not a derived number: an hour after upload,
+// your video stops being at the back of the queue. What is NOT a free choice
+// is that it must comfortably exceed how long one conversion takes, or a
+// video being handled perfectly normally would look overdue and the two
+// orderings would fight. The worker's own per-video ceiling is its
+// -job-timeout, and a test holds this above it.
+const hlsAgeOut = 1 * time.Hour
+
 // hlsKindResponse marks a job/report as targeting the
 // challenge_responses table; anything else (including the empty string
 // older workers send) means the challenges table. Battle responses get
@@ -161,6 +185,23 @@ func workerAuthed(h http.HandlerFunc) http.HandlerFunc {
 // "In progress" is encoded as hls_manifest_url = 'PENDING' so the
 // partial index challenges_pending_hls_idx (defined in
 // runMigrations) skips it too.
+// hlsClaimableWhere is the one definition of "a worker could take this now".
+//
+// Two places need it and they must never disagree: the claim query, which
+// hands a video to a worker, and the dispatcher, which decides whether
+// starting a worker is worth doing at all. A dispatcher that thinks there is
+// work when the claim query disagrees starts a run that finds nothing — every
+// few minutes, forever, silently.
+//
+// $1 is the retry cool-off in seconds.
+func hlsClaimableWhere() string {
+	return `hls_manifest_url = ''
+			      AND video_url <> ''
+			      AND hls_attempts < ` + strconv.Itoa(maxHLSAttempts) + `
+			      AND (hls_claimed_at IS NULL
+			           OR hls_claimed_at < NOW() - INTERVAL '1 second' * $1)`
+}
+
 func HLSNextPendingHandler(w http.ResponseWriter, r *http.Request) {
 	if db == nil {
 		http.Error(w, "db unavailable", http.StatusServiceUnavailable)
@@ -186,16 +227,21 @@ func HLSNextPendingHandler(w http.ResponseWriter, r *http.Request) {
 			       hls_attempts     = hls_attempts + 1
 			 WHERE id = (
 			   SELECT id FROM `+table+`
-			    WHERE hls_manifest_url = ''
-			      AND video_url <> ''
-			      AND hls_attempts < `+strconv.Itoa(maxHLSAttempts)+`
-			      AND (hls_claimed_at IS NULL
-			           OR hls_claimed_at < NOW() - INTERVAL '1 second' * $1)
-			    ORDER BY created_at DESC
+			    WHERE `+hlsClaimableWhere()+`
+			    ORDER BY
+			      -- Anything that has waited too long comes first.
+			      CASE WHEN created_at < NOW() - INTERVAL '1 second' * $2
+			           THEN 0 ELSE 1 END,
+			      -- Among those, the one that has waited longest.
+			      CASE WHEN created_at < NOW() - INTERVAL '1 second' * $2
+			           THEN created_at END ASC,
+			      -- Among the rest, the newest, so a fresh upload is quick.
+			      created_at DESC
 			    LIMIT 1
 			    FOR UPDATE SKIP LOCKED
 			 )
-			 RETURNING id, video_url`, int(hlsRetryCooloff.Seconds()))
+			 RETURNING id, video_url`,
+			int(hlsRetryCooloff.Seconds()), int(hlsAgeOut.Seconds()))
 		var idInt int
 		var srcURL string
 		if err := row.Scan(&idInt, &srcURL); err != nil {
