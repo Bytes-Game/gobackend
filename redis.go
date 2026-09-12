@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -18,18 +20,19 @@ var rctx = context.Background()
 
 // InitRedis connects to the Valkey instance.
 // It reads the connection URL from VALKEY_URL (preferred) or REDIS_URL.
-func InitRedis() {
+// Returns an error rather than exiting — see boot_gate.go.
+func InitRedis() error {
 	url := os.Getenv("VALKEY_URL")
 	if url == "" {
 		url = os.Getenv("REDIS_URL")
 	}
 	if url == "" {
-		log.Fatal("VALKEY_URL (or REDIS_URL) environment variable is required")
+		return errors.New("VALKEY_URL (or REDIS_URL) is not set")
 	}
 
 	opts, err := redis.ParseURL(url)
 	if err != nil {
-		log.Fatalf("Invalid Valkey/Redis URL: %v", err)
+		return fmt.Errorf("VALKEY_URL is not a valid Redis URL: %w", err)
 	}
 
 	rdb = redis.NewClient(opts)
@@ -38,9 +41,10 @@ func InitRedis() {
 	defer cancel()
 
 	if err := rdb.Ping(ctxTimeout).Err(); err != nil {
-		log.Fatalf("Failed to connect to Valkey: %v", err)
+		return fmt.Errorf("cannot reach Valkey/Redis: %w", err)
 	}
 	log.Println("Connected to Valkey")
+	return nil
 }
 
 // StoreNotificationInRedis appends a notification to the user's Valkey list.

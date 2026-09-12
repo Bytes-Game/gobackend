@@ -447,8 +447,21 @@ func rateLimitMiddleware(limiter *rateLimiter) mux.MiddlewareFunc {
 
 // main is the entry point for the application.
 func main() {
-	InitDatabase()
-	InitRedis()
+	// The port is bound FIRST, before anything that can fail.
+	//
+	// This app used to exit if the database or Redis was unreachable, which
+	// from outside looked like nothing at all: no status code, no page, just a
+	// connection that hung until the caller gave up. It happened, and the
+	// service was down for four days with a health check that could only time
+	// out. See boot_gate.go.
+	gate := newBootGate()
+	srv, port := startListening(gate)
+
+	// Retried, not fatal. A database that comes back in an hour finds the app
+	// waiting for it, and until then every request is answered with a 503 that
+	// says which dependency is missing.
+	gate.bringUp("database", InitDatabase)
+	gate.bringUp("valkey", InitRedis)
 	InitMeilisearch()
 	// Warn loudly (but don't crash) if the session-token signing key is missing,
 	// so it's noticed at boot rather than on the first failed login.
@@ -685,10 +698,7 @@ func main() {
 	// works when the change is visible from outside and is guesswork even
 	// then. Render sets RENDER_GIT_COMMIT; anywhere else this is empty and the
 	// field simply says "unknown" rather than pretending.
-	buildCommit := os.Getenv("RENDER_GIT_COMMIT")
-	if buildCommit == "" {
-		buildCommit = "unknown"
-	}
+	buildCommit := buildCommitID()
 	startedAt := time.Now().UTC().Format(time.RFC3339)
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -700,26 +710,10 @@ func main() {
 		})
 	}).Methods("GET")
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8081"
-	}
-
-	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      corsMiddleware(r),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
-
-	// Graceful shutdown
-	go func() {
-		log.Printf("Starting server on :%s...\n", port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Could not start server: %s\n", err)
-		}
-	}()
+	// Everything is up and the routes are built: swap the real router in
+	// behind the port that has been answering since startup.
+	gate.ready(corsMiddleware(r))
+	log.Printf("Serving on :%s\n", port)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
