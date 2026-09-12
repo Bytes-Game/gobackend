@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -23,16 +24,19 @@ var db *sql.DB
 
 // InitDatabase connects to PostgreSQL, runs schema migrations, and seeds
 // sample data if the tables are empty.
-func InitDatabase() {
+// Returns an error rather than exiting. The caller retries and, while it is
+// failing, the app says so on /health instead of disappearing — see
+// boot_gate.go for why that distinction cost four days of silent downtime.
+func InitDatabase() error {
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
-		log.Fatal("DATABASE_URL environment variable is required")
+		return errors.New("DATABASE_URL is not set")
 	}
 
 	var err error
 	db, err = sql.Open("postgres", connStr)
 	if err != nil {
-		log.Fatalf("Failed to open database: %v", err)
+		return fmt.Errorf("cannot open database: %w", err)
 	}
 
 	db.SetMaxOpenConns(25)
@@ -40,12 +44,15 @@ func InitDatabase() {
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	if err = db.Ping(); err != nil {
-		log.Fatalf("Failed to ping database: %v", err)
+		return fmt.Errorf("cannot reach database: %w", err)
 	}
 	log.Println("Connected to PostgreSQL")
 
-	runMigrations()
+	if err := runMigrations(); err != nil {
+		return err
+	}
 	seedIfEmpty()
+	return nil
 }
 
 // runMigrations creates all required tables idempotently.
@@ -233,7 +240,7 @@ const alterStmts = `
 	);
 	`
 
-func runMigrations() {
+func runMigrations() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS users (
 		id          SERIAL PRIMARY KEY,
@@ -539,7 +546,7 @@ func runMigrations() {
 	`
 
 	if _, err := db.Exec(schema); err != nil {
-		log.Fatalf("Migration failed: %v", err)
+		return fmt.Errorf("base schema failed: %w", err)
 	}
 
 	// Column additions live in the package-level alterStmts.
@@ -731,10 +738,18 @@ func runMigrations() {
 	// Versioned, run-once migrations on top of the idempotent baseline above.
 	// Everything from here on that CHANGES the schema (rather than adding to
 	// it) lives in migrations/*.sql — see schema_migrations.go for why, and
-	// migrations/README.md for how to write one. Fatal on failure by design.
-	applyVersionedMigrations()
+	// migrations/README.md for how to write one.
+	//
+	// Still refuses to serve on failure. The difference is that it now refuses
+	// out loud: the error goes back to the caller, which keeps the port bound
+	// and reports it, rather than killing the process and leaving every
+	// request to hang.
+	if err := applyVersionedMigrations(); err != nil {
+		return err
+	}
 
 	log.Println("Database migrations completed")
+	return nil
 }
 
 // --------------------------------------------------------------------------
@@ -1772,8 +1787,8 @@ func queryChallenges(query string, args ...interface{}) []Challenge {
 			}
 
 			result = append(result, Challenge{
-				VideoVariants:  variants,
-				HLSManifestURL: manifestURL,
+				VideoVariants:   variants,
+				HLSManifestURL:  manifestURL,
 				ID:              strconv.Itoa(id),
 				CreatorID:       strconv.Itoa(creatorID),
 				CreatorUsername: username,

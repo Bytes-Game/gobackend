@@ -161,19 +161,23 @@ func loadMigrations() ([]migration, error) {
 // applyVersionedMigrations brings the connected database up to date.
 //
 // Called from runMigrations() AFTER the idempotent baseline schema, so a
-// migration here can rely on every baseline table existing. Fatal on any
-// failure — see the SAFETY note at the top of this file.
-func applyVersionedMigrations() {
+// migration here can rely on every baseline table existing.
+//
+// Refuses to proceed on any failure — see the SAFETY note at the top of this
+// file. It now does that by returning the error rather than killing the
+// process: the caller keeps the port bound and reports the reason on /health,
+// instead of the whole app vanishing and every request hanging.
+func applyVersionedMigrations() error {
 	if db == nil {
-		return
+		return nil
 	}
 
 	pending, err := loadMigrations()
 	if err != nil {
-		log.Fatalf("Migration setup failed: %v", err)
+		return fmt.Errorf("migration setup failed: %w", err)
 	}
 	if len(pending) == 0 {
-		return
+		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), migrationLockTimeout)
@@ -185,13 +189,13 @@ func applyVersionedMigrations() {
 	// does nothing and leaves the real lock held until that backend exits.
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		log.Fatalf("Migration failed: could not acquire a database connection: %v", err)
+		return fmt.Errorf("migration failed: could not acquire a database connection: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, migrationLockKey); err != nil {
-		log.Fatalf("Migration failed: could not take the migration lock "+
-			"(another instance may be mid-migration, or it died holding the lock): %v", err)
+		return fmt.Errorf("migration failed: could not take the migration lock "+
+			"(another instance may be mid-migration, or it died holding the lock): %w", err)
 	}
 	defer func() {
 		// Best-effort release on a fresh context: ctx may already be expired
@@ -211,12 +215,12 @@ func applyVersionedMigrations() {
 			checksum   TEXT NOT NULL DEFAULT '',
 			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`); err != nil {
-		log.Fatalf("Migration failed: could not create schema_migrations: %v", err)
+		return fmt.Errorf("migration failed: could not create schema_migrations: %w", err)
 	}
 
 	applied, err := loadAppliedMigrations(ctx, conn)
 	if err != nil {
-		log.Fatalf("Migration failed: could not read schema_migrations: %v", err)
+		return fmt.Errorf("migration failed: could not read schema_migrations: %w", err)
 	}
 
 	ran := 0
@@ -237,7 +241,7 @@ func applyVersionedMigrations() {
 		}
 
 		if err := applyOneMigration(ctx, conn, m); err != nil {
-			log.Fatalf("Migration %q failed (rolled back, nothing was applied): %v",
+			return fmt.Errorf("migration %q failed (rolled back, nothing was applied): %w",
 				m.version, err)
 		}
 		log.Printf("Applied migration %s", m.version)
@@ -247,6 +251,7 @@ func applyVersionedMigrations() {
 	if ran > 0 {
 		log.Printf("Schema migrations: %d applied, %d already present", ran, len(pending)-ran)
 	}
+	return nil
 }
 
 // loadAppliedMigrations returns version -> checksum for everything already run.
