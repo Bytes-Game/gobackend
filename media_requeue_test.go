@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -72,35 +74,104 @@ func TestRequeue_BatchSizeIsBounded(t *testing.T) {
 	}
 }
 
-func TestRequeue_OnlyEverTouchesFinishedRows(t *testing.T) {
-	// The three states a row can be in are '' (waiting), 'PENDING' (a worker
-	// is holding it right now) and a real URL (done). Only the third may be
-	// reset — resetting the other two would either do nothing or yank a job
-	// out from under a worker mid-transcode, and the completion callback
-	// would then write a manifest for a row that had been re-queued.
+// requeueUpdates returns the two UPDATE statements in media_requeue.go, one
+// per path, with their whitespace collapsed.
+//
+// Split rather than searched, because the two paths are allowed to differ now
+// and a whole-file search cannot tell which one it found. Counting matches
+// across the file was the previous approach and it would pass happily with a
+// guard in one statement and a hole in the other — which is exactly what a
+// guard test must not do.
+func requeueUpdates(t *testing.T) (batch, byID string) {
+	t.Helper()
+	src := readSourceFile(t, "media_requeue.go")
+	split := strings.Index(src, "func requeueByID(")
+	if split < 0 {
+		t.Fatal("requeueByID is gone; move these tests with it")
+	}
+	flat := func(s string) string {
+		i := strings.Index(s, "SET hls_manifest_url = ''")
+		if i < 0 {
+			t.Fatal("no re-queue UPDATE found in one half of media_requeue.go")
+		}
+		s = s[i:]
+		// Stop at the end of the SQL literal, so one path cannot be read as
+		// containing a guard that actually lives further down the file.
+		j := strings.Index(s, "`,")
+		if j < 0 {
+			t.Fatal("could not find the end of the re-queue SQL")
+		}
+		s = s[:j]
+		// The table name and the attempt cap are Go expressions spliced into
+		// the SQL. Resolve them so the test can talk about the values.
+		s = strings.ReplaceAll(s, "`+strconv.Itoa(maxHLSAttempts)+`",
+			strconv.Itoa(maxHLSAttempts))
+		s = strings.ReplaceAll(s, "`+table+`", "the_table")
+		return regexp.MustCompile(`\s+`).ReplaceAllString(s, " ")
+	}
+	return flat(src[:split]), flat(src[split:])
+}
+
+func TestRequeue_NeverDisturbsAVideoAWorkerIsHolding(t *testing.T) {
+	// 'PENDING' means a worker has this video right now. Resetting it lets a
+	// second worker claim the same video, and the first one's completion
+	// callback then writes a manifest over the reset.
 	//
 	// Source-level because the guard is a WHERE clause, and a WHERE clause
-	// that loses a leg still compiles and still returns rows.
-	//
-	// Counted, not just found. There are two UPDATEs in this file now — the
-	// oldest-first batch and the named-ids one — and a guard present in one
-	// of them satisfies a plain Contains while the other quietly reaches rows
-	// it must not touch.
-	src := readSourceFile(t, "media_requeue.go")
-	for _, guard := range []string{
-		`hls_manifest_url <> ''`,
-		`hls_manifest_url <> 'PENDING'`,
-		// A row with no source video can never transcode; queueing it just
-		// burns attempts until it hits the retry cap.
-		`COALESCE(video_url, '') <> ''`,
-	} {
-		if got := strings.Count(src, guard); got < 2 {
-			t.Errorf("%s appears in %d of the 2 UPDATE statements.\n\nEvery "+
-				"path that clears the transcoded mark needs it: without it a "+
-				"re-queue can reset a row a worker is holding right now, and "+
-				"that worker's completion callback then overwrites the reset.",
-				guard, got)
+	// that loses a leg still compiles and still returns rows — against real
+	// video.
+	batch, byID := requeueUpdates(t)
+	for name, sql := range map[string]string{"batch": batch, "by id": byID} {
+		if !strings.Contains(sql, "hls_manifest_url <> 'PENDING'") {
+			t.Errorf("the %s path can reset a video a worker is holding", name)
 		}
+		if !strings.Contains(sql, "COALESCE(video_url, '') <> ''") {
+			t.Errorf("the %s path can queue a row with no source video, "+
+				"which can only ever fail", name)
+		}
+	}
+}
+
+func TestRequeue_BatchPathOnlyTakesFinishedVideos(t *testing.T) {
+	// The batch path walks the oldest videos so they get the benefit of a
+	// better worker. That only makes sense for videos that finished. A video
+	// still waiting its turn is already queued, and one that never finished
+	// is a different problem — see the by-id path below, which is where
+	// somebody names it deliberately.
+	batch, _ := requeueUpdates(t)
+	if !strings.Contains(batch, "hls_manifest_url <> '' AND") ||
+		strings.Contains(batch, "OR hls_attempts") {
+		t.Error("the oldest-first batch no longer restricts itself to videos " +
+			"that finished, so a routine re-encode sweep can now reach videos " +
+			"that are mid-queue or broken")
+	}
+}
+
+func TestRequeue_ByIDRescuesAVideoTheQueueGaveUpOn(t *testing.T) {
+	// This is the case the endpoint exists for and the one it used to refuse.
+	//
+	// A video with no transcode and no attempts left is stranded: the worker
+	// will not offer it again, so nothing plays and nothing retries. Fifteen
+	// were in that state in production, and naming every one of them returned
+	// "skipped" with no way to do anything about it.
+	_, byID := requeueUpdates(t)
+
+	rescue := "(hls_manifest_url <> '' OR hls_attempts >= " +
+		strconv.Itoa(maxHLSAttempts) + ")"
+	if !strings.Contains(byID, rescue) {
+		t.Errorf("naming a video by id cannot rescue one the queue gave up "+
+			"on.\n\nexpected the guard to read %s\n              got: %s",
+			rescue, byID)
+	}
+
+	// The other half of the same guard: a video that is simply waiting its
+	// turn must still be left alone. Requeuing it changes nothing and reports
+	// success, which tells whoever asked that something happened when nothing
+	// did.
+	if strings.Contains(byID, "OR TRUE") ||
+		!strings.Contains(byID, "hls_attempts >=") {
+		t.Error("the by-id path no longer distinguishes a video that is out " +
+			"of attempts from one that is merely waiting")
 	}
 }
 
