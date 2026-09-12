@@ -24,7 +24,25 @@ name: keepalive
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    # 3,13,23,... and NOT */10, which is the same ten-minute spacing
+    # starting at :00.
+    #
+    # GitHub runs scheduled workflows on a shared queue and drops them under
+    # load, and the top of the hour is when every cron on the platform fires
+    # at once. Measured on this repo over 12-14 September: this workflow asks
+    # for every ten minutes and actually ran every two to four hours. Gaps
+    # between real runs were 4.4h, 2.3h, 2.2h, 2.5h, 3.7h, 4.4h, 4.3h, 4.6h.
+    # Roughly nine out of ten runs never happened.
+    #
+    # That matters here more than anywhere: this file exists to ping the
+    # backend before Render's fifteen-minute idle suspend kicks in. Firing
+    # every few hours does not do that, so the thing it was written to
+    # prevent was happening anyway.
+    #
+    # Offsetting off :00 is the documented way to improve the odds. It is a
+    # mitigation, not a promise — GitHub cron is best-effort whatever minute
+    # you pick, which is why the UptimeRobot note above still stands.
+    - cron: '3,13,23,33,43,53 * * * *'
   workflow_dispatch: {}
 
 concurrency:
