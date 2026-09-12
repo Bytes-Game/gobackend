@@ -330,6 +330,25 @@ func containsWord(text, q string) bool {
 // Both damp multiplicatively, so the first repeat costs a little and the
 // fifth costs a lot — which is the shape of how tiring repetition actually
 // feels.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// AND IT NEVER CROSSES A MATCH CLASS
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Spreading happens last, on the finished order, and it used to be handed
+// nothing but a number per video. So it re-sorted freely — and quietly threw
+// away the one rule the whole of search rests on: a video the query is ABOUT
+// comes before a video merely related to it.
+//
+// Searching "bee" against real data returned a wild boar, a dark-fantasy
+// trailer and a butterfly before the video whose topics literally say bee.
+// Everything in the catalogue shares "nature", so everything matched
+// something; the three bee videos were near-identical to each other, damped
+// each other, and sank below videos with nothing to do with bees.
+//
+// So each pass picks only from the best class still unplaced. Repetition
+// still costs position — within a class, where the question "which of these
+// equally-relevant videos should come next" is the one worth asking.
 func diversifySearchResults(scored []scoredHit, index map[string]searchDoc, limit int) []challengeHit {
 	if len(scored) == 0 {
 		return nil
@@ -346,9 +365,28 @@ func diversifySearchResults(scored []scoredHit, index map[string]searchDoc, limi
 	out := make([]challengeHit, 0, limit)
 
 	for len(out) < limit && len(out) < len(scored) {
+		// Class first, exactly as the sort before this did. Only videos in the
+		// best remaining class can be picked, so spreading reorders a page but
+		// can never lift a merely-related video above one the query is
+		// actually about.
+		//
+		// Leaving this out silently undid the whole match-class system, which
+		// is the one thing search is built on. Searching "bee" returned, in
+		// order: a wild boar, a dark-fantasy trailer, a butterfly, and only
+		// then the video whose topics literally say bee. Every video in this
+		// catalogue shares "nature", so everything matched something; without
+		// a class floor the three bee videos were near-identical to each
+		// other, damped each other, and sank below videos that had nothing to
+		// do with bees.
+		bestTier := matchTierNone + 1
+		for i, s := range scored {
+			if !taken[i] && s.tier < bestTier {
+				bestTier = s.tier
+			}
+		}
 		bestIdx, bestVal := -1, -1.0
 		for i, s := range scored {
-			if taken[i] {
+			if taken[i] || s.tier != bestTier {
 				continue
 			}
 			// Start from how well it answered the query, then charge it for
@@ -416,6 +454,12 @@ const searchRelevanceTiebreak = 0.05
 type scoredHit struct {
 	hit   challengeHit
 	score float64
+	// tier is the match class from searchRelevanceDetail: is the query what
+	// this video is ABOUT, only part of one of its words, or merely something
+	// related. Carried through to the spreading step, which must not be
+	// allowed to reorder across it. Zero (the best class) when a caller has
+	// not worked one out, which makes spreading behave as it always did.
+	tier int
 }
 
 // rankByRelevance finds the candidates: every searchable video with anything
@@ -443,7 +487,7 @@ func rankByRelevance(query string, limit int) []challengeHit {
 		if s <= 0 {
 			continue
 		}
-		scored = append(scored, scoredHit{challengeHit{Ch: ch}, s})
+		scored = append(scored, scoredHit{hit: challengeHit{Ch: ch}, score: s})
 	}
 	sort.SliceStable(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
 	if limit > 0 && len(scored) > limit {

@@ -245,3 +245,33 @@ func funcBody(src, decl string) string {
 	}
 	return rest
 }
+
+func TestSearchRank_TheClassSurvivesTheLastStep(t *testing.T) {
+	// Sorting by class and then handing the result to a step that re-sorts it
+	// by score alone gets you the wrong answer with every part looking right.
+	//
+	// That is what happened. rankSearchChallenges sorted by class correctly,
+	// then rebuilt each result for diversifySearchResults and dropped the
+	// class on the way. Spreading then reordered freely. Searching "bee"
+	// returned a wild boar, a dark-fantasy trailer and a butterfly before the
+	// video whose topics literally say bee.
+	//
+	// Both halves of the wiring are checked, because either one alone is
+	// silent: the ranker can pass a class nothing reads, and the spreader can
+	// read a class nothing sets.
+	rank := codeOnly(funcBody(readSourceFile(t, "search.go"), "func rankSearchChallenges("))
+	if !strings.Contains(rank, "tier: s.Tier") {
+		t.Error("the match class is not handed to the spreading step.\n\n" +
+			"Everything above this point is correct and the answer is still " +
+			"wrong: spreading runs last, on the finished order, and with no " +
+			"class to respect it will lift a merely-related video above one " +
+			"the query is about.")
+	}
+
+	spread := codeOnly(funcBody(readSourceFile(t, "search_relevance.go"),
+		"func diversifySearchResults("))
+	if !strings.Contains(spread, "s.tier != bestTier") {
+		t.Error("the spreading step no longer picks from the best remaining " +
+			"match class, so it can reorder across classes")
+	}
+}

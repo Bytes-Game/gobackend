@@ -338,3 +338,89 @@ func TestRescue_DoesNotCallNewVideosPopular(t *testing.T) {
 		t.Error("there is no honest label for the no-traffic case")
 	}
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// SPREADING MUST NOT UNDO THE MATCH CLASSES
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Search's central rule is that a video the query is ABOUT beats a video
+// merely related to it, however popular the related one is. Spreading runs
+// last, on the finished order, and for a while it was handed nothing but a
+// score — so it re-sorted freely and threw that rule away.
+//
+// Against real data, searching "bee" returned a wild boar, a dark-fantasy
+// trailer and a butterfly before the video whose topics literally say bee.
+// Nothing failed and nothing was logged; the answer was just wrong.
+
+func TestDiversity_NeverLiftsARelatedVideoAboveAnExactMatch(t *testing.T) {
+	// The shape of the real failure: one exact match with two near-identical
+	// copies of itself, against merely-related videos that are all more
+	// popular. The copies damp each other, and without a class floor that is
+	// enough to sink all three.
+	index := map[string]searchDoc{}
+	for _, id := range []string{"bee1", "bee2", "bee3"} {
+		index[id] = doc([]string{"bee", "flower", "pollination", "nature"}, nil, "")
+	}
+	index["boar"] = doc([]string{"wild boar", "snowy field", "nature"}, nil, "")
+	index["hunter"] = doc([]string{"lone hunter", "dark fantasy", "nature"}, nil, "")
+	index["moth"] = doc([]string{"butterfly", "flower", "nature"}, nil, "")
+
+	hits := []scoredHit{
+		// The related ones are the popular ones. That is the whole point:
+		// popularity may order within a class and may never cross one.
+		{hit: challengeHit{Ch: Challenge{ID: "boar", CreatorID: "a"}}, score: 90, tier: matchTierRelated},
+		{hit: challengeHit{Ch: Challenge{ID: "hunter", CreatorID: "b"}}, score: 88, tier: matchTierRelated},
+		{hit: challengeHit{Ch: Challenge{ID: "moth", CreatorID: "c"}}, score: 86, tier: matchTierRelated},
+		{hit: challengeHit{Ch: Challenge{ID: "bee1", CreatorID: "d"}}, score: 40, tier: matchTierAbout},
+		{hit: challengeHit{Ch: Challenge{ID: "bee2", CreatorID: "e"}}, score: 38, tier: matchTierAbout},
+		{hit: challengeHit{Ch: Challenge{ID: "bee3", CreatorID: "f"}}, score: 36, tier: matchTierAbout},
+	}
+
+	got := diversifySearchResults(hits, index, 10)
+	if len(got) != 6 {
+		t.Fatalf("got %d results, want all 6 kept", len(got))
+	}
+	order := make([]string, len(got))
+	for i, h := range got {
+		order[i] = h.Ch.ID
+	}
+	for i, id := range order[:3] {
+		if !strings.HasPrefix(id, "bee") {
+			t.Fatalf("position %d is %q, which is only RELATED to the query, "+
+				"while a video the query is about is still below it.\n\n"+
+				"order: %v\n\nThis is the failure exactly: searching \"bee\" "+
+				"put a wild boar first.", i+1, id, order)
+		}
+	}
+	// And the merely-related ones are still all there, below.
+	for i, id := range order[3:] {
+		if strings.HasPrefix(id, "bee") {
+			t.Errorf("position %d is %q; the classes are interleaved", i+4, id)
+		}
+	}
+}
+
+func TestDiversity_StillSpreadsWithinAClass(t *testing.T) {
+	// The fix must not turn spreading off. Inside one class, five copies of
+	// the same subject and one different video: the different one still
+	// climbs, because that is what stops a page being one thing.
+	index := map[string]searchDoc{}
+	for _, id := range []string{"1", "2", "3", "4", "5"} {
+		index[id] = doc([]string{"jellyfish", "aquarium", "marine life"}, nil, "")
+	}
+	index["9"] = doc([]string{"cricket", "bat", "stadium"}, nil, "")
+
+	hits := fakeHits("1", "2", "3", "4", "5", "9") // all tier 0
+	got := diversifySearchResults(hits, index, 10)
+	if len(got) != 6 {
+		t.Fatalf("got %d, want all 6 kept", len(got))
+	}
+	if got[1].Ch.ID != "9" {
+		var order []string
+		for _, h := range got {
+			order = append(order, h.Ch.ID)
+		}
+		t.Errorf("the odd one out is at position %v, not second — spreading "+
+			"stopped working inside a class", order)
+	}
+}
