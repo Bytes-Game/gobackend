@@ -94,8 +94,14 @@ func TestMakePoster_ARealPictureIsNotSideways(t *testing.T) {
 	if w <= h {
 		t.Errorf("a 640x360 landscape source produced a %dx%d poster", w, h)
 	}
-	if w > posterMaxWidth {
-		t.Errorf("the poster is %d wide, over the %d cap", w, posterMaxWidth)
+	// The cap is on the SHORT side, so a 640x360 source keeps both — its
+	// short side is already under it and upscaling would add bytes and no
+	// detail. Checking the width here is what the cap used to mean.
+	if h > posterMaxShortSide {
+		t.Errorf("the poster is %d tall, over the %d short-side cap", h, posterMaxShortSide)
+	}
+	if w > 640 || h > 360 {
+		t.Errorf("a 640x360 source produced a %dx%d poster — it was blown up", w, h)
 	}
 }
 

@@ -52,44 +52,62 @@ import (
 // something from the middle that does not match what starts playing.
 const posterAtSeconds = 1.0
 
-// posterMaxWidth bounds the picture.
+// posterMaxShortSide bounds the picture by its SHORT side.
 //
-// 540, down from 720. That is not a guess — it is where the measurements
-// landed. Encoding the same three reels at a range of widths and qualities
-// and scoring each against the native frame:
+// ══════════════════════════════════════════════════════════════════════════
+// WHY THE SHORT SIDE AND NOT THE WIDTH
+// ══════════════════════════════════════════════════════════════════════════
 //
-//	at ~41 KB    720 wide, quality 18   SSIM 0.845
-//	             540 wide, quality 10   SSIM 0.873
-//	             480 wide, quality 8    SSIM 0.874
+// This was a width cap, and it was wrong for half the catalog.
 //
-// For any given number of BYTES, a narrower picture at higher quality beats
-// a wider one at lower quality. 540 is the turn: 480 gives up more on
-// landscape reels than it saves. So the width comes down and the quality
-// stays up, which is the opposite of the obvious move.
-const posterMaxWidth = 540
+// Capping WIDTH at 540 gives a portrait reel 540x960, which is right, and a
+// landscape one 540x304 — only 304 pixels tall. Every surface that shows a
+// cover is portrait: the reel is full-screen portrait, and the search grid
+// is three columns of portrait tiles. A 304-tall picture cropped to fill a
+// portrait tile is upscaled about 1.6x, and it looks it.
+//
+// Measured on the real posters after the width cap shipped:
+//
+//	landscape reel   540x304   was 720x406   noticeably softer
+//	portrait reel    540x960   was 720x1280  no visible change
+//
+// The short side is the one that decides how much upscaling a portrait crop
+// has to do, so that is the side to bound. The same idea the upload gate
+// already uses with LongSide(), so portrait and landscape are judged the
+// same way — applied here too late.
+//
+// 540 keeps portrait exactly where it was and gives landscape 960x540
+// instead of 540x304.
+const posterMaxShortSide = 540
 
 // posterMaxBytes is what a cover may cost.
 //
 // ══════════════════════════════════════════════════════════════════════════
-// A SIZE BUDGET, NOT A QUALITY NUMBER
+// A TIME BUDGET, WRITTEN IN BYTES
 // ══════════════════════════════════════════════════════════════════════════
 //
 // This used to be a fixed quality of 6 and whatever size that produced.
-// Across the reels in this feed that was 3 KB to 109 KB — a THIRTY-FOLD
-// spread, decided by how busy the picture happened to be. The heavy end is
-// most of a video's opening download spent on a still image, in front of the
-// video it is delaying.
+// Across this feed that was 3 KB to 109 KB — a thirty-fold spread, decided
+// by how busy the picture happened to be. The heavy end is most of a video's
+// opening download spent on a still image, in front of the video it is
+// delaying.
 //
 // The thing that has to be true is not "quality 6". It is that the cover is
-// on screen well before the video is. So that is what is fixed, and the
-// quality moves to meet it.
+// on screen fast enough to read as instant, which is about a fifth of a
+// second. On the slowest link this app actually measures — 3 Mbps, from the
+// device logs — that is:
 //
-// Derived, not chosen: the app can start a reel once it holds the file's
-// index plus about two seconds of video — roughly 390 KB for a short reel,
-// 570 KB for a three-minute one (see prefixReadyBytesFor in the app). A
-// tenth of the smaller figure arrives in a tenth of the time, which is the
-// margin that makes the cover feel instant rather than merely early.
-const posterMaxBytes = 40 * 1024
+//	40 KB   0.11s
+//	64 KB   0.17s
+//	109 KB  0.29s   (what the old fixed quality produced at worst)
+//
+// So 64 KB. An earlier version of this said 40 KB, derived as a tenth of
+// what a video costs to become playable. That was a fraction of the wrong
+// thing: what matters is how long the person waits, not how the cover
+// compares to the video. It was also set while the width cap was quietly
+// halving landscape posters, so the pictures it was sized against were
+// smaller than they should have been.
+const posterMaxBytes = 64 * 1024
 
 // posterQualityLadder is tried best-first until one fits [posterMaxBytes].
 //
@@ -108,6 +126,21 @@ var posterQualityLadder = []int{6, 8, 10, 12, 16, 20}
 // that the transcode has already spent most of, and a wedged ffmpeg here
 // would cost the video its whole attempt for the sake of a still image.
 const posterTimeout = 45 * time.Second
+
+// posterScaleFilter bounds the SHORT side, whichever it is.
+//
+// -2 asks for whatever the other side works out to, rounded even, which the
+// JPEG encoder requires. min() keeps a picture already smaller than the cap
+// at its own size rather than blowing it up: upscaling adds bytes and no
+// detail.
+//
+// Its own function so a test can build the exact same picture to compare
+// against, rather than a near-enough one.
+func posterScaleFilter() string {
+	return fmt.Sprintf(
+		"scale='if(gt(iw,ih),-2,min(%[1]d,iw))':'if(gt(iw,ih),min(%[1]d,ih),-2)'",
+		posterMaxShortSide)
+}
 
 // makePoster writes a JPEG next to the source and returns its path.
 //
@@ -137,7 +170,11 @@ func makePoster(ctx context.Context, srcPath, outDir string) (string, error) {
 			"-ss", strconv.FormatFloat(posterAtSeconds, 'f', 2, 64),
 			"-i", srcPath,
 			"-frames:v", "1",
-			"-vf", fmt.Sprintf("scale='min(%d,iw)':-2", posterMaxWidth),
+			// Bound the SHORT side, whichever it is. -2 asks for whatever
+			// the other side works out to, rounded even, which the JPEG
+			// encoder requires. min() keeps a picture already smaller than
+			// the cap at its own size rather than blowing it up.
+			"-vf", posterScaleFilter(),
 			"-q:v", strconv.Itoa(q),
 			"-y", dst,
 		}

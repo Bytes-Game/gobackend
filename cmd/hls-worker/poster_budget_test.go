@@ -109,7 +109,7 @@ func TestPoster_AnEasyPictureKeepsTheBestQuality(t *testing.T) {
 	ref := filepath.Join(dir, "ref.jpg")
 	if err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
 		"-ss", "1.00", "-i", src, "-frames:v", "1",
-		"-vf", "scale='min("+strconv.Itoa(posterMaxWidth)+",iw)':-2",
+		"-vf", posterScaleFilter(),
 		"-q:v", strconv.Itoa(posterQualityLadder[0]),
 		"-y", ref).Run(); err != nil {
 		t.Skipf("could not build the reference: %v", err)
@@ -136,7 +136,7 @@ func TestPoster_AnEasyPictureKeepsTheBestQuality(t *testing.T) {
 	worst := filepath.Join(dir, "worst.jpg")
 	if err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
 		"-ss", "1.00", "-i", src, "-frames:v", "1",
-		"-vf", "scale='min("+strconv.Itoa(posterMaxWidth)+",iw)':-2",
+		"-vf", posterScaleFilter(),
 		"-q:v", strconv.Itoa(posterQualityLadder[len(posterQualityLadder)-1]),
 		"-y", worst).Run(); err == nil {
 		if w, err := os.Stat(worst); err == nil && w.Size() == b.Size() {
@@ -166,18 +166,25 @@ func TestPosterLadder_IsOrderedBestFirst(t *testing.T) {
 	}
 }
 
-func TestPoster_BudgetIsSmallNextToWhatAVideoCosts(t *testing.T) {
-	// The point of the number. A reel becomes playable at roughly 390 KB for
-	// a short one; the cover has to be up long before that, not alongside it.
-	const videoReadyBytes = 390 * 1024
-	if posterMaxBytes*8 > videoReadyBytes {
-		t.Errorf("a cover may cost %d bytes against a video's %d — that is "+
-			"not a head start, it is a queue", posterMaxBytes, videoReadyBytes)
+func TestPoster_ArrivesFastEnoughToReadAsInstant(t *testing.T) {
+	// The point of the number, and it is a TIME. An earlier version of this
+	// compared the cover to the video's bytes, which is a fraction of the
+	// wrong thing: what matters is how long the person waits, not how the
+	// cover measures up against the video.
+	//
+	// 3 Mbps is the slowest link the device logs actually show.
+	const slowestBps = 3000000
+	seconds := float64(posterMaxBytes*8) / slowestBps
+
+	if seconds > 0.25 {
+		t.Errorf("a cover takes %.2fs on the slowest link this app sees — "+
+			"past about a fifth of a second it stops reading as instant and "+
+			"starts reading as a wait", seconds)
 	}
-	if posterMaxBytes < 16*1024 {
-		t.Errorf("a %d byte budget forces every cover to the bottom of the "+
-			"ladder, which trades the black screen for a blurry one",
-			posterMaxBytes)
+	if seconds < 0.05 {
+		t.Errorf("a cover may only take %.3fs, which forces every one of "+
+			"them to the bottom of the ladder — that trades a black screen "+
+			"for a blurry one", seconds)
 	}
 }
 
@@ -189,10 +196,73 @@ func TestPoster_BudgetIsSmallNextToWhatAVideoCosts(t *testing.T) {
 //	            480 wide q8   SSIM 0.874
 //
 // 480 gives up more on landscape reels than it saves, so 540 is the turn.
-func TestPoster_WidthCameDownSoQualityCouldStayUp(t *testing.T) {
-	if posterMaxWidth != 540 {
-		t.Errorf("width is %d; 540 is where the measurements put the best "+
-			"picture per byte", posterMaxWidth)
+func TestPoster_BoundsTheShortSideNotTheWidth(t *testing.T) {
+	// Capping WIDTH gives a landscape reel 540x304 — only 304 pixels tall.
+	// Every surface that shows a cover is portrait, so a 304-tall picture is
+	// upscaled about 1.6x to fill the crop, and it looks it. The short side
+	// is what decides how much upscaling a portrait crop has to do.
+	src, err := os.ReadFile("poster.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(src), `scale='min(`) {
+		t.Error("the poster is scaled by width again, which halves the " +
+			"height of every landscape reel")
+	}
+	if posterMaxShortSide != 540 {
+		t.Errorf("short side is %d; 540 keeps portrait where it was and "+
+			"gives landscape 960x540 instead of 540x304", posterMaxShortSide)
+	}
+}
+
+func TestPoster_LandscapeKeepsItsHeight(t *testing.T) {
+	needFFmpeg(t)
+	dir := t.TempDir()
+	src := makeBusyVideo(t, dir, 1280, 720) // landscape
+
+	got, err := makePoster(context.Background(), src, dir)
+	if err != nil {
+		t.Fatalf("makePoster: %v", err)
+	}
+	_, h := imageSize(t, got)
+	if h < posterMaxShortSide {
+		t.Errorf("landscape cover is %d tall, want %d — a shorter one is "+
+			"upscaled into every portrait tile that shows it",
+			h, posterMaxShortSide)
+	}
+}
+
+func TestPoster_PortraitIsUnchangedByThat(t *testing.T) {
+	needFFmpeg(t)
+	dir := t.TempDir()
+	src := makeBusyVideo(t, dir, 1080, 1920) // portrait
+
+	got, err := makePoster(context.Background(), src, dir)
+	if err != nil {
+		t.Fatalf("makePoster: %v", err)
+	}
+	w, h := imageSize(t, got)
+	if w != posterMaxShortSide {
+		t.Errorf("portrait cover is %dx%d, want %d wide", w, h, posterMaxShortSide)
+	}
+	if h <= w {
+		t.Errorf("portrait cover came out %dx%d — it is not portrait", w, h)
+	}
+}
+
+func TestPoster_ASmallSourceIsNotBlownUp(t *testing.T) {
+	needFFmpeg(t)
+	dir := t.TempDir()
+	src := makeBusyVideo(t, dir, 320, 240) // smaller than the cap either way
+
+	got, err := makePoster(context.Background(), src, dir)
+	if err != nil {
+		t.Fatalf("makePoster: %v", err)
+	}
+	w, h := imageSize(t, got)
+	if w > 320 || h > 240 {
+		t.Errorf("cover is %dx%d from a 320x240 source — upscaling adds "+
+			"bytes and no detail", w, h)
 	}
 }
 
