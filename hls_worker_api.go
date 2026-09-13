@@ -119,6 +119,23 @@ type pendingHLSJob struct {
 	// never resolves (the real pub-*.r2.dev hash is random per bucket),
 	// which 401'd every HLS stream in the player.
 	PublicBaseURL string `json:"publicBaseUrl,omitempty"`
+	// MaxSeconds is the longest the finished video may run. The worker cuts
+	// anything past it.
+	//
+	// Sent rather than configured on the worker, because the limit belongs
+	// to the product and the worker is a separate program: a copy of the
+	// number over there is a copy that can drift, and the last time this
+	// limit existed in two places one of them was missing entirely.
+	//
+	// The upload gate already refuses over-long video, so in the normal
+	// case this cuts nothing. It is for the cases the gate cannot cover:
+	// video that predates the gate, a file whose length the gate could not
+	// measure and so let through, and an app old enough not to report one.
+	// A reel that is three seconds over should come back at three minutes,
+	// not be stuck at three minutes and three seconds forever.
+	//
+	// A worker that predates this field ignores it and behaves as before.
+	MaxSeconds int `json:"maxSeconds,omitempty"`
 }
 
 // hlsCompleteRequest is what the worker POSTs after a successful
@@ -265,6 +282,7 @@ func HLSNextPendingHandler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(pendingHLSJob{
 			ChallengeID: strconv.Itoa(id), SourceURL: src, Kind: "challenge",
 			PublicBaseURL: publicBase,
+			MaxSeconds:    int(maxUploadDuration / time.Second),
 		})
 		return
 	}
@@ -273,6 +291,7 @@ func HLSNextPendingHandler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(pendingHLSJob{
 			ChallengeID: strconv.Itoa(id), SourceURL: src, Kind: hlsKindResponse,
 			PublicBaseURL: publicBase,
+			MaxSeconds:    int(maxUploadDuration / time.Second),
 		})
 		return
 	}

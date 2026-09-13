@@ -283,7 +283,57 @@ func rungForSize(longSide int) (progressiveRendition, bool) {
 // Never fatal, and never partial in a way the caller has to reason about: a
 // rendition that fails is left out of the map, and the caller serves whatever
 // did work — down to nothing at all, which is exactly today's behaviour.
-func buildProgressiveMP4s(ctx context.Context, src, outDir string) map[string]string {
+// runnerCapSeconds bounds ONE job's encode so a single video cannot outlive
+// the runner window, whatever the backend asks for.
+//
+// This is a different concern from the product limit and deliberately a
+// different number. The product limit is how long a reel may be, and it
+// arrives with the job. This is how long a transcode may take, and it belongs
+// to whatever machine the worker happens to be on.
+//
+// Four minutes, from the numbers that bound it: one job has an eight-minute
+// ceiling (-job-timeout), and the five-rung ladder costs roughly 1.3x the
+// running time, so four minutes of video is about five and a half of encode.
+//
+// It MUST stay above the product limit. This value used to be 90 seconds,
+// chosen when reels were capped at 60 — and when the product limit became
+// three minutes, that 90 quietly cut every longer video in half without
+// anything saying so. A cap below the limit is not a safety net, it is a
+// second limit nobody wrote down.
+const runnerCapSeconds = 240
+
+// cutSeconds is the -t value for one encode: the product limit the backend
+// sent, bounded by what one job may spend on the runner.
+//
+// A limit of zero means the backend did not send one — an older deploy — and
+// falls back to the runner bound alone rather than cutting nothing, because
+// the reason the bound exists does not go away when the backend is old.
+func cutSeconds(maxSeconds int) int {
+	if maxSeconds <= 0 || maxSeconds > runnerCapSeconds {
+		return runnerCapSeconds
+	}
+	return maxSeconds
+}
+
+// durationCutArgs returns the ffmpeg arguments that stop an encode at
+// [cutSeconds].
+//
+// The upload gate refuses over-long video, so in the normal case this cuts
+// nothing — the file is already inside the limit and -t never fires. It is
+// for the cases the gate cannot cover: video that predates it, a file whose
+// length it could not measure and therefore let through, and an app old
+// enough not to report one.
+//
+// Applied on the ENCODE rather than as a separate trim pass. Both encoders
+// re-encode from the source anyway, so this costs nothing and lands on the
+// exact second. Cutting first with a stream copy would be free but would land
+// on the nearest keyframe instead, which is a second or two out in either
+// direction — and "either direction" includes over the limit.
+func durationCutArgs(maxSeconds int) []string {
+	return []string{"-t", strconv.Itoa(cutSeconds(maxSeconds))}
+}
+
+func buildProgressiveMP4s(ctx context.Context, src, outDir string, maxSeconds int) map[string]string {
 	made := map[string]string{}
 	longSide, bitrate, ok := sourceShape(ctx, src)
 	if !ok {
@@ -393,7 +443,7 @@ func buildProgressiveMP4s(ctx context.Context, src, outDir string) map[string]st
 		madeAtBox[box] = true
 
 		out := filepath.Join(outDir, r.label+".mp4")
-		if err := encodeProgressive(ctx, src, out, r, box, hasAudio); err != nil {
+		if err := encodeProgressive(ctx, src, out, r, box, hasAudio, maxSeconds); err != nil {
 			log.Printf("progressive: %s failed, carrying on without it: %v", r.label, err)
 			_ = os.Remove(out)
 			continue
@@ -431,10 +481,10 @@ func buildProgressiveMP4s(ctx context.Context, src, outDir string) map[string]st
 // -preset medium rather than veryfast. The ladder uses veryfast because it
 // encodes four rungs and lives inside a job timeout; this encodes two, and
 // medium buys roughly 20% smaller files at the same quality for CPU we have.
-func encodeProgressive(ctx context.Context, src, out string, r progressiveRendition, box int, hasAudio bool) error {
-	args := []string{"-y", "-i", src,
-		"-map", "0:v:0",
-	}
+func encodeProgressive(ctx context.Context, src, out string, r progressiveRendition, box int, hasAudio bool, maxSeconds int) error {
+	args := []string{"-y", "-i", src}
+	args = append(args, durationCutArgs(maxSeconds)...)
+	args = append(args, "-map", "0:v:0")
 	if hasAudio {
 		args = append(args, "-map", "0:a:0")
 	}
