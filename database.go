@@ -1905,6 +1905,39 @@ func GetChallengeByID(idStr string) (Challenge, bool) {
 // Authorization (creator-only) is enforced at the handler layer,
 // NOT here, so internal callers (admin moderation, scheduled GC)
 // can use this directly.
+// DeleteResponseByID removes one answer to a battle.
+//
+// Separate from DeleteChallengeByID because the two are not the same act.
+// Deleting a challenge takes its answers with it — they have nothing left to
+// answer. Deleting a single answer leaves the challenge standing with one
+// fewer, which the response_count trigger in this file keeps correct without
+// anything here having to remember to.
+//
+// Storage is queued rather than cleared inline, exactly as it is for a
+// challenge, and for the same reason: a slow or failed bucket delete must not
+// make the caller's delete look broken.
+//
+// Authorization is the caller's job, not this function's.
+func DeleteResponseByID(idStr string) error {
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		return fmt.Errorf("invalid response id %q: %w", idStr, err)
+	}
+	// Read where the files live BEFORE the row goes; afterwards there is
+	// nothing left to read the addresses from.
+	prefixes := mediaPrefixesForResponse(id)
+
+	res, err := db.Exec(`DELETE FROM challenge_responses WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: %d", errChallengeNotFound, id)
+	}
+	enqueueMediaDeletions(prefixes)
+	return nil
+}
+
 // errChallengeNotFound is returned, wrapped, when an id names no challenge.
 // A sentinel rather than a message so a caller deciding what to report can
 // use errors.Is instead of comparing text that is free to change.

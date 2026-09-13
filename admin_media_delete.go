@@ -62,8 +62,8 @@ const adminDeleteMaxBatch = 25
 type adminDeleteRequest struct {
 	// Which videos to delete. Required — there is no other way to choose.
 	IDs []int `json:"ids"`
-	// "challenges" (default). Named for symmetry with the re-queue endpoint
-	// so the two are not subtly different to call.
+	// "challenges" (default) or "responses". Named for symmetry with the
+	// re-queue endpoint so the two are not subtly different to call.
 	Kind string `json:"kind"`
 	// Must be exactly "yes, delete these permanently". A request that reaches
 	// this endpoint by accident — a retried curl, a wrong path in a script —
@@ -119,8 +119,9 @@ func AdminDeleteMediaHandler(w http.ResponseWriter, r *http.Request) {
 			` — this cannot be undone`, http.StatusBadRequest)
 		return
 	}
-	if req.Kind != "" && req.Kind != "challenges" {
-		http.Error(w, `"kind" must be "challenges"`, http.StatusBadRequest)
+	if req.Kind != "" && req.Kind != "challenges" && req.Kind != "responses" {
+		http.Error(w, `"kind" must be "challenges" or "responses"`,
+			http.StatusBadRequest)
 		return
 	}
 
@@ -129,27 +130,46 @@ func AdminDeleteMediaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out := adminDeleteResponse{
-		Deleted: []adminDeletedVideo{},
-		Note: "the videos are gone and their files are queued for removal " +
-			"from storage; answers posted to a battle went with it",
+	answers := req.Kind == "responses"
+	note := "the videos are gone and their files are queued for removal " +
+		"from storage; answers posted to a battle went with it"
+	if answers {
+		// Different act, different consequence, so it says a different thing.
+		// Removing one answer leaves the battle it belonged to standing with
+		// one fewer — the response_count trigger keeps that number right.
+		note = "the answers are gone and their files are queued for removal " +
+			"from storage; the battles they belonged to are untouched apart " +
+			"from having one fewer answer"
 	}
+	out := adminDeleteResponse{Deleted: []adminDeletedVideo{}, Note: note}
 	for _, id := range req.IDs {
 		// Counted first. After the delete there is nothing left to count, and
-		// how much went is the thing worth knowing.
-		responses := countChallengeResponses(id)
+		// how much went is the thing worth knowing. An answer has no answers
+		// of its own, so there is nothing to count for one.
+		responses := 0
+		if !answers {
+			responses = countChallengeResponses(id)
+		}
 
-		if err := DeleteChallengeByID(strconv.Itoa(id)); err != nil {
+		del := DeleteChallengeByID
+		if answers {
+			del = DeleteResponseByID
+		}
+		if err := del(strconv.Itoa(id)); err != nil {
 			if isNoSuchChallenge(err) {
 				out.NotFound = append(out.NotFound, id)
 				continue
 			}
-			log.Printf("admin delete: challenge %d: %v", id, err)
+			log.Printf("admin delete: %s %d: %v", req.Kind, id, err)
 			out.Failed = append(out.Failed, id)
 			continue
 		}
-		log.Printf("admin delete: challenge %d deleted (%d response(s) with it)",
-			id, responses)
+		if answers {
+			log.Printf("admin delete: response %d deleted", id)
+		} else {
+			log.Printf("admin delete: challenge %d deleted (%d response(s) with it)",
+				id, responses)
+		}
 		out.Deleted = append(out.Deleted, adminDeletedVideo{ID: id, Responses: responses})
 	}
 
