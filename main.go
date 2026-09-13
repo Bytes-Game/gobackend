@@ -569,6 +569,9 @@ func main() {
 	api.HandleFunc("/challenges/responses/{id}/flag", authed(FlagResponseHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/votes", GetVoteResultsHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/comments", GetChallengeCommentsHandler).Methods("GET", "OPTIONS")
+	// Before the bare {id} route, or mux matches "tag-suggestions" as an id.
+	api.HandleFunc("/challenges/{id}/tag-suggestions", authed(GetTagSuggestionsHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/challenges/{id}/tag-suggestions", authed(DecideTagSuggestionsHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/{id}", GetChallengeDetailHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/feed/recommended", authed(RecommendedFeedHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/feed/following", authed(FollowingFeedHandler)).Methods("GET", "OPTIONS")
