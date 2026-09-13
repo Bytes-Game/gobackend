@@ -80,7 +80,20 @@ type hlsQueueRow struct {
 	// SourceURL is the video the worker would download. Included because the
 	// commonest reason a row never finishes is that this answers 403.
 	SourceURL string `json:"sourceUrl,omitempty"`
-	CreatedAt string `json:"createdAt,omitempty"`
+	// ManifestURL and Variants are what the app would actually PLAY: the HLS
+	// master playlist, and the label → URL map of progressive MP4s.
+	//
+	// Here because checking a finished row meant guessing. The worker names
+	// its output directory with eight random hex characters, so nothing can
+	// reconstruct these from the id — and every other way to reach them
+	// (the arena list, a challenge's own page) either leaves rows out or
+	// counts a view. Answering "is this video actually the right length now"
+	// took three different endpoints and still could not cover every row.
+	//
+	// Empty until the worker reports the row finished.
+	ManifestURL string            `json:"manifestUrl,omitempty"`
+	Variants    map[string]string `json:"variants,omitempty"`
+	CreatedAt   string            `json:"createdAt,omitempty"`
 }
 
 type hlsQueueResponse struct {
@@ -183,6 +196,7 @@ func readHLSQueue(table, kind string, limit int) ([]hlsQueueRow, error) {
 	             COALESCE(hls_attempts, 0),
 	             hls_claimed_at,
 	             COALESCE(video_url, ''),
+	             COALESCE(video_variants::text, '{}'),
 	             created_at
 	        FROM ` + table + `
 	       ORDER BY created_at DESC
@@ -196,20 +210,26 @@ func readHLSQueue(table, kind string, limit int) ([]hlsQueueRow, error) {
 	out := []hlsQueueRow{}
 	for res.Next() {
 		var (
-			id            int
-			manifest, src string
-			attempts      int
-			claimed       sql.NullTime
-			created       time.Time
+			id                      int
+			manifest, src, variants string
+			attempts                int
+			claimed                 sql.NullTime
+			created                 time.Time
 		)
-		if err := res.Scan(&id, &manifest, &attempts, &claimed, &src, &created); err != nil {
+		if err := res.Scan(&id, &manifest, &attempts, &claimed, &src, &variants, &created); err != nil {
 			return nil, err
 		}
 		row := hlsQueueRow{
 			ID: id, Kind: kind,
 			Attempts: attempts, Cap: maxHLSAttempts,
 			SourceURL: src,
+			Variants:  parseVariantMap(variants),
 			CreatedAt: created.UTC().Format(time.RFC3339),
+		}
+		// "PENDING" is the marker a claim writes into the manifest column; it
+		// is not a URL and must never be reported as one.
+		if manifest != "" && manifest != hlsClaimMarker {
+			row.ManifestURL = manifest
 		}
 		if claimed.Valid {
 			row.ClaimedAt = claimed.Time.UTC().Format(time.RFC3339)
@@ -220,6 +240,29 @@ func readHLSQueue(table, kind string, limit int) ([]hlsQueueRow, error) {
 	return out, res.Err()
 }
 
+// parseVariantMap turns the video_variants JSONB column into the label → URL
+// map the app plays from.
+//
+// Never fails the request. This endpoint's job is to explain why a video is
+// not watchable; refusing to answer because ONE row's column is malformed
+// would hide the other fifty-five. A row whose variants cannot be read
+// simply reports none, which is also what a row that has none reports.
+func parseVariantMap(raw string) map[string]string {
+	// No special cases above the parse. An earlier version checked for "",
+	// "{}" and "null" first, which read as thorough and was the opposite:
+	// those three are exactly what the parse already handles, so the length
+	// check below became unreachable and stopped being worth anything. Two
+	// guards where one of them can never fire is one guard and some noise.
+	out := map[string]string{}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil // empty column, or something that is not JSON
+	}
+	if len(out) == 0 {
+		return nil // "{}" and "null" both land here
+	}
+	return out
+}
+
 // hlsQueueState turns the three columns into the answer, using exactly the
 // conditions the claim query uses. If those two ever disagree this endpoint
 // becomes a confident liar, which is worse than having no endpoint — so a
@@ -228,7 +271,7 @@ func hlsQueueState(manifest, src string, attempts int, claimed sql.NullTime) (st
 	switch {
 	case src == "":
 		return hlsStateNoSource, "there is no video file to convert", false
-	case manifest == "PENDING":
+	case manifest == hlsClaimMarker:
 		return hlsStateWorking,
 			"a worker has it; if that worker died it is freed again 30 minutes after it was claimed",
 			false
