@@ -387,11 +387,62 @@ func mediaPrefixesForChallenge(challengeID int) []string {
 		out = append(out, p)
 	}
 	// The transcode worker writes the streaming version under its own paths,
-	// keyed by challenge rather than by upload, so they are added directly.
-	out = append(out,
-		fmt.Sprintf("hls/%d/", challengeID),
-		fmt.Sprintf("hls/resp/%d/", challengeID),
-	)
+	// keyed by ROW rather than by upload, so they are added directly.
+	out = append(out, fmt.Sprintf("hls/%d/", challengeID))
+
+	// A response's HLS is filed under its OWN id, not the challenge's — see
+	// the prefix the worker builds in cmd/hls-worker. This used to add
+	// hls/resp/<challenge id>/, which is a different row's folder: the
+	// answers' streaming files were left in the bucket on every battle
+	// delete, and a folder belonging to some unrelated response was queued
+	// for removal instead. It never surfaced because both are silent.
+	if rows, err := db.Query(
+		`SELECT id FROM challenge_responses WHERE challenge_id = $1`, challengeID,
+	); err == nil {
+		for rows.Next() {
+			var rid int
+			if err := rows.Scan(&rid); err == nil {
+				out = append(out, fmt.Sprintf("hls/resp/%d/", rid))
+			}
+		}
+		rows.Close()
+	}
+	return out
+}
+
+// mediaPrefixesForResponse is the same question for one answer on its own,
+// for when a single response is deleted rather than the whole battle.
+func mediaPrefixesForResponse(responseID int) []string {
+	if db == nil {
+		return nil
+	}
+	cfg, err := loadR2Config()
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	add := func(rawURL string) {
+		if p := mediaPrefixFromPublicURL(cfg, rawURL); p != "" {
+			seen[p] = true
+		}
+	}
+	row := db.QueryRow(
+		`SELECT COALESCE(video_url,''), COALESCE(thumbnail_url,''),
+		        COALESCE(video_variants,'{}'::jsonb)::text
+		   FROM challenge_responses WHERE id = $1`, responseID)
+	var video, thumb, variants string
+	if err := row.Scan(&video, &thumb, &variants); err == nil {
+		add(video)
+		add(thumb)
+		for _, u := range urlsInJSON(variants) {
+			add(u)
+		}
+	}
+	out := make([]string, 0, len(seen)+1)
+	for p := range seen {
+		out = append(out, p)
+	}
+	out = append(out, fmt.Sprintf("hls/resp/%d/", responseID))
 	return out
 }
 

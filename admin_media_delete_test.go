@@ -111,7 +111,7 @@ func TestAdminDelete_SaysWhatElseWentWithIt(t *testing.T) {
 	body := funcBody(readSourceFile(t, "admin_media_delete.go"),
 		"func AdminDeleteMediaHandler(")
 	count := strings.Index(body, "countChallengeResponses(")
-	del := strings.Index(body, "DeleteChallengeByID(")
+	del := strings.Index(body, "del(strconv.Itoa(id))")
 	if count < 0 || del < 0 {
 		t.Fatal("the delete loop no longer counts responses or no longer deletes")
 	}
@@ -207,5 +207,89 @@ func TestAdminDelete_TheMissingIdSentinelIsActuallyReturned(t *testing.T) {
 			"that names no video is reported as a failed delete rather than " +
 			"a typo — and the reply says the database is broken when it is " +
 			"not.")
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// DELETING ONE ANSWER IS NOT THE SAME AS DELETING A BATTLE
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Deleting a challenge takes its answers with it — they have nothing left to
+// answer. Deleting a single answer leaves the challenge standing with one
+// fewer. Sending the second down the first's path would silently destroy a
+// whole battle when somebody asked to remove one broken opponent video.
+
+func TestAdminDelete_ARequestForAnswersDeletesAnswers(t *testing.T) {
+	body := funcBody(readSourceFile(t, "admin_media_delete.go"),
+		"func AdminDeleteMediaHandler(")
+	if !strings.Contains(body, "DeleteResponseByID") {
+		t.Fatal("kind=responses is accepted but nothing deletes a response, " +
+			"so the request either does nothing or hits the wrong table")
+	}
+	if !strings.Contains(body, `req.Kind == "responses"`) {
+		t.Error("nothing distinguishes an answer from a challenge, so one " +
+			"path is being used for both")
+	}
+}
+
+func TestAdminDelete_RefusesAKindItDoesNotKnow(t *testing.T) {
+	for _, k := range []string{"videos", "posts", "challenge", "response"} {
+		body := `{"ids":[1],"kind":"` + k + `","confirm":"` +
+			adminDeleteConfirmPhrase + `"}`
+		if got := postDelete(t, body).Code; got != http.StatusBadRequest {
+			t.Errorf("kind=%q got %d, want %d — a misspelled kind must not "+
+				"fall through to deleting challenges", k, got,
+				http.StatusBadRequest)
+		}
+	}
+}
+
+func TestAdminDelete_AnAnswerTakesItsOwnFilesAndNoOthers(t *testing.T) {
+	// A response's streaming files live under its OWN id. The prefix helper
+	// for a whole battle used to add hls/resp/<challenge id>/ — a different
+	// row's folder — so every battle delete left the answers' files in the
+	// bucket and queued somebody else's for removal. Both silent.
+	src := readSourceFile(t, "media_delete.go")
+	forResp := funcBody(src, "func mediaPrefixesForResponse(")
+	if forResp == "" {
+		t.Fatal("nothing works out where a single answer's files live")
+	}
+	if !strings.Contains(forResp, `"hls/resp/%d/", responseID`) {
+		t.Error("an answer's streaming folder is not keyed by its own id")
+	}
+
+	forChal := funcBody(src, "func mediaPrefixesForChallenge(")
+	if strings.Contains(forChal, `fmt.Sprintf("hls/resp/%d/", challengeID)`) {
+		t.Error("deleting a battle queues hls/resp/<challenge id>/, which is " +
+			"a response id and so somebody else's folder. The battle's own " +
+			"answers are left in the bucket.")
+	}
+	if !strings.Contains(forChal, "FROM challenge_responses WHERE challenge_id") {
+		t.Error("deleting a battle no longer looks up its answers, so their " +
+			"streaming files are never cleared")
+	}
+}
+
+func TestDeleteResponse_LeavesTheBattleStanding(t *testing.T) {
+	// The row goes; the challenge it answered does not. The response_count
+	// trigger keeps the battle's number right without this code having to
+	// remember, which is the reason it is a trigger.
+	body := funcBody(readSourceFile(t, "database.go"), "func DeleteResponseByID(")
+	if body == "" {
+		t.Fatal("DeleteResponseByID is gone")
+	}
+	if !strings.Contains(body, "DELETE FROM challenge_responses WHERE id") {
+		t.Error("it does not delete from the responses table")
+	}
+	if strings.Contains(body, "DELETE FROM challenges ") {
+		t.Error("deleting one answer also deletes challenges")
+	}
+	if !strings.Contains(body, "mediaPrefixesForResponse(") {
+		t.Error("the answer's files are never queued for removal, so they " +
+			"stay in the bucket forever, unreachable and still billed")
+	}
+	if !strings.Contains(body, "errChallengeNotFound") {
+		t.Error("an id naming nothing is not reported as a missing id, so a " +
+			"typo reads as a database failure")
 	}
 }
