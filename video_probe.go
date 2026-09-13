@@ -63,6 +63,25 @@ import (
 // Override with MAX_UPLOAD_LONG_SIDE to tighten or loosen without a deploy.
 const maxUploadLongSide = 1920
 
+// maxUploadDuration is the longest video this app takes. Three minutes: this
+// is a short-video feed, and anything past that is a different product.
+//
+// It is one number for a reason. The same limit was already written down for
+// battle answers, in challenge_validation.go, and NOT for the challenges
+// themselves — so a ten-minute upload walked straight in through the front
+// door while a ten-minute answer to it was refused. That file now reads this
+// constant, and a test ties them together so they cannot drift apart again.
+//
+// The long one that got in cost more than a slot in the feed. An MP4 keeps an
+// index in front of the video that grows with its running time — 12 KB for a
+// ten-second clip, 653 KB for a ten-minute one — and every part of the app
+// that warms reels was built for the small end of that. It could not start
+// the file without downloading the whole index first, so it stalled on every
+// play, on every account, on every page.
+//
+// Override with MAX_UPLOAD_SECONDS to tighten or loosen without a deploy.
+const maxUploadDuration = 3 * time.Minute
+
 // probeHeadBytes is how much of the file's start we read looking for the
 // header. An MP4 written for streaming puts its header first, and that header
 // is small — a few KB for a short clip. 256 KB is generous enough to clear the
@@ -101,6 +120,32 @@ func (d videoDimensions) String() string {
 	return fmt.Sprintf("%dx%d", d.Width, d.Height)
 }
 
+// videoFacts is everything one probe learned about a file. Either field can
+// be missing on its own: a track header without a movie header, or the other
+// way round, are both things real files do. Missing means "did not say",
+// never "zero" — see the fail-open rule on checkUploadWithinLimits.
+type videoFacts struct {
+	videoDimensions
+	Duration time.Duration
+}
+
+func (f videoFacts) haveDimensions() bool { return f.Width > 0 && f.Height > 0 }
+
+func (f videoFacts) haveDuration() bool { return f.Duration > 0 }
+
+// merge fills in whatever this probe is missing from another one. Used when
+// the head of the file answers half the question and the tail answers the
+// rest.
+func (f videoFacts) merge(other videoFacts) videoFacts {
+	if !f.haveDimensions() {
+		f.videoDimensions = other.videoDimensions
+	}
+	if !f.haveDuration() {
+		f.Duration = other.Duration
+	}
+	return f
+}
+
 // uploadLongSideLimit returns the configured ceiling.
 func uploadLongSideLimit() int {
 	if v := os.Getenv("MAX_UPLOAD_LONG_SIDE"); v != "" {
@@ -109,6 +154,16 @@ func uploadLongSideLimit() int {
 		}
 	}
 	return maxUploadLongSide
+}
+
+// uploadDurationLimit returns the configured ceiling on running time.
+func uploadDurationLimit() time.Duration {
+	if v := os.Getenv("MAX_UPLOAD_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return maxUploadDuration
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -128,30 +183,96 @@ func uploadLongSideLimit() int {
 // well-specified walk over four box names, and the alternative is a library
 // that parses the entire format to answer a question about 8 bytes of it.
 
-// parseMP4Dimensions walks the boxes in buf and returns the largest track it
-// can find dimensions for.
+// parseMP4Dimensions returns just the size out of a full read of buf.
 //
 // "Largest" rather than "first" because a file can carry more than one video
-// track, and the one that decides decode cost is the biggest.
-//
-// Pure — no I/O — so every branch below is testable from a byte slice.
+// track, and the one that decides decode cost is the biggest — see
+// parseMP4Facts, which does the walk.
 func parseMP4Dimensions(buf []byte) (videoDimensions, error) {
-	best := videoDimensions{}
+	f := parseMP4Facts(buf)
+	if !f.haveDimensions() {
+		return videoDimensions{}, errNoDimensions
+	}
+	return f.videoDimensions, nil
+}
+
+// parseMP4Facts walks the boxes in buf once and picks up both the largest
+// track's size and the movie's running time.
+//
+// One walk rather than two because the boxes it wants sit next to each other:
+//
+//	moov              the header for the whole file
+//	 ├─ mvhd          the movie header — carries the running time
+//	 └─ trak          one per track
+//	     └─ tkhd      that track's header — carries its display size
+//
+// Pure — no I/O — so every branch is testable from a byte slice.
+func parseMP4Facts(buf []byte) videoFacts {
+	out := videoFacts{}
 	walkMP4Boxes(buf, func(name string, payload []byte) bool {
-		if name != "tkhd" {
-			return true // keep walking; containers are descended into below
-		}
-		if d, ok := parseTkhd(payload); ok {
-			if d.LongSide() > best.LongSide() {
-				best = d
+		switch name {
+		case "tkhd":
+			if d, ok := parseTkhd(payload); ok {
+				if d.LongSide() > out.LongSide() {
+					out.videoDimensions = d
+				}
+			}
+		case "mvhd":
+			if d, ok := parseMvhd(payload); ok {
+				out.Duration = d
 			}
 		}
 		return true
 	})
-	if best.Width == 0 || best.Height == 0 {
-		return videoDimensions{}, errNoDimensions
+	return out
+}
+
+// parseMvhd reads the movie header's running time.
+//
+// Layout after the box header, per ISO/IEC 14496-12:
+//
+//	version(1) flags(3)
+//	v0: creation(4) modified(4) timescale(4) duration(4)
+//	v1: creation(8) modified(8) timescale(4) duration(8)
+//
+// The duration is counted in timescale units per second, so both numbers are
+// needed — a duration of 5,340,000 means three minutes at 29,700 units per
+// second and a day and a half at 40.
+//
+// A timescale of zero would divide by zero, and the all-ones duration some
+// encoders write for "unknown" is not a length. Both report "did not say"
+// rather than a wrong answer, because the caller refuses uploads on this.
+func parseMvhd(payload []byte) (time.Duration, bool) {
+	if len(payload) < 4 {
+		return 0, false
 	}
-	return best, nil
+	var timescale, duration uint64
+	switch payload[0] {
+	case 0:
+		if len(payload) < 20 {
+			return 0, false
+		}
+		timescale = uint64(binary.BigEndian.Uint32(payload[12:16]))
+		duration = uint64(binary.BigEndian.Uint32(payload[16:20]))
+		if duration == 0xFFFFFFFF {
+			return 0, false // "unknown", not a length
+		}
+	case 1:
+		if len(payload) < 32 {
+			return 0, false
+		}
+		timescale = uint64(binary.BigEndian.Uint32(payload[20:24]))
+		duration = binary.BigEndian.Uint64(payload[24:32])
+		if duration == 0xFFFFFFFFFFFFFFFF {
+			return 0, false
+		}
+	default:
+		return 0, false
+	}
+	if timescale == 0 || duration == 0 {
+		return 0, false
+	}
+	return time.Duration(duration) * time.Second / time.Duration(timescale), true
 }
 
 // mp4Containers are the boxes we descend into. Everything else is skipped
@@ -270,25 +391,36 @@ var probeHTTPClient = &http.Client{Timeout: probeTimeout}
 // plenty of encoders write the header last, since the size is not known until
 // the final frame. That is the same split the client copes with when it warms
 // a reel from both ends.
-func probeVideoDimensions(ctx context.Context, url string) (videoDimensions, error) {
+func probeVideo(ctx context.Context, url string) (videoFacts, error) {
 	if url == "" {
-		return videoDimensions{}, errors.New("empty url")
+		return videoFacts{}, errors.New("empty url")
 	}
 
 	head, err := fetchRange(ctx, url, fmt.Sprintf("bytes=0-%d", probeHeadBytes-1))
 	if err != nil {
-		return videoDimensions{}, err
+		return videoFacts{}, err
 	}
-	if d, err := parseMP4Dimensions(head); err == nil {
-		return d, nil
+	facts := parseMP4Facts(head)
+	if facts.haveDimensions() && facts.haveDuration() {
+		return facts, nil
 	}
 
-	// Header is not at the front. Ask for the last stretch instead.
+	// Header is not at the front, or only half of it is. Ask for the last
+	// stretch and take whatever it fills in.
 	tail, err := fetchRange(ctx, url, fmt.Sprintf("bytes=-%d", probeTailBytes))
 	if err != nil {
-		return videoDimensions{}, err
+		// The head is still worth what it found. A failed second fetch must
+		// not throw away a measurement we already have.
+		if facts.haveDimensions() || facts.haveDuration() {
+			return facts, nil
+		}
+		return videoFacts{}, err
 	}
-	return parseMP4Dimensions(tail)
+	facts = facts.merge(parseMP4Facts(tail))
+	if !facts.haveDimensions() && !facts.haveDuration() {
+		return videoFacts{}, errNoDimensions
+	}
+	return facts, nil
 }
 
 // fetchRange GETs one byte range. Storage that ignores Range and returns the
@@ -333,20 +465,13 @@ func fetchRange(ctx context.Context, url, rangeHeader string) ([]byte, error) {
 // unparseable file, a timeout. Only a positive measurement above the ceiling
 // is a refusal. A user who cannot post because object storage was briefly slow
 // is a worse outcome than one oversized video reaching the feed.
-func checkUploadWithinLimits(videoURL string) (dims videoDimensions, ok bool, measured bool) {
+func checkUploadWithinLimits(videoURL string) (videoFacts, error) {
 	if videoURL == "" {
-		return videoDimensions{}, true, false
+		return videoFacts{}, errors.New("empty url")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
-
-	d, err := probeVideoDimensions(ctx, videoURL)
-	if err != nil {
-		// Could not check. Allow, and say why in the log so a storage problem
-		// that silently disables the gate is visible rather than invisible.
-		return videoDimensions{}, true, false
-	}
-	return d, d.LongSide() <= uploadLongSideLimit(), true
+	return probeVideo(ctx, videoURL)
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -390,18 +515,41 @@ func recordVideoDimensions(kind, id string, d videoDimensions) {
 // The refusal text names the actual size and the ceiling, because "your video
 // is too large" with no numbers is a support ticket.
 func gateUpload(videoURL string) (refusal string, dims videoDimensions, measured bool) {
-	d, ok, measured := checkUploadWithinLimits(videoURL)
-	if !measured {
+	f, err := checkUploadWithinLimits(videoURL)
+	if err != nil {
 		// Could not check. Allowed by design — see checkUploadWithinLimits.
 		// Logged so a storage problem that silently disables the gate shows up
 		// as a pattern in the logs rather than as nothing at all.
-		log.Printf("upload size gate: could not measure %s — allowing", videoURL)
+		log.Printf("upload gate: could not measure %s — allowing (%v)", videoURL, err)
 		return "", videoDimensions{}, false
 	}
-	if !ok {
+
+	// Running time first. It is the limit a person is most likely to hit by
+	// accident — picking the wrong file from a camera roll — and telling them
+	// the video is too LONG is more useful than telling them it is too big.
+	if f.haveDuration() && f.Duration > uploadDurationLimit() {
+		return fmt.Sprintf(
+			"video is %s long, which is longer than this app takes (maximum %s)",
+			roundSeconds(f.Duration), roundSeconds(uploadDurationLimit()),
+		), f.videoDimensions, f.haveDimensions()
+	}
+
+	if f.haveDimensions() && f.LongSide() > uploadLongSideLimit() {
 		return fmt.Sprintf(
 			"video is %s, which is larger than this app supports (longest side must be %d or less)",
-			d, uploadLongSideLimit()), d, true
+			f.videoDimensions, uploadLongSideLimit()), f.videoDimensions, true
 	}
-	return "", d, true
+
+	if !f.haveDimensions() {
+		// The file said how long it is but not how big. Nothing to store, and
+		// nothing to refuse it for.
+		return "", videoDimensions{}, false
+	}
+	return "", f.videoDimensions, true
+}
+
+// roundSeconds renders a length the way a refusal message should read: whole
+// seconds, no fractions of a millisecond.
+func roundSeconds(d time.Duration) time.Duration {
+	return d.Round(time.Second)
 }

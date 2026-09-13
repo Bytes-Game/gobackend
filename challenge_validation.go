@@ -36,17 +36,23 @@ import (
 
 const (
 	// Tier-1 duration bounds
-	minResponseDurationMs = 2000   // < 2s = empty/glitched upload
-	maxResponseDurationMs = 180000 // > 3min = not short-form video
+	minVideoDurationMs = 2000 // < 2s = empty/glitched upload
+
+	// maxVideoDurationMs is the same three-minute ceiling the upload gate
+	// enforces, in the units this file works in. Derived from it, never
+	// typed again: this limit used to live only here, so it covered battle
+	// answers and not the challenges they answer, and a ten-minute challenge
+	// walked in through a door nobody was watching. See maxUploadDuration.
+	maxVideoDurationMs = int(maxUploadDuration / time.Millisecond)
 
 	// Tier-1 rate limit (Redis bucket: responses:rate:{userID}, EX 3600)
 	maxResponsesPerHour = 5
 
 	// Tier-2 community moderation thresholds
-	flagThreshold       = 5    // need at least 5 flags to consider hiding
-	flagRatioCutoff     = 0.6  // flags / max(views, flags) >= 0.6 → hide
-	relevanceLowCutoff  = 0.10 // below this score = "off-topic-ish" (down-rank in feed)
-	offTopicUserCutoff  = 0.4  // user with > 40% historically hidden responses gets stricter checks
+	flagThreshold      = 5    // need at least 5 flags to consider hiding
+	flagRatioCutoff    = 0.6  // flags / max(views, flags) >= 0.6 → hide
+	relevanceLowCutoff = 0.10 // below this score = "off-topic-ish" (down-rank in feed)
+	offTopicUserCutoff = 0.4  // user with > 40% historically hidden responses gets stricter checks
 )
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -57,11 +63,11 @@ const (
 // Returns nil on success or a user-facing error on failure.
 func validateChallengeResponseSubmission(payload AcceptChallengePayload, challenge Challenge) error {
 	// --- Duration bounds ---
-	if payload.DurationMs < minResponseDurationMs {
-		return fmt.Errorf("video too short — minimum %d seconds", minResponseDurationMs/1000)
+	if payload.DurationMs < minVideoDurationMs {
+		return fmt.Errorf("video too short — minimum %d seconds", minVideoDurationMs/1000)
 	}
-	if payload.DurationMs > maxResponseDurationMs {
-		return fmt.Errorf("video too long — maximum %d seconds", maxResponseDurationMs/1000)
+	if payload.DurationMs > maxVideoDurationMs {
+		return fmt.Errorf("video too long — maximum %d seconds", maxVideoDurationMs/1000)
 	}
 
 	// --- Video URL must not be empty ---
@@ -152,9 +158,12 @@ func enforceResponseRateLimit(userID string) error {
 // off-topic-looking responses.
 //
 // Heuristic: Jaccard-ish overlap of meaningful tokens between
-//   challenge.subject + challenge.prefix + challenge.category
+//
+//	challenge.subject + challenge.prefix + challenge.category
+//
 // and
-//   response.caption
+//
+//	response.caption
 //
 // If the caption is empty, fall back to neutral score (0.5) — we don't know,
 // we don't want to penalize creators who skip the caption field.
@@ -227,6 +236,7 @@ func tokenize(text string) []string {
 // After insertion we recount flags and auto-hide if both:
 //   - flag count >= flagThreshold
 //   - flag rate (flags / max(views, flags)) >= flagRatioCutoff
+//
 // This avoids a single brigade hiding good content, but quickly hides obviously
 // off-topic uploads that have been seen by many people without engagement.
 func FlagResponseHandler(w http.ResponseWriter, r *http.Request) {

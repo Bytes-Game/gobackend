@@ -326,8 +326,14 @@ type ChallengeResponse struct {
 
 // CreateChallengePayload is the request body for creating a challenge.
 type CreateChallengePayload struct {
-	CreatorID     string        `json:"creatorId"`
-	VideoURL      string        `json:"videoUrl"`
+	CreatorID string `json:"creatorId"`
+	VideoURL  string `json:"videoUrl"`
+	// DurationMs is how long the app says the video runs. A cheap first
+	// look, refused before the server goes anywhere near storage. It is
+	// what the phone claims, so it is not the last word — the upload gate
+	// measures the file itself. Zero means an app old enough not to send
+	// it, and is allowed through to that gate.
+	DurationMs    int           `json:"durationMs,omitempty"`
 	VideoVariants VideoVariants `json:"videoVariants,omitempty"` // optional multi-bitrate variants from device-side transcode
 	ThumbnailURL  string        `json:"thumbnailUrl"`
 	Prefix        string        `json:"prefix"`
