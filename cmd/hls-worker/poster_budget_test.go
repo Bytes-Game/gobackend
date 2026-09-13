@@ -114,8 +114,14 @@ func TestPoster_AnEasyPictureKeepsTheBestQuality(t *testing.T) {
 		"-y", ref).Run(); err != nil {
 		t.Skipf("could not build the reference: %v", err)
 	}
-	a, _ := os.Stat(got)
-	b, _ := os.Stat(ref)
+	a, err := os.Stat(got)
+	if err != nil {
+		t.Fatalf("stat %s: %v", got, err)
+	}
+	b, err := os.Stat(ref)
+	if err != nil {
+		t.Fatalf("stat %s: %v", ref, err)
+	}
 	if a.Size() != b.Size() {
 		t.Errorf("cover is %d bytes, the best rung is %d — a picture that "+
 			"already fits the budget was degraded for no reason",
