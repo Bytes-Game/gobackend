@@ -71,6 +71,18 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// What the app says the video runs to. Checked here so an obviously
+	// over-long upload is turned away before the server fetches any of it;
+	// the real decision is gateUpload below, which measures the file rather
+	// than trusting the phone. Zero means the app did not say — older
+	// builds do not — and falls through to that measurement.
+	if payload.DurationMs > maxVideoDurationMs {
+		http.Error(w, fmt.Sprintf(
+			"video too long — maximum %d seconds", maxVideoDurationMs/1000),
+			http.StatusBadRequest)
+		return
+	}
+
 	// 5 challenge creates per hour per user. Burst of 2 so back-to-back
 	// posts during a creative streak don't get throttled.
 	if !allowAction(payload.CreatorID, "challenge_create") {

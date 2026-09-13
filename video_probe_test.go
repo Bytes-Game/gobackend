@@ -233,10 +233,10 @@ func TestUploadLongSideLimit_EnvOverride(t *testing.T) {
 
 // An empty URL is "nothing to check", which must allow rather than refuse —
 // a challenge can legitimately be created before its video URL is known.
-func TestCheckUploadWithinLimits_EmptyURLAllows(t *testing.T) {
-	_, ok, measured := checkUploadWithinLimits("")
-	if !ok {
-		t.Error("an empty URL must not block creation")
+func TestGateUpload_EmptyURLAllows(t *testing.T) {
+	refusal, _, measured := gateUpload("")
+	if refusal != "" {
+		t.Errorf("an empty URL must not block creation, got %q", refusal)
 	}
 	if measured {
 		t.Error("nothing was measured, so measured must be false")
@@ -246,11 +246,11 @@ func TestCheckUploadWithinLimits_EmptyURLAllows(t *testing.T) {
 // The whole safety posture in one test: when the probe cannot reach storage,
 // the upload goes through. Refusing on "could not check" would turn a storage
 // blip into users who cannot post.
-func TestCheckUploadWithinLimits_FailsOpenWhenUnreachable(t *testing.T) {
+func TestGateUpload_FailsOpenWhenUnreachable(t *testing.T) {
 	// Port 0 on loopback is never listening, so this fails fast.
-	_, ok, measured := checkUploadWithinLimits("http://127.0.0.1:0/nope.mp4")
-	if !ok {
-		t.Error("an unreachable probe must fail OPEN, not block the upload")
+	refusal, _, measured := gateUpload("http://127.0.0.1:0/nope.mp4")
+	if refusal != "" {
+		t.Errorf("an unreachable probe must fail OPEN, got %q", refusal)
 	}
 	if measured {
 		t.Error("nothing was measured, so measured must be false")
