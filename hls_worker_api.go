@@ -204,6 +204,16 @@ func workerAuthed(h http.HandlerFunc) http.HandlerFunc {
 // RETURNING …. Postgres' FOR UPDATE SKIP LOCKED is the standard
 // queue-on-a-table primitive — no separate job table needed.
 //
+// hlsClaimMarker is what goes in hls_manifest_url while a worker holds a row.
+//
+// It is a sentinel in a URL column, which is a shape worth naming: every
+// reader has to know it is not a URL, and one that does not will hand the
+// string "PENDING" to a video player. That has happened — see the guard in
+// feed_engine.go. The SQL that writes and clears it still spells it inline,
+// because rewriting eight query strings to interpolate a constant is more
+// risk than it removes; a test holds every spelling to this one instead.
+const hlsClaimMarker = "PENDING"
+
 // "In progress" is encoded as hls_manifest_url = 'PENDING' so the
 // partial index challenges_pending_hls_idx (defined in
 // runMigrations) skips it too.
