@@ -54,17 +54,54 @@ const posterAtSeconds = 1.0
 
 // posterMaxWidth bounds the picture.
 //
-// It is shown full-bleed on a phone, so it wants to be sharp, but it is also
-// fetched before anything can be shown and therefore competes with the video
-// itself for the same link. 720 wide is the width of the rendition most
-// people are served, so a poster is never softer than the video behind it and
-// never costs more than it saves.
-const posterMaxWidth = 720
+// 540, down from 720. That is not a guess — it is where the measurements
+// landed. Encoding the same three reels at a range of widths and qualities
+// and scoring each against the native frame:
+//
+//	at ~41 KB    720 wide, quality 18   SSIM 0.845
+//	             540 wide, quality 10   SSIM 0.873
+//	             480 wide, quality 8    SSIM 0.874
+//
+// For any given number of BYTES, a narrower picture at higher quality beats
+// a wider one at lower quality. 540 is the turn: 480 gives up more on
+// landscape reels than it saves. So the width comes down and the quality
+// stays up, which is the opposite of the obvious move.
+const posterMaxWidth = 540
 
-// posterQuality is JPEG quality on ffmpeg's scale, where 2 is best and 31 is
-// worst. 6 lands around 40-60 KB at this width — small enough to arrive
-// before the video does, which is the whole point of it.
-const posterQuality = 6
+// posterMaxBytes is what a cover may cost.
+//
+// ══════════════════════════════════════════════════════════════════════════
+// A SIZE BUDGET, NOT A QUALITY NUMBER
+// ══════════════════════════════════════════════════════════════════════════
+//
+// This used to be a fixed quality of 6 and whatever size that produced.
+// Across the reels in this feed that was 3 KB to 109 KB — a THIRTY-FOLD
+// spread, decided by how busy the picture happened to be. The heavy end is
+// most of a video's opening download spent on a still image, in front of the
+// video it is delaying.
+//
+// The thing that has to be true is not "quality 6". It is that the cover is
+// on screen well before the video is. So that is what is fixed, and the
+// quality moves to meet it.
+//
+// Derived, not chosen: the app can start a reel once it holds the file's
+// index plus about two seconds of video — roughly 390 KB for a short reel,
+// 570 KB for a three-minute one (see prefixReadyBytesFor in the app). A
+// tenth of the smaller figure arrives in a tenth of the time, which is the
+// margin that makes the cover feel instant rather than merely early.
+const posterMaxBytes = 40 * 1024
+
+// posterQualityLadder is tried best-first until one fits [posterMaxBytes].
+//
+// Most reels clear the budget on the first rung, so the common case is the
+// quality this always produced and one ffmpeg call, same as before. Only a
+// busy picture walks down, and only as far as it has to.
+//
+// On ffmpeg's scale 2 is best and 31 is worst. The last rung is the floor:
+// if even that will not fit, the cover is kept anyway. A large cover is
+// worth more than none — a reel with no still is the black screen this whole
+// mechanism exists to remove.
+var posterQualityLadder = []int{6, 8, 10, 12, 16, 20}
 
 // posterTimeout bounds the grab. It is one frame from a local file, so a
 // second is generous; the cap exists because this runs inside a job budget
@@ -90,17 +127,33 @@ func makePoster(ctx context.Context, srcPath, outDir string) (string, error) {
 	// scale keeps the aspect ratio: -2 asks for whatever height matches the
 	// width, rounded to an even number, which the JPEG encoder requires. A
 	// video already narrower than the cap is left alone rather than blown up.
-	args := []string{
-		"-hide_banner", "-loglevel", "error",
-		"-ss", strconv.FormatFloat(posterAtSeconds, 'f', 2, 64),
-		"-i", srcPath,
-		"-frames:v", "1",
-		"-vf", fmt.Sprintf("scale='min(%d,iw)':-2", posterMaxWidth),
-		"-q:v", strconv.Itoa(posterQuality),
-		"-y", dst,
-	}
-	if out, err := exec.CommandContext(ctx, "ffmpeg", args...).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("ffmpeg: %v: %s", err, trimOutput(out))
+	//
+	// Walked best-first until one fits the budget. Each attempt overwrites
+	// the last, so what is left on disk is always the best rung that fit —
+	// or, if none did, the smallest one there is.
+	for _, q := range posterQualityLadder {
+		args := []string{
+			"-hide_banner", "-loglevel", "error",
+			"-ss", strconv.FormatFloat(posterAtSeconds, 'f', 2, 64),
+			"-i", srcPath,
+			"-frames:v", "1",
+			"-vf", fmt.Sprintf("scale='min(%d,iw)':-2", posterMaxWidth),
+			"-q:v", strconv.Itoa(q),
+			"-y", dst,
+		}
+		out, err := exec.CommandContext(ctx, "ffmpeg", args...).CombinedOutput()
+		if err != nil {
+			// Not worth walking the ladder for a failure that is about the
+			// video rather than the size — the next rung fails the same way.
+			return "", fmt.Errorf("ffmpeg: %v: %s", err, trimOutput(out))
+		}
+		// A file we cannot measure is one the check below will report on.
+		// Walking further would only overwrite it with another we cannot
+		// measure either.
+		st, err := os.Stat(dst)
+		if err != nil || st.Size() <= posterMaxBytes {
+			break
+		}
 	}
 
 	// A video shorter than the seek point produces no frame, and ffmpeg can
