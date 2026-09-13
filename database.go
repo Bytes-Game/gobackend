@@ -76,6 +76,11 @@ const alterStmts = `
 	DO $$ BEGIN ALTER TABLE posts ADD COLUMN emotion_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE posts ADD COLUMN energy_level VARCHAR(10) DEFAULT 'medium'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN custom_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	-- Suggestions the creator has turned down. Kept so the same ones are not
+	-- offered again every time they open their own video — see
+	-- tag_suggestions.go. Separate from custom_tags because "no" and "not yet
+	-- asked" are different answers, and only one of them should stay quiet.
+	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN dismissed_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE posts ADD COLUMN custom_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 
 	-- Multi-bitrate video variants. Maps quality label → CDN URL.
