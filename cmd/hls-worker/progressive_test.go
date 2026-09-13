@@ -108,7 +108,7 @@ func TestProgressive_ProducesAPlayableFileWithTheIndexInFront(t *testing.T) {
 	dir := t.TempDir()
 	src := makeSource(t, dir, "src.mp4", 1280, 720)
 
-	made := buildProgressiveMP4s(context.Background(), src, dir)
+	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
 	if len(made) == 0 {
 		t.Fatal("nothing was encoded from a perfectly ordinary 720p source")
 	}
@@ -164,7 +164,7 @@ func TestProgressive_SmallerThanTheThingItReplaces(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	made := buildProgressiveMP4s(context.Background(), src, dir)
+	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
 	path, ok := made["720p"]
 	if !ok {
 		t.Fatal("no 720p rendition from a 720p source")
@@ -191,7 +191,7 @@ func TestProgressive_NeverUpscales(t *testing.T) {
 	dir := t.TempDir()
 	src := makeSource(t, dir, "small.mp4", 640, 480)
 
-	made := buildProgressiveMP4s(context.Background(), src, dir)
+	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
 	if _, ok := made["720p"]; ok {
 		t.Error("a 480p source produced a 720p rendition")
 	}
@@ -221,7 +221,7 @@ func TestProgressive_ASilentVideoKeepsItsPicture(t *testing.T) {
 		t.Skipf("could not build the silent source: %v: %s", err, lastLine(string(out)))
 	}
 
-	made := buildProgressiveMP4s(context.Background(), src, dir)
+	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
 	path, ok := made["720p"]
 	if !ok {
 		t.Fatal("a silent video produced nothing at all")
@@ -240,14 +240,14 @@ func TestProgressive_RubbishInProducesNothingRatherThanRubbishOut(t *testing.T) 
 	// file that is not a video, has to come back as an empty map — the app
 	// then keeps playing the upload, which is exactly today's behaviour.
 	dir := t.TempDir()
-	if got := buildProgressiveMP4s(context.Background(), filepath.Join(dir, "nope.mp4"), dir); len(got) != 0 {
+	if got := buildProgressiveMP4s(context.Background(), filepath.Join(dir, "nope.mp4"), dir, 0); len(got) != 0 {
 		t.Errorf("got %v from a file that does not exist", got)
 	}
 	junk := filepath.Join(dir, "junk.mp4")
 	if err := os.WriteFile(junk, []byte("not a video"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := buildProgressiveMP4s(context.Background(), junk, dir); len(got) != 0 {
+	if got := buildProgressiveMP4s(context.Background(), junk, dir, 0); len(got) != 0 {
 		t.Errorf("got %v from a file that is not a video", got)
 	}
 }
@@ -290,7 +290,7 @@ func TestProgressive_DoesNotEnlargeASourceBetweenTheRungs(t *testing.T) {
 	dir := t.TempDir()
 	src := makeSource(t, dir, "between.mp4", 960, 720)
 
-	made := buildProgressiveMP4s(context.Background(), src, dir)
+	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
 	path, ok := made["720p"]
 	if !ok {
 		t.Fatal("a 960x720 source produced no 720p rendition")
@@ -316,7 +316,7 @@ func TestProgressive_NoTwoRenditionsAreTheSameFile(t *testing.T) {
 	dir := t.TempDir()
 	src := makeSource(t, dir, "tiny.mp4", 640, 360)
 
-	made := buildProgressiveMP4s(context.Background(), src, dir)
+	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
 	if len(made) != 1 {
 		t.Errorf("a 640x360 source produced %d renditions (%v); both rungs "+
 			"clamp to 640 so only one is worth making", len(made), made)
@@ -386,7 +386,7 @@ func TestProgressive_EncodesALeanFileInsteadOfServingItUntouched(t *testing.T) {
 			"it does not exercise the case", bitrate, r.label, r.maxBps)
 	}
 
-	made := buildProgressiveMP4s(context.Background(), src, dir)
+	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
 	if len(made) == 0 {
 		t.Fatalf("a lean source at %.2f Mbps produced no renditions. Serving "+
 			"the upload untouched is what this replaced: it leaves the app "+
@@ -421,7 +421,7 @@ func TestProgressive_ALeanFileKeepsItsBitrate(t *testing.T) {
 	if !ok || srcBps == 0 {
 		t.Skip("could not measure the clip's bitrate here")
 	}
-	made := buildProgressiveMP4s(context.Background(), src, dir)
+	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
 	out, ok := made["480p"]
 	if !ok {
 		t.Fatalf("no 480p rendition for an 854-wide lean source; got %v", made)
@@ -469,7 +469,7 @@ func TestProgressive_StillShrinksABigPictureAtALowBitrate(t *testing.T) {
 		t.Skip("could not measure the clip's bitrate here")
 	}
 
-	made := buildProgressiveMP4s(context.Background(), src, dir)
+	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
 	if len(made) == 0 {
 		t.Error("a 1080p source was left alone because its bitrate was low. " +
 			"Shrinking the picture is worth doing at any bitrate — every " +
@@ -507,7 +507,7 @@ func TestSourceShape_UnknownBitrateStillEncodes(t *testing.T) {
 	// Proven through the constant rather than by forging a container: the
 	// guard is `bitrate > 0 && bitrate <= threshold`, so zero fails the first
 	// half and the file is encoded.
-	made := buildProgressiveMP4s(context.Background(), src, dir)
+	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
 	if len(made) == 0 {
 		t.Error("an ordinary 720p clip produced no renditions at all")
 	}
@@ -553,7 +553,7 @@ func TestProgressive_HoldsTheCeilingOnHardContent(t *testing.T) {
 	}
 	t.Logf("source is %.2f Mbps", float64(srcBps)/1e6)
 
-	made := buildProgressiveMP4s(context.Background(), src, dir)
+	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
 	if len(made) == 0 {
 		t.Fatal("nothing was encoded, so the ceiling was never exercised")
 	}
@@ -601,7 +601,7 @@ func TestProgressive_TwoRungsShareASizeAtDifferentRates(t *testing.T) {
 	dir := t.TempDir()
 	src := makeSource(t, dir, "wide.mp4", 1280, 720)
 
-	made := buildProgressiveMP4s(context.Background(), src, dir)
+	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
 
 	for _, want := range []string{"480p", "720p", "720p_hq"} {
 		if _, ok := made[want]; !ok {
@@ -660,7 +660,7 @@ func TestProgressive_ASmallSourceStillGetsOneRendition(t *testing.T) {
 	dir := t.TempDir()
 	src := makeSource(t, dir, "small.mp4", 640, 360)
 
-	made := buildProgressiveMP4s(context.Background(), src, dir)
+	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
 	if len(made) != 1 {
 		t.Errorf("a 640-wide source produced %d renditions (%v); every rung "+
 			"clamps to 640 there, so they would be the same video stored "+

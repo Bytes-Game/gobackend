@@ -264,6 +264,11 @@ type pendingJob struct {
 	// whenever the worker's optional R2_PUBLIC_BASE_URL env is unset, so
 	// both sides always agree on where the bucket is publicly served.
 	PublicBaseURL string `json:"publicBaseUrl"`
+	// MaxSeconds is the longest the finished video may run; anything past
+	// it is cut. Sent by the backend rather than configured here, so the
+	// limit lives in one place — see pendingHLSJob on the server. Zero, or
+	// a backend too old to send it, means cut nothing.
+	MaxSeconds int `json:"maxSeconds"`
 }
 
 type reportPayload struct {
@@ -412,7 +417,7 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (jobResu
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return jobResult{}, err
 	}
-	if err := transcodeHLS(ctx, srcPath, outDir); err != nil {
+	if err := transcodeHLS(ctx, srcPath, outDir, job.MaxSeconds); err != nil {
 		return jobResult{}, fmt.Errorf("transcode: %w", err)
 	}
 
@@ -422,7 +427,7 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (jobResu
 	// This is what the app actually plays — see progressive.go. Never fatal:
 	// an empty map means the app keeps playing the uploaded file, exactly as
 	// it did before this existed.
-	localMP4s := buildProgressiveMP4s(ctx, srcPath, outDir)
+	localMP4s := buildProgressiveMP4s(ctx, srcPath, outDir, job.MaxSeconds)
 
 	// 3. Upload everything in outDir to R2 under hls/<id>/ for
 	// challenges, hls/resp/<id>/ for battle responses — the two tables
@@ -591,13 +596,22 @@ func probeHasAudio(src string) bool {
 // Audio handling: we probe `src` first and only declare audio renditions
 // if the source actually has audio. This avoids the silent-playback
 // loop bug described on probeHasAudio above.
-func transcodeHLS(ctx context.Context, src, outDir string) error {
+func transcodeHLS(ctx context.Context, src, outDir string, maxSeconds int) error {
 	hasAudio := probeHasAudio(src)
 
 	args := []string{
 		"-y", // overwrite existing files in outDir
 		"-i", src,
 	}
+	// The same ceiling the progressive encoder applies — see durationCutArgs.
+	// Both ladders have to agree, or one reel would have an HLS stream and an
+	// MP4 of different lengths.
+	//
+	// This replaced a flat "-t 90" that used to sit further down, written when
+	// reels were capped at 60 seconds. It outlived that cap: every video over
+	// 90 seconds has been served as a full-length MP4 and a 90-second HLS
+	// stream, with nothing reporting the difference.
+	args = append(args, durationCutArgs(maxSeconds)...)
 
 	// One -map per rendition. We map the audio stream too, but only
 	// when probe confirmed it's there — otherwise FFmpeg would emit
@@ -662,13 +676,6 @@ func transcodeHLS(ctx context.Context, src, outDir string) error {
 		}
 	}
 	args = append(args,
-		// Hard output cap: reels are ≤60s by product rule (client
-		// enforces it), so nothing legitimate exceeds this — but seed/
-		// test data pointed at full-length demo movies (a 10-minute
-		// 150MB file) whose 5-rung transcode outlives ANY runner
-		// window, wedging entire runs. 90s bounds every job to ~2min
-		// worst-case regardless of what the source claims to be.
-		"-t", "90",
 		"-var_stream_map", strings.Join(varMap, " "),
 		"-master_pl_name", "master.m3u8",
 		"-f", "hls",
