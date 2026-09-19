@@ -1958,18 +1958,38 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 			COALESCE(c.subject, '') as subject, COALESCE(c.prefix, '') as prefix,
 			COALESCE(p.caption, '') as caption,
 			-- What the video is ABOUT, for the open-vocabulary half of taste.
-			-- Only challenges carry content_topics and auto_tags (migrations
-			-- 005 and 006); posts have neither, so they contribute their own
-			-- tags and category and nothing else. Asking posts for a column
-			-- they do not have would not return blank — Postgres would reject
-			-- the whole query and every profile would rebuild as empty.
+			-- Posts carry neither content_topics nor auto_tags, so they
+			-- contribute their own tags and category and nothing else. Asking
+			-- posts for a column they do not have would not return blank —
+			-- Postgres would reject the whole query and every profile would
+			-- rebuild as empty.
 			COALESCE(c.content_topics::text, '[]') as c_topics,
 			COALESCE(c.auto_tags::text, '[]')     as c_auto,
 			COALESCE(c.custom_tags::text, '[]')   as c_tags,
-			COALESCE(p.custom_tags::text, '[]')   as p_tags
+			COALESCE(p.custom_tags::text, '[]')   as p_tags,
+			-- And the other half of a battle.
+			--
+			-- A watched battle is TWO videos, and this only ever learned from
+			-- the first. Somebody who watches nothing but battles was having
+			-- half of every viewing thrown away — and it is the half that
+			-- varies, since the challenge half is what they chose to open and
+			-- the answer is what they stayed for.
+			--
+			-- The newest answer, matching populateTopResponses, because that
+			-- is the one they were actually shown. See battle_answer_words.go.
+			COALESCE(r.content_topics::text, '[]') as r_topics,
+			COALESCE(r.auto_tags::text, '[]')      as r_auto,
+			COALESCE(r.custom_tags::text, '[]')    as r_tags
 		FROM feed_events fe
 		LEFT JOIN challenges c ON fe.content_type = 'challenge' AND fe.content_id = CAST(c.id AS TEXT)
 		LEFT JOIN posts p ON fe.content_type = 'post' AND fe.content_id = CAST(p.id AS TEXT)
+		LEFT JOIN LATERAL (
+			SELECT cr.content_topics, cr.auto_tags, cr.custom_tags
+			  FROM challenge_responses cr
+			 WHERE cr.challenge_id = c.id
+			 ORDER BY cr.created_at DESC
+			 LIMIT 1
+		) r ON TRUE
 		WHERE fe.user_id = $1
 		ORDER BY fe.created_at DESC
 		LIMIT 500`, userID)
@@ -1982,18 +2002,42 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		var completionCount int
 		eventTypes := make(map[string]int)
 
+		// A Scan that fails here used to be ignored, and that is the worst
+		// place in this function to ignore one. Scan fails for the whole
+		// result set at once — a column list and a destination list that do
+		// not line up fail on row 1 and on all 500 — and the loop then
+		// produced a profile built from nothing but zero values. No error, no
+		// log line, and the output is indistinguishable from a brand-new user
+		// who has watched nothing. Counted rather than logged per row, so one
+		// broken query is one line instead of five hundred.
+		scanFailures := 0
 		for rows.Next() {
 			var evType, cType, cID, cCat, pCat, subject, prefix, caption string
 			var cTopicsJSON, cAutoJSON, cTagsJSON, pTagsJSON string
+			var rTopicsJSON, rAutoJSON, rTagsJSON string
 			var completion float64
-			rows.Scan(&evType, &completion, &cType, &cID, &cCat, &pCat, &subject, &prefix, &caption,
-				&cTopicsJSON, &cAutoJSON, &cTagsJSON, &pTagsJSON)
+			if err := rows.Scan(&evType, &completion, &cType, &cID, &cCat, &pCat, &subject, &prefix, &caption,
+				&cTopicsJSON, &cAutoJSON, &cTagsJSON, &pTagsJSON,
+				&rTopicsJSON, &rAutoJSON, &rTagsJSON); err != nil {
+				if scanFailures == 0 {
+					log.Printf("user profile %s: cannot read an event row, so "+
+						"this profile is being rebuilt from less than it "+
+						"should be: %v", userID, err)
+				}
+				scanFailures++
+				continue
+			}
 
 			// One row is a challenge or a post, never both, so the unused side
-			// is an empty array and contributes nothing.
+			// is an empty array and contributes nothing. The answer columns
+			// are empty for a post and for a challenge nobody answered, which
+			// is the same "contributes nothing" by the same route.
 			rowTopics := jsonStrings(cTopicsJSON)
 			rowTags := append(jsonStrings(cAutoJSON), jsonStrings(cTagsJSON)...)
 			rowTags = append(rowTags, jsonStrings(pTagsJSON)...)
+			rowTopics = append(rowTopics, jsonStrings(rTopicsJSON)...)
+			rowTags = append(rowTags, jsonStrings(rAutoJSON)...)
+			rowTags = append(rowTags, jsonStrings(rTagsJSON)...)
 
 			// Prefer stored category, fall back to inference. Lowercase the key so
 			// CategoryAffinity/AvoidedCategories use the SAME canonical casing the
@@ -3094,6 +3138,24 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		// Cheap: at most ten short strings, and this runs inside the cached
 		// per-content computation rather than per request.
 		cs.Tags = mergeTags(normalizeTags(rawTags), normalizeTags(rawAutoTags))
+		// The other half of a battle, if this is one.
+		//
+		// A battle plays two videos and the ranker only ever described the
+		// first. Folding the shown answer's topics and tags in here is what
+		// makes the second one count — see battle_answer_words.go, which also
+		// says why the CATEGORY is deliberately left alone.
+		//
+		// Gated on the response count already read on the row above, so a
+		// short costs nothing. Inside computeContentScore, which is memoized
+		// per content for a minute, so a battle costs one extra indexed
+		// lookup per minute rather than one per request.
+		var answer answerWords
+		if respCount > 0 {
+			if cid, err := strconv.Atoi(contentID); err == nil {
+				answer = loadAnswerWords(cid)
+				cs.Topics, cs.Tags = foldInAnswer(cs.Topics, cs.Tags, answer)
+			}
+		}
 		// Category, with the source that actually EXAMINED the video
 		// ranked first — see categoryFromEvidence in content_tags.go.
 		// The creator's word used to win outright, so a model that had
@@ -3138,6 +3200,12 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		// tags. Tags describe the subject and the feel; a video tagged "funny"
 		// is telling us both. See emotionsForContent.
 		emotions = emotionsForContent(emotions, cs.Tags, subject, prefix, analysisText(analysis))
+		// And how the answer feels, where there is one. EmotionVector below is
+		// a set of flags rather than a blend, so a calm challenge answered with
+		// something frantic ends up honestly marked as both — which is what the
+		// viewer actually sat through. Nothing is overwritten and nothing is
+		// averaged, so this can only ever add a mood the battle really has.
+		emotions = append(emotions, answer.Emotions...)
 		for _, e := range emotions {
 			cs.EmotionVector[strings.ToLower(e)] = 1.0 // canonical lowercase — matches miner + EmotionPreference keys
 		}

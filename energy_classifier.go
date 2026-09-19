@@ -278,20 +278,47 @@ func scoreEnergy(category, subject, caption, creatorID string) (high, low float6
 }
 
 // creatorRecentEnergy returns the modal energy level of the user's
-// last few challenges. Returns "" (no opinion) for cold-start
+// last few videos. Returns "" (no opinion) for cold-start
 // creators with zero or one priors — too little signal to be useful.
 //
-// Cheap query backed by the existing challenges index on
-// (created_at DESC) — the LIMIT 5 keeps it bounded even on prolific
+// BOTH KINDS OF VIDEO, not just challenges.
+//
+// This used to read the challenges table alone, and that quietly excluded a
+// whole kind of user: somebody who answers other people's battles and never
+// posts one of their own had no priors at all, so this always abstained and
+// their energy was guessed from the words every single time. Answering is the
+// lighter act and plenty of people only ever do it — see the accept rate limit,
+// which is set three times higher than the create one for exactly that reason.
+//
+// A person's energy is a fact about the person, not about which table their
+// videos landed in.
+//
+// Cheap query backed by the created_at indexes on both tables — the LIMIT 5
+// on each leg and again on the union keeps it bounded even on prolific
 // creators.
 func creatorRecentEnergy(creatorID string) string {
 	const recentN = 5
 	rows, err := db.Query(
-		`SELECT COALESCE(energy_level, 'medium')
-		   FROM challenges
-		  WHERE creator_id = $1
-		  ORDER BY created_at DESC
-		  LIMIT $2`,
+		// Each leg is parenthesised. Without the brackets Postgres reads the
+		// ORDER BY and LIMIT as belonging to the whole union and refuses the
+		// statement outright — and this function swallows a query error as
+		// "no opinion", so the only symptom would have been an energy
+		// baseline that silently stopped existing for everybody.
+		`SELECT energy_level FROM (
+			(SELECT COALESCE(energy_level, 'medium') AS energy_level, created_at
+			   FROM challenges
+			  WHERE creator_id = $1
+			  ORDER BY created_at DESC
+			  LIMIT $2)
+			UNION ALL
+			(SELECT COALESCE(energy_level, 'medium') AS energy_level, created_at
+			   FROM challenge_responses
+			  WHERE responder_id = $1
+			  ORDER BY created_at DESC
+			  LIMIT $2)
+		 ) recent
+		 ORDER BY created_at DESC
+		 LIMIT $2`,
 		creatorID, recentN,
 	)
 	if err == sql.ErrNoRows || err != nil {

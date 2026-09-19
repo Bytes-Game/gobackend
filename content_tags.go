@@ -230,6 +230,38 @@ func categoryForContent(explicit string, tags []string, subject, prefix, caption
 	return inferCategory(subject, prefix, caption)
 }
 
+// categoryForResponse decides a battle answer's category.
+//
+// Same order of trust as categoryForContent, with one extra source slotted in
+// ahead of the keyword guess: the challenge being answered.
+//
+//  1. what the responder explicitly chose
+//  2. what the responder's tags say
+//  3. what the challenge they answered is about
+//  4. keyword matching on their caption — the guess
+//
+// Step 3 is the whole reason this is a separate function. An answer to "who is
+// better at dancing" is a dance video; that is not an inference, it is what
+// the person was asked for. And a response has almost nothing else to guess
+// from — no prefix, no subject, and a caption that is usually empty — so
+// without this step nearly every answer in the app would come back "general".
+//
+// It is still ranked BELOW anything the responder said themselves. Somebody
+// answering a dance challenge with a comedy bit has told us it is comedy, and
+// the challenge does not get to overrule them.
+func categoryForResponse(explicit string, tags []string, parentCategory, caption string) string {
+	if c := usableCategory(explicit); c != "" {
+		return c
+	}
+	if c := categoryFromTags(tags); c != "" {
+		return c
+	}
+	if c := usableCategory(strings.ToLower(strings.TrimSpace(parentCategory))); c != "" {
+		return c
+	}
+	return inferCategory("", "", caption)
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // TAGS ARE ALSO A MOOD SIGNAL
 // ════════════════════════════════════════════════════════════════════════════

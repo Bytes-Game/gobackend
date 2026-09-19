@@ -126,12 +126,32 @@ func buildTopicGraph() *topicGraph {
 	if db == nil {
 		return g
 	}
+	// Both halves of a battle, not just the challenge.
+	//
+	// This graph is built from co-occurrence: two subjects are related because
+	// videos keep being about both. Leaving answers out did not just lose
+	// rows, it lost the rows most likely to pair two subjects that nobody
+	// would tag together — an answer is somebody ELSE taking the same prompt
+	// somewhere new, which is exactly the link this is trying to find.
+	//
+	// An answer's visibility is its challenge's: a response has no visibility
+	// or status column of its own, and it is only ever shown as part of the
+	// battle it belongs to. Hidden answers are left out — they are not shown
+	// to anyone, so nothing should be learned from them.
 	rows, err := db.Query(`
 		SELECT COALESCE(content_topics::text, '[]')
 		  FROM challenges
 		 WHERE ` + searchableWhere("") + `
 		   AND content_topics IS NOT NULL
-		   AND content_topics <> '[]'::jsonb`)
+		   AND content_topics <> '[]'::jsonb
+		UNION ALL
+		SELECT COALESCE(cr.content_topics::text, '[]')
+		  FROM challenge_responses cr
+		  JOIN challenges c ON c.id = cr.challenge_id
+		 WHERE ` + searchableWhere("c") + `
+		   AND COALESCE(cr.is_hidden, FALSE) = FALSE
+		   AND cr.content_topics IS NOT NULL
+		   AND cr.content_topics <> '[]'::jsonb`)
 	if err != nil {
 		log.Printf("topic graph: %v", err)
 		return g

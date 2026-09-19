@@ -131,14 +131,18 @@ func AdminReadAnalysisHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, readAnalysisRows(table, kind, 0, limit))
 }
 
-// analysisCreatorColumns names the two things the creator said about their own
+// analysisCreatorColumns names the two things the uploader said about their own
 // video: the category they picked and the tags they typed.
 //
-// Both live only on challenges. A response is somebody's answer to another
-// person's challenge, so it never had a category or tags of its own, and those
-// columns were never added to its table.
+// Both tables have them now. They did not always: a response is somebody's
+// answer to another person's challenge, and these columns were added to the
+// challenges table and not to that one. While that was true this function
+// returned two literals for responses, so the endpoint reported every answer
+// in the app as having no creator category and nothing disputed — which reads
+// exactly like "the creator and the model agree" and meant the opposite.
+// Migration 008 added the columns; this reads them.
 //
-// This is a function rather than two words inside the query because getting a
+// It stays a function rather than two words inside the query because getting a
 // column name wrong here is not a small mistake. Postgres does not hand back an
 // empty value for a column that does not exist — it refuses the whole
 // statement. So a single wrong name returns nothing for every video at once,
@@ -146,11 +150,16 @@ func AdminReadAnalysisHandler(w http.ResponseWriter, r *http.Request) {
 // a broken query. That is exactly what happened: this asked for a column called
 // "tags", the creator's tags are in custom_tags, and the endpoint answered null
 // for the entire catalogue.
+//
+// The unknown-table branch is the same two literals as before. table is chosen
+// by hlsTableForKind from a fixed pair and can never be anything else, but a
+// wrong guess here takes down the query for every row, so it guesses nothing.
 func analysisCreatorColumns(table string) string {
-	if table == "challenges" {
+	switch table {
+	case "challenges", "challenge_responses":
 		return `COALESCE(category, ''), COALESCE(custom_tags::text, '[]')`
 	}
-	// Literals, not columns. Nothing to read, so nothing to ask for.
+	// Literals, not columns. Nothing we can name safely, so nothing is named.
 	return `'', '[]'`
 }
 
