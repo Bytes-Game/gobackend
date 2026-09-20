@@ -736,10 +736,33 @@ func meiliSearchChallenges(query string, limit int) []challengeHit {
 	if err != nil {
 		return nil
 	}
+	// Meilisearch is asked for everything and the answer is filtered here.
+	//
+	// The index holds every challenge, private ones included, and this request
+	// carries no filter — so before this loop checked, a friends-only video
+	// could come back as a search result and, through
+	// candidate_sources.go, land in somebody's feed.
+	//
+	// It has been dormant rather than harmless: the deployed server has no
+	// Meilisearch configured, so this returns nothing and the Postgres
+	// fallback (which does filter) does the work. It would have started
+	// leaking on the day somebody switched Meilisearch on.
+	//
+	// Filtered in Go rather than in the query on purpose. A Meilisearch filter
+	// only works on attributes marked filterable in the index settings, and if
+	// that setting is missing the search fails or ignores it — a privacy rule
+	// that depends on remote configuration being right is one that can be
+	// switched off by accident. This cannot.
 	out := make([]challengeHit, 0, len(res.Hits))
-	for i, hit := range res.Hits {
+	for _, hit := range res.Hits {
 		doc := decodeHit(hit)
-		out = append(out, challengeHit{Ch: meiliDocToChallenge(doc), Rank: i})
+		ch := meiliDocToChallenge(doc)
+		if !isSearchable(ch.Visibility, ch.Status) {
+			continue
+		}
+		// Rank is position among what is actually returned, so dropping a
+		// hidden hit does not leave a gap the decay then reads as distance.
+		out = append(out, challengeHit{Ch: ch, Rank: len(out)})
 	}
 	return out
 }

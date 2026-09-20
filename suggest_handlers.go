@@ -125,6 +125,57 @@ func initChallengeSubjectsIndex() {
 	})
 }
 
+// subjectsPeopleHaveUsed returns every subject a search could actually land
+// on, and how many challenges use it.
+//
+// Split out of seedChallengeSubjects so there is exactly ONE copy of this
+// query. The test that proves a private subject never reaches the public
+// autocomplete calls this; when the test held its own copy of the statement,
+// the copy was the thing being tested and the real one could drift away from
+// it unnoticed.
+//
+// Only findable subjects, which is the whole point — see the filter below.
+func subjectsPeopleHaveUsed() map[string]int {
+	out := map[string]int{}
+	if db == nil {
+		return out
+	}
+	// Only subjects search can actually return.
+	//
+	// Without this line every subject in the table went into an index served
+	// at /suggest/challenge-subject, which is a PUBLIC route — no sign-in
+	// required. Somebody's friends-only challenge is titled "who is better at
+	// <something private>", and that text was being typed back to strangers
+	// as an autocomplete suggestion.
+	//
+	// It is also the exact usability bug searchable_population.go was written
+	// to end: suggest a word, then find nothing when it is tapped, because the
+	// only video about it is one the searcher may not see. That fix reached
+	// three callers. This was a fourth.
+	rows, err := db.Query(
+		`SELECT lower(trim(subject)) AS s, COUNT(*) AS n
+		   FROM challenges
+		  WHERE subject IS NOT NULL AND length(trim(subject)) > 0
+		    AND ` + searchableWhere("") + `
+		  GROUP BY lower(trim(subject))`,
+	)
+	if queryFailed("the list of subjects people have used",
+		"the subject box will suggest only the curated list", err) {
+		return out
+	}
+	defer rows.Close()
+	bad := 0
+	for rows.Next() {
+		var subject string
+		var n int
+		if scanFailed("a subject for the autocomplete", rows.Scan(&subject, &n), &bad) {
+			continue
+		}
+		out[subject] = n
+	}
+	return out
+}
+
 // seedChallengeSubjects pushes the curated seed list AND every distinct
 // subject from existing challenges into Meilisearch. Runs once on boot
 // (called from main.go after InitMeilisearch). Idempotent: documents
@@ -156,26 +207,9 @@ func seedChallengeSubjects() {
 	// Fold in DB-known subjects. Best-effort — if the query errors
 	// (cold start before tables exist, etc.) we still seed the
 	// curated list.
-	if db != nil {
-		rows, err := db.Query(
-			`SELECT lower(trim(subject)) AS s, COUNT(*) AS n
-			   FROM challenges
-			  WHERE subject IS NOT NULL AND length(trim(subject)) > 0
-			  GROUP BY lower(trim(subject))`,
-		)
-		if !queryFailed("the list of subjects people have used",
-			"the subject box will suggest nothing", err) {
-			defer rows.Close()
-			for rows.Next() {
-				var s string
-				var n int
-				if rows.Scan(&s, &n) != nil {
-					continue
-				}
-				if combined[s] < n {
-					combined[s] = n
-				}
-			}
+	for subject, n := range subjectsPeopleHaveUsed() {
+		if combined[subject] < n {
+			combined[subject] = n
 		}
 	}
 
@@ -207,9 +241,23 @@ func seedChallengeSubjects() {
 // Best-effort and async-safe: callers can fire-and-forget. We don't
 // fail the parent create on an indexer hiccup; Meilisearch will catch
 // up on the next boot's seedChallengeSubjects pass anyway.
-func recordSubjectUsage(subject string) {
+//
+// IT TAKES THE VISIBILITY, and that is the whole point of the signature.
+//
+// This used to take a subject and nothing else, and the caller handed it
+// every challenge — including the friends-only ones it had checked the
+// visibility of two lines earlier, to decide who to notify. So a private
+// challenge's title reached a public autocomplete the moment it was posted,
+// with no batch job needed to carry it there.
+//
+// Asking for the fields rather than a bool so the rule lives in one place
+// (isSearchable) instead of being re-decided at each call site.
+func recordSubjectUsage(subject, visibility, status string) {
 	subject = strings.ToLower(strings.TrimSpace(subject))
 	if subject == "" {
+		return
+	}
+	if !isSearchable(visibility, status) {
 		return
 	}
 	subjectUsageMu.Lock()

@@ -284,6 +284,7 @@ var runByATest = map[string]string{
 	"hls_dispatch.go:hlsWorkWaiting":           "TestRuntimeQueries_ClausesGluedOnAtRequestTime",
 	"audition_ladder.go:auditionsDueForReview": "TestRuntimeQueries_ClausesGluedOnAtRequestTime",
 	"topic_graph.go:buildTopicGraph":           "TestTopicGraph_CountsBothHalvesOfABattle",
+	"suggest_handlers.go:subjectsPeopleHaveUsed": "TestLeak_APrivateSubjectNeverReachesTheSuggestionList",
 
 	// Built inside an HTTP handler, where the shape depends on the request.
 	"profile_handlers.go:UpdateUserProfileHandler":  "TestRuntimeQueries_HandlersThatBuildTheirOwnSQL",

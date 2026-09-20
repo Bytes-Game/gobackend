@@ -130,7 +130,7 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	// the next typer who matches it gets it ranked higher. Fire-and-
 	// forget: a hiccup in the suggest index never blocks the create
 	// response.
-	go recordSubjectUsage(challenge.Subject)
+	go recordSubjectUsage(challenge.Subject, challenge.Visibility, challenge.Status)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
