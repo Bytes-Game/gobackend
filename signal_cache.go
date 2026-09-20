@@ -164,7 +164,8 @@ func warmUserSignalCaches(userID string) {
 		  AND fe.event_type = 'loop'
 		  AND fe.created_at > NOW() - INTERVAL '7 days'
 	`, userID)
-	if err == nil {
+	if !queryFailed("which categories user "+userID+" replays",
+		"that signal is off for them until the next refresh", err) {
 		for rows.Next() {
 			var cat string
 			if rows.Scan(&cat) == nil && cat != "" {
@@ -186,7 +187,8 @@ func warmUserSignalCaches(userID string) {
 		  AND fe.event_type = 'unmute'
 		  AND fe.created_at > NOW() - INTERVAL '7 days'
 	`, userID)
-	if err == nil {
+	if !queryFailed("which creators user "+userID+" turns the sound on for",
+		"that signal is off for them until the next refresh", err) {
 		for rows.Next() {
 			var id string
 			if rows.Scan(&id) == nil && id != "" {
@@ -206,7 +208,8 @@ func warmUserSignalCaches(userID string) {
 		  AND event_type = 'profile_visit'
 		  AND created_at > NOW() - INTERVAL '24 hours'
 	`, userID)
-	if err == nil {
+	if !queryFailed("whose profiles user "+userID+" opened today",
+		"that signal is off for them until the next refresh", err) {
 		for rows.Next() {
 			var id string
 			if rows.Scan(&id) == nil && id != "" {

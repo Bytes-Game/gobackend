@@ -2,7 +2,9 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strings"
@@ -193,7 +195,13 @@ func loadCreatorContent(creatorID string, windowDays int) ([]CreatorContentSumma
 			'post'                                  AS content_type,
 			COALESCE(NULLIF(caption, ''), 'Post')   AS title,
 			COALESCE(category, 'other')             AS category,
-			views, likes,
+			-- A post's likes are rows in post_likes, the same way a
+			-- challenge's are rows in challenge_likes. There is no likes
+			-- column on posts and there never was, so this used to name one
+			-- that does not exist -- which does not return zero, it takes
+			-- down the whole statement and the creator dashboard reported
+			-- "could not load" for every creator on the platform.
+			views, COALESCE((SELECT COUNT(*) FROM post_likes WHERE post_id = p.id), 0) AS likes,
 			(SELECT COALESCE(AVG(completion_rate), 0) FROM feed_events
 				WHERE content_id = p.id::text AND content_type = 'post' AND event_type = 'view'
 				  AND created_at > NOW() - ($2::int || ' days')::interval) AS completion,
@@ -203,7 +211,7 @@ func loadCreatorContent(creatorID string, windowDays int) ([]CreatorContentSumma
 				  AND created_at > NOW() - ($2::int || ' days')::interval) AS skip_rate,
 			created_at
 		FROM posts p
-		WHERE p.user_id::text = $1
+		WHERE p.author_id::text = $1
 		  AND p.created_at > NOW() - ($2::int || ' days')::interval
 
 		ORDER BY 9 DESC
@@ -255,14 +263,14 @@ func categoryBenchmark(category string, yours float64, creatorID string, windowD
 			GROUP BY c.creator_id
 			HAVING COUNT(*) >= 5
 			UNION ALL
-			SELECT user_id::text AS cid,
+			SELECT author_id::text AS cid,
 			       AVG(completion_rate) AS avg_completion
 			FROM feed_events fe
 			JOIN posts p ON fe.content_type='post' AND fe.content_id = p.id::text
 			WHERE COALESCE(p.category,'other') = $1
 			  AND fe.event_type = 'view'
 			  AND fe.created_at > NOW() - ($3::int || ' days')::interval
-			GROUP BY p.user_id
+			GROUP BY p.author_id
 			HAVING COUNT(*) >= 5
 		)
 		SELECT avg_completion FROM per_creator WHERE cid != $2
@@ -532,7 +540,14 @@ func loadOneCreatorContent(contentType, contentID string, windowDays int) (Creat
 			SELECT
 				COALESCE(NULLIF(p.caption, ''), 'Post'),
 				COALESCE(p.category, 'other'),
-				p.views, p.likes,
+				-- Counted from post_likes, the same way a challenge's are
+				-- counted from challenge_likes just above. There is no likes
+				-- column on posts. Naming one did not return zero, it made
+				-- Postgres refuse the statement -- so the per-post breakdown
+				-- in the creator dashboard failed every single time anyone
+				-- opened one.
+				p.views,
+				COALESCE((SELECT COUNT(*) FROM post_likes WHERE post_id = p.id), 0),
 				(SELECT COALESCE(AVG(completion_rate), 0) FROM feed_events
 					WHERE content_id = p.id::text AND content_type = 'post' AND event_type = 'view'
 					  AND created_at > NOW() - ($2::int || ' days')::interval),
@@ -545,6 +560,14 @@ func loadOneCreatorContent(contentType, contentID string, windowDays int) (Creat
 	}
 	err := db.QueryRow(query, contentID, windowDays).Scan(&s.Title, &s.Category, &s.Views, &s.Likes, &s.Completion, &s.SkipRate)
 	if err != nil {
+		// The caller turns this into an HTTP error, so it does reach somebody
+		// -- but only as "could not load", which is the same words a deleted
+		// video produces. Naming the cause here is what separates the two in
+		// a log.
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("creator insights: could not load %s %s over %d days: %v",
+				contentType, contentID, windowDays, err)
+		}
 		return s, err
 	}
 	viewsF := float64(s.Views)
@@ -561,16 +584,38 @@ func creatorOwnsContent(creatorID, contentType, contentID string) bool {
 	if db == nil {
 		return false
 	}
+	// Each query is written out at the call rather than assigned to a
+	// variable first, so the "does every query compile" test can see them.
+	// It reads the source, and a query held in a variable is invisible to it —
+	// which is how the posts branch below sat here naming a column that does
+	// not exist. posts stores its owner in author_id. That query failed every
+	// time it ran, and because a failure here returns false, the effect was
+	// that NO creator could ever open the stats for their own post. It failed
+	// in the safe direction, which is why nobody noticed for so long.
 	var owner string
-	var query string
-	if contentType == "challenge" {
-		query = `SELECT creator_id::text FROM challenges WHERE id::text = $1`
-	} else if contentType == "post" {
-		query = `SELECT user_id::text FROM posts WHERE id::text = $1`
-	} else {
+	var err error
+	switch contentType {
+	case "challenge":
+		err = db.QueryRow(
+			`SELECT creator_id::text FROM challenges WHERE id::text = $1`,
+			contentID).Scan(&owner)
+	case "post":
+		err = db.QueryRow(
+			`SELECT author_id::text FROM posts WHERE id::text = $1`,
+			contentID).Scan(&owner)
+	default:
 		return false
 	}
-	if err := db.QueryRow(query, contentID).Scan(&owner); err != nil {
+	if err != nil {
+		// Not-found is an ordinary answer: somebody asked about a deleted or
+		// made-up id. Anything else is this server failing to answer a
+		// question it should be able to, and it denies access either way — so
+		// without a line here a broken query looks exactly like a creator
+		// asking about somebody else's video.
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("creatorOwnsContent: could not check who owns %s %s, "+
+				"denying access: %v", contentType, contentID, err)
+		}
 		return false
 	}
 	return owner == creatorID

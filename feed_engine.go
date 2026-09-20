@@ -1941,7 +1941,10 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 
 	// Count total events
 	var eventCount int
-	db.QueryRow(`SELECT COUNT(*) FROM feed_events WHERE user_id = $1`, userID).Scan(&eventCount)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM feed_events WHERE user_id = $1`, userID).Scan(&eventCount); err != nil {
+		queryFailed("computeUserProfile: could not read feed_events",
+			"carrying on as if the answer were empty", err)
+	}
 	p.EventCount = eventCount
 
 	if eventCount == 0 {
@@ -1993,7 +1996,9 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		WHERE fe.user_id = $1
 		ORDER BY fe.created_at DESC
 		LIMIT 500`, userID)
-	if err == nil {
+	if !queryFailed("the last 500 things user "+userID+" watched",
+		"their taste profile is being rebuilt from nothing, which looks "+
+			"exactly like a brand-new account", err) {
 		defer rows.Close()
 
 		categoryScores := make(map[string]float64)
@@ -2173,12 +2178,26 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// === Social Drive ===
 	// How much does the user engage with followed creators vs random content?
 	var followedEngagement, totalEngagement int
-	db.QueryRow(`
+	if err := db.QueryRow(`
 		SELECT COUNT(*) FROM feed_events fe
-		WHERE fe.user_id = $1 AND fe.event_type IN ('like','comment','share','save','rewatch')`, userID).Scan(&totalEngagement)
-	db.QueryRow(`
+		WHERE fe.user_id = $1 AND fe.event_type IN ('like','comment','share','save','rewatch')`, userID).Scan(&totalEngagement); err != nil {
+		queryFailed("computeUserProfile: could not read feed_events",
+			"carrying on as if the answer were empty", err)
+	}
+	// CAST($1::text AS INT), not CAST($1 AS INT).
+	//
+	// One parameter gets ONE type. Casting it straight to int settles it as an
+	// int, and then "fe.user_id = $1" is text against an integer, which
+	// Postgres refuses -- taking the whole statement with it. Saying ::text
+	// first pins the parameter as text, which is what it is, and the cast to
+	// int happens on the value.
+	//
+	// The Scan error was thrown away, so the count stayed zero and SocialDrive
+	// was a flat 0.5 for every user on the platform. That is the number that
+	// decides whether a feed leans on who you follow.
+	if err := db.QueryRow(`
 		SELECT COUNT(DISTINCT fe.id) FROM feed_events fe
-		JOIN follows f ON f.follower_id = CAST($1 AS INT)
+		JOIN follows f ON f.follower_id = CAST($1::text AS INT)
 		WHERE fe.user_id = $1
 		AND fe.event_type IN ('like','comment','share','save','rewatch')
 		AND (
@@ -2189,7 +2208,10 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 			(fe.content_type = 'challenge' AND EXISTS (
 				SELECT 1 FROM challenges c WHERE CAST(c.id AS TEXT) = fe.content_id AND c.creator_id = f.following_id
 			))
-		)`, userID).Scan(&followedEngagement)
+		)`, userID).Scan(&followedEngagement); err != nil {
+		log.Printf("user profile %s: could not count engagement with followed "+
+			"creators, so SocialDrive falls back to neutral: %v", userID, err)
+	}
 	// Shrink toward the 0.5 neutral prior so a single engagement on a followed
 	// creator (1-of-1) doesn't read as SocialDrive=1.0 and trip the >0.6 serve
 	// gate on no evidence. smoothedRate handles totalEngagement==0 → 0.5.
@@ -2199,14 +2221,17 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// How many unique categories does the user engage with, relative to how many
 	// items they've engaged with at all?
 	var uniqueCategories, totalNoveltyItems int
-	db.QueryRow(`
+	if err := db.QueryRow(`
 		SELECT COUNT(DISTINCT COALESCE(c.category, p.category, 'other')), COUNT(*)
 		FROM feed_events fe
 		LEFT JOIN challenges c ON fe.content_type = 'challenge' AND fe.content_id = CAST(c.id AS TEXT)
 		LEFT JOIN posts p ON fe.content_type = 'post' AND fe.content_id = CAST(p.id AS TEXT)
 		WHERE fe.user_id = $1
-		  AND (fe.event_type IN ('like','comment','share','save')
-		       OR (fe.event_type = 'view' AND fe.completion_rate > 0.5))`, userID).Scan(&uniqueCategories, &totalNoveltyItems)
+		AND (fe.event_type IN ('like','comment','share','save')
+		OR (fe.event_type = 'view' AND fe.completion_rate > 0.5))`, userID).Scan(&uniqueCategories, &totalNoveltyItems); err != nil {
+		queryFailed("computeUserProfile: could not read feed_events",
+			"carrying on as if the answer were empty", err)
+	}
 	// Count a 'view' only when actually watched (>50%), not on mere exposure:
 	// NoveltyTolerance is meant to capture tolerance FOR novelty, but the feed
 	// controls breadth of exposure, so counting passive views measured the feed's
@@ -2227,14 +2252,17 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// content scorer uses) restores genuine per-user variance.
 	var completedEnergyN int
 	var avgEnergy float64
-	db.QueryRow(`
+	if err := db.QueryRow(`
 		SELECT COUNT(*),
-		       COALESCE(AVG(CASE COALESCE(c.energy_level,'medium')
-		            WHEN 'high' THEN 0.85 WHEN 'low' THEN 0.25 ELSE 0.55 END), 0.5)
+		COALESCE(AVG(CASE COALESCE(c.energy_level,'medium')
+		WHEN 'high' THEN 0.85 WHEN 'low' THEN 0.25 ELSE 0.55 END), 0.5)
 		FROM feed_events fe
 		JOIN challenges c ON fe.content_type = 'challenge'
-		                 AND fe.content_id = CAST(c.id AS TEXT)
-		WHERE fe.user_id = $1 AND fe.completion_rate > 0.7`, userID).Scan(&completedEnergyN, &avgEnergy)
+		AND fe.content_id = CAST(c.id AS TEXT)
+		WHERE fe.user_id = $1 AND fe.completion_rate > 0.7`, userID).Scan(&completedEnergyN, &avgEnergy); err != nil {
+		queryFailed("computeUserProfile: could not read feed_events",
+			"carrying on as if the answer were empty", err)
+	}
 	if completedEnergyN > 0 {
 		p.EnergyPreference = avgEnergy
 	}
@@ -2246,31 +2274,34 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// loss-recovery ego-repair logic almost never fired for the users it targets.
 	// A win = the user's response has the most votes in its challenge (and >0);
 	// a loss = it has fewer than the top response. Ties at the top count as wins.
-	db.QueryRow(`
+	if err := db.QueryRow(`
 		WITH my AS (
-			SELECT id AS response_id, challenge_id
-			FROM challenge_responses
-			WHERE responder_id = CAST($1 AS INT)
-			  AND created_at > NOW() - INTERVAL '7 days'
+		SELECT id AS response_id, challenge_id
+		FROM challenge_responses
+		WHERE responder_id = CAST($1 AS INT)
+		AND created_at > NOW() - INTERVAL '7 days'
 		),
 		vc AS (
-			SELECT cr.challenge_id, cr.id AS response_id, COUNT(cv.id) AS votes
-			FROM challenge_responses cr
-			LEFT JOIN challenge_votes cv ON cv.response_id = cr.id
-			WHERE cr.challenge_id IN (SELECT challenge_id FROM my)
-			GROUP BY cr.challenge_id, cr.id
+		SELECT cr.challenge_id, cr.id AS response_id, COUNT(cv.id) AS votes
+		FROM challenge_responses cr
+		LEFT JOIN challenge_votes cv ON cv.response_id = cr.id
+		WHERE cr.challenge_id IN (SELECT challenge_id FROM my)
+		GROUP BY cr.challenge_id, cr.id
 		),
 		ranked AS (
-			SELECT response_id, votes,
-			       MAX(votes) OVER (PARTITION BY challenge_id) AS top
-			FROM vc
+		SELECT response_id, votes,
+		MAX(votes) OVER (PARTITION BY challenge_id) AS top
+		FROM vc
 		)
 		SELECT
-			COUNT(*) FILTER (WHERE votes = top AND top > 0) AS wins,
-			COUNT(*) FILTER (WHERE votes < top) AS losses
+		COUNT(*) FILTER (WHERE votes = top AND top > 0) AS wins,
+		COUNT(*) FILTER (WHERE votes < top) AS losses
 		FROM ranked
 		WHERE response_id IN (SELECT response_id FROM my)`,
-		userID).Scan(&p.RecentWins, &p.RecentLosses)
+		userID).Scan(&p.RecentWins, &p.RecentLosses); err != nil {
+		queryFailed("computeUserProfile: could not read challenge_responses",
+			"carrying on as if the answer were empty", err)
+	}
 	// Ego sensitivity scales with battle ACTIVITY (a competitiveness proxy):
 	// more battles → more ego-invested. Always assign — including 0 battles → 0 —
 	// so a non-battler isn't left at the 0.5 default and thereby read as MORE
@@ -2284,24 +2315,30 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// TotalWatchTimeMs = VIEW-only watch time. Summing watch_duration_ms across
 	// ALL event types double-counted the same seconds (view + complete +
 	// impression + pause each carry overlapping durations for one item).
-	db.QueryRow(`
+	if err := db.QueryRow(`
 		SELECT
-			COUNT(DISTINCT session_id) FILTER (WHERE session_id <> ''),
-			COALESCE(SUM(watch_duration_ms) FILTER (WHERE event_type = 'view'), 0)
-		FROM feed_events WHERE user_id = $1`, userID).Scan(&sessionCount, &totalWatchMs)
+		COUNT(DISTINCT session_id) FILTER (WHERE session_id <> ''),
+		COALESCE(SUM(watch_duration_ms) FILTER (WHERE event_type = 'view'), 0)
+		FROM feed_events WHERE user_id = $1`, userID).Scan(&sessionCount, &totalWatchMs); err != nil {
+		queryFailed("computeUserProfile: could not read feed_events",
+			"carrying on as if the answer were empty", err)
+	}
 	p.TotalSessions = sessionCount
 	p.TotalWatchTimeMs = totalWatchMs
 	// Session length = average wall-clock span (first→last event) per session.
 	// The old totalWatchMs/sessionCount inflated this ~2-3x via the double-count
 	// above and mis-drove the cohort gates (at-risk < 90s, power > 240s).
 	var avgSpanSec float64
-	db.QueryRow(`
+	if err := db.QueryRow(`
 		SELECT COALESCE(AVG(span), 0) FROM (
-			SELECT EXTRACT(EPOCH FROM (MAX(created_at) - MIN(created_at))) AS span
-			FROM feed_events
-			WHERE user_id = $1 AND session_id <> ''
-			GROUP BY session_id
-		) s`, userID).Scan(&avgSpanSec)
+		SELECT EXTRACT(EPOCH FROM (MAX(created_at) - MIN(created_at))) AS span
+		FROM feed_events
+		WHERE user_id = $1 AND session_id <> ''
+		GROUP BY session_id
+		) s`, userID).Scan(&avgSpanSec); err != nil {
+		queryFailed("computeUserProfile: could not read feed_events",
+			"carrying on as if the answer were empty", err)
+	}
 	if avgSpanSec > 0 {
 		p.AvgSessionSec = int(avgSpanSec)
 	}
@@ -2313,9 +2350,12 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		GROUP BY h ORDER BY c DESC LIMIT 4`, userID)
 	if err == nil {
 		defer hourRows.Close()
+		hourRowsBad := 0
 		for hourRows.Next() {
 			var h, c int
-			hourRows.Scan(&h, &c)
+			if scanFailed("which hours user "+userID+" watches in", hourRows.Scan(&h, &c), &hourRowsBad) {
+				continue
+			}
 			p.ActiveHours = append(p.ActiveHours, h)
 		}
 	}
@@ -2338,10 +2378,13 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		GROUP BY creator_id ORDER BY total DESC LIMIT 10`, userID)
 	if err == nil {
 		defer creatorRows.Close()
+		creatorRowsBad := 0
 		for creatorRows.Next() {
 			var cid string
 			var score float64
-			creatorRows.Scan(&cid, &score)
+			if scanFailed("which creators user "+userID+" keeps coming back to", creatorRows.Scan(&cid, &score), &creatorRowsBad) {
+				continue
+			}
 			if cid != "" {
 				p.PreferredCreators = append(p.PreferredCreators, cid)
 			}
@@ -2379,10 +2422,13 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		hourCatCount := make(map[int]map[string]int) // hour → cat → total count
 		hourEnergySum := make(map[int]float64)       // hour → sum of energy scores
 		hourEnergyCount := make(map[int]int)         // hour → count
+		hourCatRowsBad := 0
 		for hourCatRows.Next() {
 			var h, cnt int
 			var cat, energy string
-			hourCatRows.Scan(&h, &cat, &energy, &cnt)
+			if scanFailed("what user "+userID+" watches at which hour", hourCatRows.Scan(&h, &cat, &energy, &cnt), &hourCatRowsBad) {
+				continue
+			}
 			if cat != "" {
 				if hourCatCount[h] == nil {
 					hourCatCount[h] = make(map[string]int)
@@ -2420,14 +2466,26 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// === Context-aware: Emotion Preference ===
 	// Which emotion tags does the user engage with most?
 	p.EmotionPreference = make(map[string]float64)
+	// jsonb_array_elements_text, not unnest.
+	//
+	// unnest takes an ARRAY. emotion_tags is JSONB, and there is no
+	// unnest(jsonb) in any version of Postgres -- so this statement has been
+	// refused every single time it ran, since it was written. EmotionPreference
+	// has been empty for every user on the platform, and the "if err == nil"
+	// below meant nothing ever said so.
+	//
+	// The right function also hands back plain text rather than a quoted JSON
+	// string, so the Trim of stray quote marks further down is no longer
+	// something the result depends on.
 	emotionRows, err := db.Query(`
 		SELECT tag, SUM(score) as total FROM (
-			SELECT unnest(
+			SELECT jsonb_array_elements_text(
 				CASE
 					WHEN fe.content_type = 'challenge' THEN (SELECT COALESCE(emotion_tags, '[]')::JSONB FROM challenges WHERE CAST(id AS TEXT) = fe.content_id)
 					WHEN fe.content_type = 'post' THEN (SELECT COALESCE(emotion_tags, '[]')::JSONB FROM posts WHERE CAST(id AS TEXT) = fe.content_id)
+					ELSE '[]'::JSONB
 				END
-			)::TEXT as tag,
+			) as tag,
 			CASE fe.event_type
 				WHEN 'share' THEN 3 WHEN 'rewatch' THEN 2 WHEN 'save' THEN 1.5
 				WHEN 'like' THEN 1 WHEN 'comment' THEN 1
@@ -2441,6 +2499,14 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		WHERE tag IS NOT NULL AND tag != ''
 		GROUP BY tag
 		ORDER BY total DESC`, userID)
+	if err != nil {
+		// An empty mood map is an ordinary state -- somebody who has watched
+		// nothing tagged has no moods. So a broken query here looks identical
+		// to a new viewer unless it says otherwise, which is exactly how the
+		// wrong function above survived.
+		log.Printf("user profile %s: could not read which moods they engage "+
+			"with, so that map stays empty: %v", userID, err)
+	}
 	if err == nil {
 		defer emotionRows.Close()
 		maxEmotionScore := 0.0
@@ -2448,8 +2514,14 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		for emotionRows.Next() {
 			var tag string
 			var score float64
-			emotionRows.Scan(&tag, &score)
-			// Strip JSON quotes from unnested JSONB text
+			if err := emotionRows.Scan(&tag, &score); err != nil {
+				log.Printf("user profile %s: skipping a mood row it could "+
+					"not read: %v", userID, err)
+				continue
+			}
+			// Belt and braces: jsonb_array_elements_text already unquotes, but
+			// a value that arrived quoted from anywhere else still folds to
+			// the same word rather than a second one nothing matches.
 			tag = strings.Trim(tag, "\"")
 			if tag != "" {
 				rawEmotions[tag] = score
@@ -2499,7 +2571,11 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		WITH my AS (
 			SELECT cr.id AS response_id, cr.challenge_id, cr.created_at
 			FROM challenge_responses cr
-			WHERE cr.responder_id = CAST($1 AS INT)
+			-- ::text first, so the one parameter stays text and the cast to
+			-- int happens on its value. Without it Postgres settles $1 as an
+			-- integer here and then refuses "fe.user_id = $1" further down,
+			-- and the whole statement with it.
+			WHERE cr.responder_id = CAST($1::text AS INT)
 			  AND cr.created_at > NOW() - INTERVAL '30 days'
 		),
 		vc AS (
@@ -2537,6 +2613,14 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		WHERE cat <> ''
 		GROUP BY ego_state, cat
 		ORDER BY cnt DESC`, userID)
+	if err != nil {
+		// This map decides what somebody is shown just after winning or
+		// losing a battle. An empty one is a real state -- most people have
+		// never been in a battle -- so a failure here is invisible unless it
+		// says so.
+		log.Printf("user profile %s: could not read what they engage with "+
+			"after a win or a loss, so that map stays empty: %v", userID, err)
+	}
 	if err == nil {
 		defer egoCatRows.Close()
 		for egoCatRows.Next() {
@@ -2556,12 +2640,18 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// Fraction of views that reached 70%+ completion, normalized.
 	// High = deep watcher (finishes videos). Low = scanner (leaves early).
 	var deepViews, totalViews int
-	db.QueryRow(`
+	if err := db.QueryRow(`
 		SELECT COUNT(*) FROM feed_events
-		WHERE user_id = $1 AND event_type = 'view' AND completion_rate > 0.7`, userID).Scan(&deepViews)
-	db.QueryRow(`
+		WHERE user_id = $1 AND event_type = 'view' AND completion_rate > 0.7`, userID).Scan(&deepViews); err != nil {
+		queryFailed("computeUserProfile: could not read feed_events",
+			"carrying on as if the answer were empty", err)
+	}
+	if err := db.QueryRow(`
 		SELECT COUNT(*) FROM feed_events
-		WHERE user_id = $1 AND event_type = 'view'`, userID).Scan(&totalViews)
+		WHERE user_id = $1 AND event_type = 'view'`, userID).Scan(&totalViews); err != nil {
+		queryFailed("computeUserProfile: could not read feed_events",
+			"carrying on as if the answer were empty", err)
+	}
 	if totalViews > 0 {
 		// Bayesian shrinkage toward the 0.5 prior so a 1-of-1 deep view doesn't
 		// read as a proven deep watcher (1.0); converges to the true rate as
@@ -2577,12 +2667,15 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// overlapping per-event durations, and excluding the empty pseudo-session
 	// that catches all session-less events (server-recorded / legacy rows) —
 	// that bucket's SUM was huge and falsely flagged users as bingers.
-	db.QueryRow(`
+	if err := db.QueryRow(`
 		SELECT COALESCE(MAX(span_ms), 0) FROM (
-			SELECT EXTRACT(EPOCH FROM (MAX(created_at) - MIN(created_at))) * 1000 AS span_ms
-			FROM feed_events WHERE user_id = $1 AND session_id <> ''
-			GROUP BY session_id
-		) s`, userID).Scan(&maxSessionMs)
+		SELECT EXTRACT(EPOCH FROM (MAX(created_at) - MIN(created_at))) * 1000 AS span_ms
+		FROM feed_events WHERE user_id = $1 AND session_id <> ''
+		GROUP BY session_id
+		) s`, userID).Scan(&maxSessionMs); err != nil {
+		queryFailed("computeUserProfile: could not read feed_events",
+			"carrying on as if the answer were empty", err)
+	}
 	// 15min = 900,000ms = full binge. 5min = 300,000ms = casual. Below = dipper.
 	if maxSessionMs > 0 {
 		p.BingeIntensity = math.Min(1.0, float64(maxSessionMs)/900000.0)
@@ -2596,7 +2689,7 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// that still resolve to a live creator/author). Counting deleted-content
 	// engagements here but not in the numerator biased CreatorLoyalty downward
 	// and made 1.0 unreachable once any engaged content was removed.
-	db.QueryRow(`
+	if err := db.QueryRow(`
 		SELECT COUNT(*)
 		FROM feed_events fe
 		LEFT JOIN challenges c ON fe.content_type = 'challenge' AND fe.content_id = CAST(c.id AS TEXT)
@@ -2604,22 +2697,28 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		WHERE fe.user_id = $1
 		AND fe.event_type IN ('like','share','save','rewatch','complete','loop','unmute','profile_visit')
 		AND COALESCE(c.creator_id::TEXT, p.author_id::TEXT) IS NOT NULL`,
-		userID).Scan(&totalPositiveEngagement)
+		userID).Scan(&totalPositiveEngagement); err != nil {
+		queryFailed("computeUserProfile: could not read feed_events",
+			"carrying on as if the answer were empty", err)
+	}
 	if totalPositiveEngagement > 0 {
-		db.QueryRow(`
+		if err := db.QueryRow(`
 			WITH creator_engagement AS (
-				SELECT COALESCE(c.creator_id::TEXT, p.author_id::TEXT) AS cid, COUNT(*) AS cnt
-				FROM feed_events fe
-				LEFT JOIN challenges c ON fe.content_type = 'challenge' AND fe.content_id = CAST(c.id AS TEXT)
-				LEFT JOIN posts p ON fe.content_type = 'post' AND fe.content_id = CAST(p.id AS TEXT)
-				WHERE fe.user_id = $1
-				AND fe.event_type IN ('like','share','save','rewatch','complete','loop','unmute','profile_visit')
-				AND COALESCE(c.creator_id::TEXT, p.author_id::TEXT) IS NOT NULL
-				GROUP BY cid
-				ORDER BY cnt DESC
-				LIMIT 3
+			SELECT COALESCE(c.creator_id::TEXT, p.author_id::TEXT) AS cid, COUNT(*) AS cnt
+			FROM feed_events fe
+			LEFT JOIN challenges c ON fe.content_type = 'challenge' AND fe.content_id = CAST(c.id AS TEXT)
+			LEFT JOIN posts p ON fe.content_type = 'post' AND fe.content_id = CAST(p.id AS TEXT)
+			WHERE fe.user_id = $1
+			AND fe.event_type IN ('like','share','save','rewatch','complete','loop','unmute','profile_visit')
+			AND COALESCE(c.creator_id::TEXT, p.author_id::TEXT) IS NOT NULL
+			GROUP BY cid
+			ORDER BY cnt DESC
+			LIMIT 3
 			)
-			SELECT COALESCE(SUM(cnt), 0) FROM creator_engagement`, userID).Scan(&topCreatorEngagement)
+			SELECT COALESCE(SUM(cnt), 0) FROM creator_engagement`, userID).Scan(&topCreatorEngagement); err != nil {
+			queryFailed("computeUserProfile: could not read feed_events",
+				"carrying on as if the answer were empty", err)
+		}
 		// Shrink toward 0.5 so a user with 2 positive events both on one creator
 		// isn't scored a maxed-out loyalist (1.0) on no real evidence.
 		// priorStrength 8 to match SocialDrive/AttentionSpan — the >0.6 serve gate
@@ -2631,8 +2730,14 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 	// --- CompetitivenessIndex ---
 	// Do they create challenges, respond to battles, or just view?
 	var challengesCreated, responsesSubmitted int
-	db.QueryRow(`SELECT COUNT(*) FROM challenges WHERE creator_id = CAST($1 AS INT)`, userID).Scan(&challengesCreated)
-	db.QueryRow(`SELECT COUNT(*) FROM challenge_responses WHERE responder_id = CAST($1 AS INT)`, userID).Scan(&responsesSubmitted)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM challenges WHERE creator_id = CAST($1 AS INT)`, userID).Scan(&challengesCreated); err != nil {
+		queryFailed("computeUserProfile: could not read challenges",
+			"carrying on as if the answer were empty", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM challenge_responses WHERE responder_id = CAST($1 AS INT)`, userID).Scan(&responsesSubmitted); err != nil {
+		queryFailed("computeUserProfile: could not read challenge_responses",
+			"carrying on as if the answer were empty", err)
+	}
 	// 5 of either action = fully competitive.
 	totalCompActions := challengesCreated*2 + responsesSubmitted // Creating weighs more
 	if totalCompActions > 0 {
@@ -3040,27 +3145,30 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		var creatorID, league string
 		var followers, wins, losses, respCount, chViews, chLikes int
 		var createdAt time.Time
-		db.QueryRow(`
+		if err := db.QueryRow(`
 			SELECT COALESCE(c.subject,''), COALESCE(c.prefix,''),
-				COALESCE(c.category,'other'), COALESCE(c.energy_level,'medium'),
-				COALESCE(c.emotion_tags,'[]'::JSONB),
-				COALESCE(c.custom_tags,'[]'::JSONB),
-				COALESCE(c.auto_tags,'[]'::JSONB),
-				COALESCE(c.content_topics,'[]'::JSONB),
-				c.video_analysis,
-				CAST(u.id AS TEXT), u.league,
-				(SELECT COUNT(*) FROM follows WHERE following_id = u.id),
-				u.wins, u.losses, c.created_at,
-				(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id),
-				COALESCE(c.views, 0),
-				(SELECT COUNT(*) FROM challenge_likes WHERE challenge_id = c.id)
+			COALESCE(c.category,'other'), COALESCE(c.energy_level,'medium'),
+			COALESCE(c.emotion_tags,'[]'::JSONB),
+			COALESCE(c.custom_tags,'[]'::JSONB),
+			COALESCE(c.auto_tags,'[]'::JSONB),
+			COALESCE(c.content_topics,'[]'::JSONB),
+			c.video_analysis,
+			CAST(u.id AS TEXT), u.league,
+			(SELECT COUNT(*) FROM follows WHERE following_id = u.id),
+			u.wins, u.losses, c.created_at,
+			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id),
+			COALESCE(c.views, 0),
+			(SELECT COUNT(*) FROM challenge_likes WHERE challenge_id = c.id)
 			FROM challenges c
 			JOIN users u ON c.creator_id = u.id
 			WHERE c.id = $1`, contentID).Scan(
 			&subject, &prefix, &dbCategory, &dbEnergy, &emotionJSON, &tagsJSON,
 			&autoTagsJSON, &topicsJSON, &analysisJSON,
 			&creatorID, &league, &followers, &wins, &losses, &createdAt, &respCount,
-			&chViews, &chLikes)
+			&chViews, &chLikes); err != nil {
+			queryFailed("computeContentScore: could not read follows",
+				"carrying on as if the answer were empty", err)
+		}
 		cs.ResponseCount = respCount
 
 		// ── Bootstrap counters from raw challenge counts when feed_events is sparse ──
@@ -3222,18 +3330,21 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		var authorID, league string
 		var followers, wins, losses int
 		var createdAt time.Time
-		db.QueryRow(`
+		if err := db.QueryRow(`
 			SELECT COALESCE(p.caption,''),
-				COALESCE(p.category,'other'), COALESCE(p.energy_level,'medium'),
-				COALESCE(p.emotion_tags,'[]'::JSONB),
-				CAST(u.id AS TEXT), u.league,
-				(SELECT COUNT(*) FROM follows WHERE following_id = u.id),
-				u.wins, u.losses, p.created_at
+			COALESCE(p.category,'other'), COALESCE(p.energy_level,'medium'),
+			COALESCE(p.emotion_tags,'[]'::JSONB),
+			CAST(u.id AS TEXT), u.league,
+			(SELECT COUNT(*) FROM follows WHERE following_id = u.id),
+			u.wins, u.losses, p.created_at
 			FROM posts p
 			JOIN users u ON p.author_id = u.id
 			WHERE p.id = $1`, contentID).Scan(
 			&caption, &dbCategory, &dbEnergy, &emotionJSON,
-			&authorID, &league, &followers, &wins, &losses, &createdAt)
+			&authorID, &league, &followers, &wins, &losses, &createdAt); err != nil {
+			queryFailed("computeContentScore: could not read follows",
+				"carrying on as if the answer were empty", err)
+		}
 
 		if dbCategory != "" && dbCategory != "other" {
 			cs.Category = dbCategory
@@ -6071,10 +6182,13 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	if page == 1 && session.ItemsSeen == 0 {
 		// First page of new session — check how long since last session
 		var lastSessionTime time.Time
-		db.QueryRow(
+		if err := db.QueryRow(
 			`SELECT MAX(created_at) FROM feed_events WHERE user_id = $1 AND created_at < $2`,
 			userID, session.StartedAt,
-		).Scan(&lastSessionTime)
+		).Scan(&lastSessionTime); err != nil {
+			queryFailed("SmartFeedHandler: could not read feed_events",
+				"carrying on as if the answer were empty", err)
+		}
 
 		if !lastSessionTime.IsZero() {
 			hoursSinceLastSession := time.Since(lastSessionTime).Hours()
@@ -6088,11 +6202,14 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		// Streak tracking: check consecutive daily sessions
 		var activeDays int
-		db.QueryRow(
+		if err := db.QueryRow(
 			`SELECT COUNT(DISTINCT DATE(created_at)) FROM feed_events
-			 WHERE user_id = $1 AND created_at > NOW() - INTERVAL '7 days'`,
+			WHERE user_id = $1 AND created_at > NOW() - INTERVAL '7 days'`,
 			userID,
-		).Scan(&activeDays)
+		).Scan(&activeDays); err != nil {
+			queryFailed("SmartFeedHandler: could not read feed_events",
+				"carrying on as if the answer were empty", err)
+		}
 		if activeDays > 1 {
 			sessionHooks["dailyStreak"] = activeDays
 		}
@@ -6759,11 +6876,15 @@ func buildSocialSets(userID string) (following map[string]bool, fof map[string]b
 	rows, err := db.Query(`
 		SELECT CAST(following_id AS TEXT) FROM follows
 		WHERE follower_id = CAST($1 AS INT)`, userID)
-	if err == nil {
+	if !queryFailed("who user "+userID+" follows",
+		"their feed will not favour anybody they follow", err) {
 		defer rows.Close()
+		bad := 0
 		for rows.Next() {
 			var fid string
-			rows.Scan(&fid)
+			if scanFailed("the follow list for user "+userID, rows.Scan(&fid), &bad) {
+				continue
+			}
 			following[fid] = true
 		}
 	}
@@ -6776,11 +6897,15 @@ func buildSocialSets(userID string) (following map[string]bool, fof map[string]b
 		WHERE f1.follower_id = CAST($1 AS INT)
 		AND f2.following_id != CAST($1 AS INT)
 		LIMIT 200`, userID)
-	if err == nil {
+	if !queryFailed("who the people user "+userID+" follows follow",
+		"the friends-of-friends signal is off for this request", err) {
 		defer fofRows.Close()
+		fofBad := 0
 		for fofRows.Next() {
 			var fid string
-			fofRows.Scan(&fid)
+			if scanFailed("friends of friends for user "+userID, fofRows.Scan(&fid), &fofBad) {
+				continue
+			}
 			if !following[fid] {
 				fof[fid] = true
 			}
@@ -6953,9 +7078,15 @@ func getContentEmotions(contentID, contentType string) []string {
 
 	var emotionJSON []byte
 	if contentType == "challenge" {
-		db.QueryRow(`SELECT COALESCE(emotion_tags, '[]'::JSONB) FROM challenges WHERE id = $1`, contentID).Scan(&emotionJSON)
+		if err := db.QueryRow(`SELECT COALESCE(emotion_tags, '[]'::JSONB) FROM challenges WHERE id = $1`, contentID).Scan(&emotionJSON); err != nil {
+			queryFailed("getContentEmotions: could not read challenges",
+				"carrying on as if the answer were empty", err)
+		}
 	} else {
-		db.QueryRow(`SELECT COALESCE(emotion_tags, '[]'::JSONB) FROM posts WHERE id = $1`, contentID).Scan(&emotionJSON)
+		if err := db.QueryRow(`SELECT COALESCE(emotion_tags, '[]'::JSONB) FROM posts WHERE id = $1`, contentID).Scan(&emotionJSON); err != nil {
+			queryFailed("getContentEmotions: could not read posts",
+				"carrying on as if the answer were empty", err)
+		}
 	}
 	var emotions []string
 	json.Unmarshal(emotionJSON, &emotions)

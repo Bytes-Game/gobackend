@@ -792,11 +792,17 @@ func readUser(id int, username, pw, fullName, bio, visibility, settingsJSON stri
 	}
 
 	// Followers count
-	_ = db.QueryRow(`SELECT COUNT(*) FROM follows WHERE following_id = $1`, id).Scan(&u.Followers)
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM follows WHERE following_id = $1`, id,
+	).Scan(&u.Followers); err != nil {
+		queryFailed("how many people follow user "+u.ID,
+			"their profile will show zero followers", err)
+	}
 
 	// Following list (string IDs for JSON compatibility)
 	rows, err := db.Query(`SELECT following_id FROM follows WHERE follower_id = $1`, id)
-	if err == nil {
+	if !queryFailed("who user "+u.ID+" follows",
+		"their profile will say they follow nobody", err) {
 		defer rows.Close()
 		for rows.Next() {
 			var fid int
@@ -956,7 +962,10 @@ func UserExists(username string) bool {
 	// NB: this had a missing closing paren for months — no callers
 	// exercised it, so the syntax error only surfaced when the future
 	// signup flow reached for it and always got `false`.
-	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)`, username).Scan(&exists)
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)`, username).Scan(&exists); err != nil {
+		queryFailed("UserExists: could not check whether that username is taken",
+			"reporting it as free, which lets two accounts collide on it", err)
+	}
 	return exists
 }
 
@@ -1296,7 +1305,11 @@ func ToggleLike(postID, userID string) (bool, int, Post) {
 	}
 
 	var exists bool
-	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM post_likes WHERE post_id=$1 AND user_id=$2)`, pid, uid).Scan(&exists)
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM post_likes WHERE post_id=$1 AND user_id=$2)`, pid, uid).Scan(&exists); err != nil {
+		queryFailed("ToggleLike: could not check whether they had already "+
+			"acted on this post",
+			"treating it as not yet done, so the tap may go the wrong way", err)
+	}
 
 	if exists {
 		db.Exec(`DELETE FROM post_likes WHERE post_id=$1 AND user_id=$2`, pid, uid)
@@ -1388,7 +1401,10 @@ func GetComments(postID string) []Comment {
 
 func seedIfEmpty() {
 	var count int
-	db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+		queryFailed("seedIfEmpty: could not read users",
+			"carrying on as if the answer were empty", err)
+	}
 	if count > 0 {
 		log.Println("Database already has data - skipping seed")
 		return
@@ -2170,7 +2186,11 @@ func ToggleChallengeLike(challengeID, userID string) (bool, int) {
 	}
 
 	var exists bool
-	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM challenge_likes WHERE challenge_id=$1 AND user_id=$2)`, cid, uid).Scan(&exists)
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM challenge_likes WHERE challenge_id=$1 AND user_id=$2)`, cid, uid).Scan(&exists); err != nil {
+		queryFailed("ToggleChallengeLike: could not check whether they had already "+
+			"acted on this challenge",
+			"treating it as not yet done, so the tap may go the wrong way", err)
+	}
 
 	if exists {
 		db.Exec(`DELETE FROM challenge_likes WHERE challenge_id=$1 AND user_id=$2`, cid, uid)
@@ -2179,7 +2199,10 @@ func ToggleChallengeLike(challengeID, userID string) (bool, int) {
 	}
 
 	var count int
-	db.QueryRow(`SELECT COUNT(*) FROM challenge_likes WHERE challenge_id=$1`, cid).Scan(&count)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM challenge_likes WHERE challenge_id=$1`, cid).Scan(&count); err != nil {
+		queryFailed("ToggleChallengeLike: could not read challenge_likes",
+			"carrying on as if the answer were empty", err)
+	}
 	return !exists, count
 }
 
@@ -2203,7 +2226,11 @@ func ToggleChallengeDislike(challengeID, userID string) (bool, int, int) {
 	}
 
 	var exists bool
-	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM challenge_dislikes WHERE challenge_id=$1 AND user_id=$2)`, cid, uid).Scan(&exists)
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM challenge_dislikes WHERE challenge_id=$1 AND user_id=$2)`, cid, uid).Scan(&exists); err != nil {
+		queryFailed("ToggleChallengeDislike: could not check whether they had already "+
+			"acted on this challenge",
+			"treating it as not yet done, so the tap may go the wrong way", err)
+	}
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -2226,8 +2253,14 @@ func ToggleChallengeDislike(challengeID, userID string) (bool, int, int) {
 	}
 
 	var dislikes, likes int
-	db.QueryRow(`SELECT COUNT(*) FROM challenge_dislikes WHERE challenge_id=$1`, cid).Scan(&dislikes)
-	db.QueryRow(`SELECT COUNT(*) FROM challenge_likes WHERE challenge_id=$1`, cid).Scan(&likes)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM challenge_dislikes WHERE challenge_id=$1`, cid).Scan(&dislikes); err != nil {
+		queryFailed("ToggleChallengeDislike: could not read challenge_dislikes",
+			"carrying on as if the answer were empty", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM challenge_likes WHERE challenge_id=$1`, cid).Scan(&likes); err != nil {
+		queryFailed("ToggleChallengeDislike: could not read challenge_likes",
+			"carrying on as if the answer were empty", err)
+	}
 	return !exists, dislikes, likes
 }
 
@@ -2832,11 +2865,14 @@ func GetConversations(userID int) []Conversation {
 		}
 
 		var unread int
-		db.QueryRow(
+		if err := db.QueryRow(
 			`SELECT COUNT(*) FROM chat_messages
-			 WHERE sender_id=$1 AND receiver_id=$2 AND is_read=FALSE`,
+			WHERE sender_id=$1 AND receiver_id=$2 AND is_read=FALSE`,
 			pid, userID,
-		).Scan(&unread)
+		).Scan(&unread); err != nil {
+			queryFailed("GetConversations: could not read chat_messages",
+				"carrying on as if the answer were empty", err)
+		}
 
 		result = append(result, Conversation{
 			UserID:      strconv.Itoa(pid),
@@ -2950,7 +2986,11 @@ func ToggleSaveChallenge(userID, challengeID string) (bool, error) {
 	}
 
 	var exists bool
-	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM saved_challenges WHERE user_id=$1 AND challenge_id=$2)`, uid, cid).Scan(&exists)
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM saved_challenges WHERE user_id=$1 AND challenge_id=$2)`, uid, cid).Scan(&exists); err != nil {
+		queryFailed("ToggleSaveChallenge: could not check whether they had already "+
+			"acted on this challenge",
+			"treating it as not yet done, so the tap may go the wrong way", err)
+	}
 
 	if exists {
 		db.Exec(`DELETE FROM saved_challenges WHERE user_id=$1 AND challenge_id=$2`, uid, cid)

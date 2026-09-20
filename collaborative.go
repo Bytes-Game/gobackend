@@ -77,10 +77,13 @@ func computeAllSimilarities() {
 	}
 
 	var users []userVector
+	rowsBad := 0
 	for rows.Next() {
 		var id string
 		var catJSON []byte
-		rows.Scan(&id, &catJSON)
+		if scanFailed("the taste vectors used to find similar users", rows.Scan(&id, &catJSON), &rowsBad) {
+			continue
+		}
 		var affinity map[string]float64
 		json.Unmarshal(catJSON, &affinity)
 		if len(affinity) > 0 {
@@ -185,10 +188,13 @@ func getSimilarUsers(userID string) []UserSimilarity {
 	defer rows.Close()
 
 	var result []UserSimilarity
+	rowsBad := 0
 	for rows.Next() {
 		var sim UserSimilarity
 		sim.UserID = userID
-		rows.Scan(&sim.SimilarID, &sim.Score)
+		if scanFailed("the list of users similar to this one", rows.Scan(&sim.SimilarID, &sim.Score), &rowsBad) {
+			continue
+		}
 		result = append(result, sim)
 	}
 	return result

@@ -43,10 +43,25 @@ This has happened twice:
   opinion", so the symptom would have been one ranking signal **silently
   ceasing to exist for every user**. Nothing would have logged.
 
-**So: if you change SQL, run it against real Postgres.** There is already a
-way — `TEST_DATABASE_URL`, and the `withDB(t)` helper in
-`scoring_db_audit_test.go`. Tests using it skip cleanly when no database is
-set, so adding one costs nothing.
+**This is now checked automatically.** `sql_compiles_test.go` lifts every
+query out of the source and hands it to a real Postgres to parse. The first
+run found **twelve** broken queries that had shipped:
+
+| what was broken | what it cost |
+|---|---|
+| the follow-graph feed lane asked `follows` for `followed_id` | following somebody put nothing in your feed |
+| two account-suggestion lanes asked `users` for `followers` | no suggestions, ever |
+| the mood half of every taste profile called `unnest()` on JSONB | never populated for anybody |
+| the engagement-quality score read `users.created_at` | one flat score for every user |
+| the creator dashboard asked `posts` for `likes` and `user_id` | failed for every creator |
+| trending asked `posts` for four columns it does not have | every trending post silently dropped |
+
+Every one was a single word. CI runs a real Postgres now, so this check runs
+on every push.
+
+**If you change SQL, run it against real Postgres.** `TEST_DATABASE_URL` and
+the `withDB(t)` helper in `scoring_db_audit_test.go` are the way in. Tests
+using them skip cleanly when no database is set, so adding one costs nothing.
 
 If there is no database to hand, start one:
 
@@ -91,9 +106,18 @@ at once** — if your column list and your variable list do not line up, it fail
 on row 1 and on all 500. The loop then builds a profile out of nothing but
 zeroes, which is indistinguishable from a brand-new user.
 
-**So: when you touch one of these, make it say something.** One log line,
-counted rather than printed per row, is enough. "Silent" is not "safe" — it is
-the reason the last three of these took days to find instead of minutes.
+**So: when you touch one of these, make it say something.** `queryFailed` and
+`scanFailed` in `query_failures.go` are the two-line way; both take what you
+were trying to work out and what the app is doing instead, because "query
+failed" on its own leaves the reader to guess whether anything is wrong.
+
+`scanFailed` takes a counter so one broken query is one log line rather than
+five hundred — and the count is what tells you which happened. One bad row is
+a bad row; every row failing is a broken query.
+
+`silent_failures_test.go` counts what is left and holds it at a baseline, the
+same way `.nilaway-baseline` works. It was 72. It is 34. It can go down and it
+cannot go up without a reason in the commit message.
 
 ### 3. It exists, but nothing calls it
 

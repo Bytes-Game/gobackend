@@ -309,10 +309,18 @@ func buildSuggestedExclusions(userID string) map[string]bool {
 // degree of separation), with each row carrying its FoF count — i.e. how
 // many of "your friends" follow this person. Higher = stronger signal.
 func pullFoFCandidates(userID string, excluded map[string]bool, limit int) []candidateRow {
+	// How many people follow somebody is COUNTED, not stored.
+	//
+	// There is no followers column on users and there never has been -- the
+	// number the API returns is a COUNT over the follows table. Asking for one
+	// does not come back as zero, it takes the whole statement down, so this
+	// lane returned nothing on every request since it was written. Both
+	// suggestion lanes in this file had the same line.
 	rows, err := db.Query(`
 		SELECT CAST(f2.following_id AS TEXT) AS uid,
 			   u.username, COALESCE(u.full_name,'') , u.league,
-			   COALESCE(u.followers, 0), u.wins, u.losses,
+			   (SELECT COUNT(*) FROM follows WHERE following_id = u.id)::int AS followers,
+			   u.wins, u.losses,
 			   COUNT(*)::int AS fof_count,
 			   EXISTS (
 				   SELECT 1 FROM challenges c
@@ -325,7 +333,7 @@ func pullFoFCandidates(userID string, excluded map[string]bool, limit int) []can
 		WHERE f1.follower_id = CAST($1 AS INT)
 		  AND f2.following_id != CAST($1 AS INT)
 		GROUP BY f2.following_id, u.id
-		ORDER BY fof_count DESC, u.followers DESC
+		ORDER BY fof_count DESC, followers DESC
 		LIMIT $2`, userID, limit)
 	if err != nil {
 		log.Printf("pullFoFCandidates: %v", err)
@@ -451,10 +459,12 @@ func pullCategoryCandidates(userID string, excluded map[string]bool, limit int) 
 // have posted in the last 30 days. Pure popularity prior — usually the
 // fallback lane for cold users but fine to mix in for warm ones too.
 func pullPopularCandidates(userID string, excluded map[string]bool, limit int) []candidateRow {
+	// Counted, not stored -- see pullFoFCandidates for what this cost.
 	rows, err := db.Query(`
 		SELECT CAST(u.id AS TEXT) AS uid,
 			   u.username, COALESCE(u.full_name,'') , u.league,
-			   COALESCE(u.followers, 0), u.wins, u.losses,
+			   (SELECT COUNT(*) FROM follows WHERE following_id = u.id)::int AS followers,
+			   u.wins, u.losses,
 			   EXISTS (
 				   SELECT 1 FROM challenges c
 				   WHERE c.creator_id = u.id
@@ -462,7 +472,7 @@ func pullPopularCandidates(userID string, excluded map[string]bool, limit int) [
 			   ) AS recent
 		FROM users u
 		WHERE u.id != CAST($1 AS INT)
-		ORDER BY u.followers DESC
+		ORDER BY followers DESC
 		LIMIT $2`, userID, limit)
 	if err != nil {
 		log.Printf("pullPopularCandidates: %v", err)
@@ -495,7 +505,10 @@ func pullPopularCandidates(userID string, excluded map[string]bool, limit int) [
 // computed UserProfile doesn't carry it directly — small follow-up read.
 func getLeagueFromProfile(userID string) string {
 	var league string
-	db.QueryRow(`SELECT COALESCE(league, '') FROM users WHERE id = CAST($1 AS INT)`, userID).Scan(&league)
+	if err := db.QueryRow(`SELECT COALESCE(league, '') FROM users WHERE id = CAST($1 AS INT)`, userID).Scan(&league); err != nil {
+		queryFailed("getLeagueFromProfile: could not read that user's league",
+			"they will be treated as Bronze", err)
+	}
 	return league
 }
 

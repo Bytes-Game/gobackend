@@ -1,6 +1,9 @@
 package main
 
 import (
+	"database/sql"
+	"errors"
+	"log"
 	"math"
 	"strconv"
 	"time"
@@ -85,11 +88,32 @@ func computeEngagementQuality(userID string) float64 {
 			(SELECT COUNT(*) FROM feed_events WHERE user_id = u.id::text AND event_type = 'complete' AND created_at > NOW() - INTERVAL '30 days') AS completes,
 			(SELECT COUNT(*) FROM feed_events WHERE user_id = u.id::text AND event_type IN ('skip','not_interested') AND created_at > NOW() - INTERVAL '30 days') AS skips,
 			(SELECT COUNT(DISTINCT session_id) FROM feed_events WHERE user_id = u.id::text AND created_at > NOW() - INTERVAL '30 days') AS sessions,
-			(SELECT COUNT(*) FROM reports WHERE target_id = u.id::text AND target_type = 'user' AND created_at > NOW() - INTERVAL '30 days') AS flags_against
+			-- target_id is an INT column (see the reports table in database.go),
+			-- so it is compared to u.id as it is. Casting the id to text here
+			-- asked Postgres to compare an integer with text, which it will
+			-- not do, and the whole statement fell over -- taking the other
+			-- five numbers on this line with it.
+			(SELECT COUNT(*) FROM reports WHERE target_id = u.id AND target_type = 'user' AND created_at > NOW() - INTERVAL '30 days') AS flags_against
 		FROM users u
 		WHERE u.id::text = $1
 	`, userID).Scan(&ageDays, &totalEvents, &completes, &skips, &sessions, &flagsAgainst)
 	if err != nil {
+		// Not-found is ordinary: a deleted account, or an id from a stale
+		// token. Anything else means this server could not work out how much
+		// to trust somebody's signals, and 1.0 -- full trust -- is what it
+		// hands back either way.
+		//
+		// That is the shape that hid this for as long as it existed. The query
+		// above read users.created_at, a column that was never added, so
+		// Postgres refused the whole statement and every user on the platform
+		// got the same flat 1.0. Nothing distinguished "broken" from "nothing
+		// unusual about this person". Migration 009 adds the column; this line
+		// is so the next one is not silent for as long.
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("engagement quality: could not read the record for "+
+				"user %s, so their signals are being fully trusted: %v",
+				userID, err)
+		}
 		return 1.0
 	}
 

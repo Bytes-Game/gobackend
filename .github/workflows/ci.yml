@@ -18,8 +18,53 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # A REAL Postgres for the tests that need one.
+    #
+    # Most tests here use a pretend database that replays whatever rows they
+    # hand it and never reads the query. That is fine for logic and useless
+    # for SQL: a query naming a column that does not exist passes every one of
+    # them, and then Postgres refuses the whole statement and the feature
+    # returns nothing at all, for every row, forever.
+    #
+    # Twelve queries in this repo were broken that way — the follow-graph feed
+    # lane, both account-suggestion lanes, the mood half of every taste
+    # profile, the engagement-quality score, the creator dashboard, trending
+    # posts. All found in one run of sql_compiles_test.go, which needs a
+    # database to do anything at all. Without this block that test skips, and
+    # skipping quietly is how the last twelve got in.
+    #
+    # pgvector's image rather than plain postgres: challenges carries a vector
+    # column when the extension is available, and four queries read it. On an
+    # image without the extension those columns do not exist and the check
+    # cannot see those queries.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: battlearena_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/battlearena_test?sslmode=disable
+
     steps:
       - uses: actions/checkout@v4
+
+      # The schema builds itself on first connection — runMigrations plus the
+      # numbered files in migrations/ — so there is nothing to load here. The
+      # extension is the one thing the app does not create for itself.
+      - name: enable pgvector
+        run: |
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          psql "$TEST_DATABASE_URL" -c 'CREATE EXTENSION IF NOT EXISTS vector;'
 
       - uses: actions/setup-go@v5
         with:

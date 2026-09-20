@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"strconv"
 	"sync"
 	"time"
@@ -390,13 +391,21 @@ func sourceFollowGraphWindowed(userID string, limit int, window string) []HomeFe
 			c.response_count
 		FROM challenges c
 		JOIN users u ON c.creator_id = u.id
-		JOIN follows f ON f.followed_id = c.creator_id
+		JOIN follows f ON f.following_id = c.creator_id
 		WHERE f.follower_id = CAST($1 AS INT)
 		  AND c.created_at > NOW() - ($3::text)::interval
 		  AND c.visibility IN ('arena','friends')
 		ORDER BY c.created_at DESC
 		LIMIT $2`, userID, limit, window)
 	if err != nil {
+		// This lane asked follows for a column called followed_id. The column
+		// is following_id, and Postgres refuses a statement naming one that
+		// does not exist -- so this returned nil on EVERY request, for every
+		// user, since the lane was written. Following somebody put nothing in
+		// their feed, and the silent return below is why that never showed up
+		// anywhere. A lane that cannot run says so now.
+		log.Printf("follow-graph lane: no candidates for user %s -- the "+
+			"query failed: %v", userID, err)
 		return nil
 	}
 	defer rows.Close()
@@ -407,6 +416,7 @@ func sourceFollowGraphWindowed(userID string, limit int, window string) []HomeFe
 		if err := rows.Scan(&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
 			&ch.VideoURL, &ch.ThumbnailURL, &ch.Prefix, &ch.Subject,
 			&ch.Visibility, &ch.Status, &views, &likes, &createdAt, &respCount); err != nil {
+			log.Printf("follow-graph lane: skipping a row it could not read: %v", err)
 			continue
 		}
 		ch.CreatorID = strconv.Itoa(creatorID)

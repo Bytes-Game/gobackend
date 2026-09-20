@@ -12,7 +12,12 @@ func resolveUserID(idStr, username string) (int, error) {
 		id, err := strconv.Atoi(idStr)
 		if err == nil {
 			var exists bool
-			db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, id).Scan(&exists)
+			if err := db.QueryRow(
+				`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, id,
+			).Scan(&exists); err != nil {
+				queryFailed("resolveUserID: could not check whether user "+idStr+" exists",
+					"falling through to the username, and then to not-found", err)
+			}
 			if exists {
 				return id, nil
 			}
@@ -24,6 +29,8 @@ func resolveUserID(idStr, username string) (int, error) {
 		if err == nil {
 			return id, nil
 		}
+		queryFailed("resolveUserID: could not look up username "+username,
+			"the caller will be told the user does not exist", err)
 	}
 	return 0, fmt.Errorf("user not found: id=%s username=%s", idStr, username)
 }
