@@ -163,7 +163,8 @@ func seedChallengeSubjects() {
 			  WHERE subject IS NOT NULL AND length(trim(subject)) > 0
 			  GROUP BY lower(trim(subject))`,
 		)
-		if err == nil {
+		if !queryFailed("the list of subjects people have used",
+			"the subject box will suggest nothing", err) {
 			defer rows.Close()
 			for rows.Next() {
 				var s string

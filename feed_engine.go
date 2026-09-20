@@ -2348,7 +2348,8 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		SELECT EXTRACT(HOUR FROM created_at)::INT as h, COUNT(*) as c
 		FROM feed_events WHERE user_id = $1
 		GROUP BY h ORDER BY c DESC LIMIT 4`, userID)
-	if err == nil {
+	if !queryFailed("which hours user "+userID+" watches in",
+		"the feed cannot time anything for them", err) {
 		defer hourRows.Close()
 		hourRowsBad := 0
 		for hourRows.Next() {
@@ -2376,7 +2377,8 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		) sub
 		WHERE creator_id IS NOT NULL
 		GROUP BY creator_id ORDER BY total DESC LIMIT 10`, userID)
-	if err == nil {
+	if !queryFailed("which creators user "+userID+" keeps returning to",
+		"their loyalty to a creator counts for nothing this rebuild", err) {
 		defer creatorRows.Close()
 		creatorRowsBad := 0
 		for creatorRows.Next() {
@@ -2412,7 +2414,8 @@ func computeUserProfile(userID string) (*UserProfile, error) {
 		     OR (fe.event_type = 'view' AND fe.completion_rate > 0.5))
 		GROUP BY h, cat, energy
 		ORDER BY h, cnt DESC`, userID, tzMin)
-	if err == nil {
+	if !queryFailed("what user "+userID+" watches at which hour",
+		"the hour-of-day routing has nothing to go on for them", err) {
 		defer hourCatRows.Close()
 		// Accumulate per-(hour,category) TOTALS across energy levels before picking
 		// the best category. The query GROUP BYs (h,cat,energy), so a single
@@ -5416,14 +5419,18 @@ func coldStartChallengesTiered(userID, kind string, limit, offset int, window st
 	}
 	defer rows.Close()
 	var items []HomeFeedItem
+	bad := 0
 	for rows.Next() {
 		var ch Challenge
 		var creatorID, views, likes, responseCount int
 		var createdAt, expiresAt time.Time
-		rows.Scan(&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
+		if scanFailed("a cold-start challenge", rows.Scan(&ch.ID, &creatorID,
+			&ch.CreatorUsername, &ch.CreatorLeague,
 			&ch.VideoURL, &ch.ThumbnailURL, &ch.Prefix, &ch.Subject,
 			&ch.Visibility, &ch.Status, &views, &likes,
-			&createdAt, &expiresAt, &responseCount)
+			&createdAt, &expiresAt, &responseCount), &bad) {
+			continue
+		}
 		ch.CreatorID = strconv.Itoa(creatorID)
 		ch.Views = views
 		ch.Likes = likes
@@ -6328,16 +6335,21 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 		AND c.created_at > NOW() - INTERVAL '14 days'
 		ORDER BY c.created_at DESC
 		LIMIT $2`, userID, fetch)
-	if err == nil {
+	if !queryFailed("recent videos from the people user "+userID+" follows",
+		"their Following feed comes back empty, which reads as nobody having posted", err) {
 		defer cRows.Close()
+		cBad := 0
 		for cRows.Next() {
 			var ch Challenge
 			var creatorID, views, likes, rc int
 			var createdAt, expiresAt time.Time
-			cRows.Scan(&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
+			if scanFailed("a challenge from somebody they follow", cRows.Scan(
+				&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
 				&ch.VideoURL, &ch.ThumbnailURL, &ch.Prefix, &ch.Subject,
 				&ch.Visibility, &ch.Status, &views, &likes,
-				&createdAt, &expiresAt, &rc)
+				&createdAt, &expiresAt, &rc), &cBad) {
+				continue
+			}
 			ch.CreatorID = strconv.Itoa(creatorID)
 			ch.Views = views
 			ch.Likes = likes
@@ -7003,14 +7015,18 @@ func fetchChallengesWindowedByKind(userID, kind string, limit int, window string
 	}
 	defer rows.Close()
 	var items []HomeFeedItem
+	bad := 0
 	for rows.Next() {
 		var ch Challenge
 		var creatorID, views, likes, rc int
 		var createdAt, expiresAt time.Time
-		rows.Scan(&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
+		if scanFailed("a challenge for this feed page", rows.Scan(&ch.ID, &creatorID,
+			&ch.CreatorUsername, &ch.CreatorLeague,
 			&ch.VideoURL, &ch.ThumbnailURL, &ch.Prefix, &ch.Subject,
 			&ch.Visibility, &ch.Status, &views, &likes,
-			&createdAt, &expiresAt, &rc)
+			&createdAt, &expiresAt, &rc), &bad) {
+			continue
+		}
 		ch.CreatorID = strconv.Itoa(creatorID)
 		ch.Views = views
 		ch.Likes = likes

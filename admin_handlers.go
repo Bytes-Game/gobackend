@@ -59,18 +59,25 @@ func AdminFunnelsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		byStep := make(map[string]int)
-		if rows, err := db.Query(`
+		rows, err := db.Query(`
 			SELECT COALESCE(metadata->>'atStep',''), COUNT(*)
 			FROM feed_events
 			WHERE event_type = 'upload_abandon'
 			  AND metadata->>'uploadType' = $1
 			  AND created_at > NOW() - INTERVAL '7 days'
 			GROUP BY metadata->>'atStep'
-		`, t); err == nil {
+		`, t)
+		if !queryFailed("where "+t+" uploads are being abandoned",
+			"the funnel will show no breakdown by step, which reads as "+
+				"nobody abandoning anywhere", err) {
+			bad := 0
 			for rows.Next() {
 				var s string
 				var n int
-				if rows.Scan(&s, &n) == nil && s != "" {
+				if scanFailed("an abandonment step for "+t, rows.Scan(&s, &n), &bad) {
+					continue
+				}
+				if s != "" {
 					byStep[s] = n
 				}
 			}

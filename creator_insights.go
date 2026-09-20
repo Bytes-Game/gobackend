@@ -466,7 +466,8 @@ func buildCreatorPerContent(creatorID, contentType, contentID string, windowDays
 		  AND created_at > NOW() - ($3::int || ' days')::interval
 		LIMIT 5000
 	`, contentID, contentType, windowDays)
-	if err == nil {
+	if !queryFailed("how far into this video people watched",
+		"the creator is shown no drop-off breakdown at all", err) {
 		defer watchRows.Close()
 		earlySkips := 0
 		totalSkips := 0

@@ -43,9 +43,24 @@ This has happened twice:
   opinion", so the symptom would have been one ranking signal **silently
   ceasing to exist for every user**. Nothing would have logged.
 
-**This is now checked automatically.** `sql_compiles_test.go` lifts every
-query out of the source and hands it to a real Postgres to parse. The first
-run found **twelve** broken queries that had shipped:
+**Every query in this repo is now checked against a real database.** Not most
+— every one. Two tests between them leave nothing out:
+
+| | how many | checked by |
+|---|---|---|
+| readable from the source | 260 call sites | `sql_compiles_test.go` hands each to Postgres to parse |
+| built at runtime | 27 | `runtime_queries_db_test.go` RUNS each one |
+| several statements in one string | 5 | every database-backed test runs them on the way in |
+| **neither** | **0** | — and the test fails if that stops being true |
+
+`sql_compiles_test.go` reads a query held in a constant, glued together with
+`+`, produced by `fmt.Sprintf`, returned by a function whose every return is a
+literal, passed in as a parameter, or listed in a range loop. What it still
+cannot read is paired by name with the test that runs it, and that pairing is
+checked BOTH ways: an unreadable query nobody runs fails, and a stale entry
+claiming coverage that no longer exists fails too.
+
+The first run found **twelve** broken queries that had shipped:
 
 | what was broken | what it cost |
 |---|---|
@@ -60,8 +75,13 @@ Every one was a single word. CI runs a real Postgres now, so this check runs
 on every push.
 
 **If you change SQL, run it against real Postgres.** `TEST_DATABASE_URL` and
-the `withDB(t)` helper in `scoring_db_audit_test.go` are the way in. Tests
-using them skip cleanly when no database is set, so adding one costs nothing.
+the `withDB(t)` helper in `scoring_db_audit_test.go` are the way in.
+
+`withDB` skips when `TEST_DATABASE_URL` is UNSET and **fails** when it is set
+but the database does not answer. That difference is the point: when both were
+a skip, a CI run whose Postgres never started reported a clean pass with none
+of these tests having run. Green, fast, and meaningless — the same shape as
+every bug on this page.
 
 If there is no database to hand, start one:
 
@@ -116,7 +136,15 @@ five hundred — and the count is what tells you which happened. One bad row is
 a bad row; every row failing is a broken query.
 
 `silent_failures_test.go` counts what is left and holds it at a baseline, the
-same way `.nilaway-baseline` works. It was 72. It is 34. It can go down and it
+same way `.nilaway-baseline` works. **It was 72. It is 0.** Every database
+call in this repo says something when it fails.
+
+The check itself was wrong twice before that number meant anything. It counted
+`strconv.Atoi` and `time.Parse`, which have nothing to do with a database, and
+it counted errors that ARE reported a few lines further down. Both made the
+number bigger than the truth, and a checker that cries wolf gets switched off.
+It now tracks, per block, whether an error came from a database call and
+whether the statement next to it says anything about it. It can go down and it
 cannot go up without a reason in the commit message.
 
 ### 3. It exists, but nothing calls it

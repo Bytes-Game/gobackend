@@ -396,14 +396,20 @@ func mediaPrefixesForChallenge(challengeID int) []string {
 	// answers' streaming files were left in the bucket on every battle
 	// delete, and a folder belonging to some unrelated response was queued
 	// for removal instead. It never surfaced because both are silent.
-	if rows, err := db.Query(
+	rows, err := db.Query(
 		`SELECT id FROM challenge_responses WHERE challenge_id = $1`, challengeID,
-	); err == nil {
+	)
+	if !queryFailed(fmt.Sprintf("the answers belonging to challenge %d", challengeID),
+		"their streaming files stay in the bucket, taking up space nobody is "+
+			"tracking", err) {
+		bad := 0
 		for rows.Next() {
 			var rid int
-			if err := rows.Scan(&rid); err == nil {
-				out = append(out, fmt.Sprintf("hls/resp/%d/", rid))
+			if scanFailed(fmt.Sprintf("an answer id under challenge %d", challengeID),
+				rows.Scan(&rid), &bad) {
+				continue
 			}
+			out = append(out, fmt.Sprintf("hls/resp/%d/", rid))
 		}
 		rows.Close()
 	}
@@ -431,7 +437,14 @@ func mediaPrefixesForResponse(responseID int) []string {
 		        COALESCE(video_variants,'{}'::jsonb)::text
 		   FROM challenge_responses WHERE id = $1`, responseID)
 	var video, thumb, variants string
-	if err := row.Scan(&video, &thumb, &variants); err == nil {
+	if err := row.Scan(&video, &thumb, &variants); err != nil {
+		// Not-found is ordinary — the row may already be gone. Anything else
+		// means this answer's video and thumbnail are never queued for
+		// removal and stay in the bucket for good, with nothing recording
+		// that they were missed.
+		queryFailed(fmt.Sprintf("the files belonging to answer %d", responseID),
+			"its video and thumbnail stay in the bucket", err)
+	} else {
 		add(video)
 		add(thumb)
 		for _, u := range urlsInJSON(variants) {

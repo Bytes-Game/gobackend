@@ -293,7 +293,8 @@ func buildSuggestedExclusions(userID string) map[string]bool {
 		`SELECT CAST(following_id AS TEXT) FROM follows WHERE follower_id = CAST($1 AS INT)`,
 		userID,
 	)
-	if err == nil {
+	if !queryFailed("who user "+userID+" already follows",
+		"people they follow may be suggested to them again", err) {
 		defer rows.Close()
 		for rows.Next() {
 			var fid string
