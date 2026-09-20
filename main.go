@@ -567,6 +567,11 @@ func main() {
 	api.HandleFunc("/challenges/vote", authed(VoteChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/comments", authed(AddChallengeCommentHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/responses/{id}/flag", authed(FlagResponseHandler)).Methods("POST", "OPTIONS")
+	// The same feature as the challenge route below, for the other half of a
+	// battle. Under /challenges/responses/ rather than a top-level /responses/
+	// because that is where the response routes already live.
+	api.HandleFunc("/challenges/responses/{id}/tag-suggestions", authed(GetResponseTagSuggestionsHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/challenges/responses/{id}/tag-suggestions", authed(DecideResponseTagSuggestionsHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/votes", GetVoteResultsHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/comments", GetChallengeCommentsHandler).Methods("GET", "OPTIONS")
 	// Before the bare {id} route, or mux matches "tag-suggestions" as an id.

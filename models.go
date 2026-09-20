@@ -322,6 +322,22 @@ type ChallengeResponse struct {
 	RelevanceScore float64 `json:"relevanceScore,omitempty"`
 	OffTopicFlags  int     `json:"offTopicFlags,omitempty"`
 	IsHidden       bool    `json:"isHidden,omitempty"`
+
+	// What this answer is, in the responder's own words.
+	//
+	// The same four fields a challenge carries. A response is a video people
+	// watch, vote on and learn a taste from, so the half of "what is this"
+	// that comes from the person who made it belongs here too — it was
+	// missing only because these columns were added to one table and not the
+	// other. See migration 008.
+	//
+	// Category is never empty on a stored response: when the responder says
+	// nothing it inherits the challenge they answered, which is a real answer
+	// rather than a shrug.
+	Category    string   `json:"category,omitempty"`
+	EmotionTags []string `json:"emotionTags,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	EnergyLevel string   `json:"energyLevel,omitempty"`
 }
 
 // CreateChallengePayload is the request body for creating a challenge.
@@ -448,6 +464,19 @@ type AcceptChallengePayload struct {
 	// and store metadata for downstream relevance scoring.
 	DurationMs int    `json:"durationMs"`
 	Caption    string `json:"caption,omitempty"`
+
+	// The responder's own account of their video, all optional.
+	//
+	// Every one of these has a server-side answer when the app sends nothing,
+	// so an older build that does not know these fields exist keeps working
+	// and still gets a category — see AcceptChallenge.
+	Category    string   `json:"category,omitempty"`
+	EmotionTags []string `json:"emotionTags,omitempty"`
+	EnergyLevel string   `json:"energyLevel,omitempty"`
+	// Tags are cleaned and capped on the way in, the same as a challenge's —
+	// see content_tags.go. Kept apart from the machine's auto_tags so the
+	// model never appears to have put words in the responder's mouth.
+	Tags []string `json:"tags,omitempty"`
 }
 
 // FlagResponsePayload is the body for community-moderation off-topic flagging.

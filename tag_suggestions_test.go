@@ -3,8 +3,11 @@ package main
 import (
 	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 // Offering the creator what the model saw.
@@ -108,9 +111,130 @@ func TestTagSuggestions_AreForTheCreatorAlone(t *testing.T) {
 	if n := strings.Count(body, "http.StatusForbidden"); n != 2 {
 		t.Errorf("got %d forbidden replies, want 2", n)
 	}
-	if !strings.Contains(body, "creator != \"\" && creator == viewerID") {
-		t.Error("ownership no longer compares the creator to the caller — an " +
-			"empty creator id would match an unauthenticated caller")
+	if !strings.Contains(body, "owner != \"\" && owner == viewerID") {
+		t.Error("ownership no longer compares the uploader to the caller — an " +
+			"empty id would match an unauthenticated caller")
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// BOTH HALVES OF A BATTLE, NOT JUST THE CHALLENGE
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The same feature over two tables. What makes that worth testing rather than
+// reading is that the difference between them is three words in a struct, and
+// getting one wrong does not fail — it reads the wrong table, or asks the
+// wrong column who owns the video, and answers confidently either way.
+
+func TestTagSurfaces_NameTheRightTableAndOwner(t *testing.T) {
+	if challengeTagSurface.table != "challenges" ||
+		challengeTagSurface.owner != "creator_id" {
+		t.Errorf("challenge surface reads %s.%s",
+			challengeTagSurface.table, challengeTagSurface.owner)
+	}
+	if responseTagSurface.table != "challenge_responses" ||
+		responseTagSurface.owner != "responder_id" {
+		t.Errorf("response surface reads %s.%s",
+			responseTagSurface.table, responseTagSurface.owner)
+	}
+	// A response is not in the search index, so saving its tags must not
+	// queue a reindex of a challenge that happens to share its id. That is
+	// not a wasted call, it is the WRONG video being reindexed.
+	if responseTagSurface.searchHasACopy {
+		t.Error("saving a response's tags would reindex the challenge with " +
+			"the same id — responses are not in the search index at all")
+	}
+	if !challengeTagSurface.searchHasACopy {
+		t.Error("a challenge's tags decide who finds it, and search holds " +
+			"its own copy that nothing would now update")
+	}
+	if responseTagSurface.notFound == challengeTagSurface.notFound {
+		t.Error("both surfaces report the same not-found error, so a caller " +
+			"cannot tell which thing was missing")
+	}
+}
+
+// readTagState must actually query the table its surface names.
+//
+// A mock database cannot check a column name, but it can check which table
+// was asked — which is the half of this that a copy-paste gets wrong.
+func TestReadTagState_QueriesTheSurfacesOwnTable(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		surface tagSurface
+		expect  string
+	}{
+		{"challenge", challengeTagSurface, `FROM challenges WHERE`},
+		{"response", responseTagSurface, `FROM challenge_responses WHERE`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock, cleanup := withMockDB(t)
+			defer cleanup()
+			mock.ExpectQuery(regexp.QuoteMeta(tc.expect)).
+				WillReturnRows(sqlmock.NewRows([]string{
+					"owner", "content_topics", "auto_tags", "custom_tags", "dismissed_tags",
+				}).AddRow("7", `["surfing"]`, `["sports"]`, `[]`, `[]`))
+
+			own, topics, auto, _, _, err := readTagState(tc.surface, 1, "7")
+			if err != nil {
+				t.Fatalf("readTagState: %v", err)
+			}
+			if !own {
+				t.Error("the uploader was not recognised as the owner")
+			}
+			if len(topics) != 1 || topics[0] != "surfing" {
+				t.Errorf("topics came back as %v", topics)
+			}
+			if len(auto) != 1 || auto[0] != "sports" {
+				t.Errorf("machine tags came back as %v", auto)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+// An unauthenticated caller must not own a row whose uploader id is blank.
+func TestReadTagState_BlankOwnerIsNobody(t *testing.T) {
+	mock, cleanup := withMockDB(t)
+	defer cleanup()
+	mock.ExpectQuery(regexp.QuoteMeta("FROM challenge_responses")).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"owner", "content_topics", "auto_tags", "custom_tags", "dismissed_tags",
+		}).AddRow("", `[]`, `[]`, `[]`, `[]`))
+
+	own, _, _, _, _, err := readTagState(responseTagSurface, 1, "")
+	if err != nil {
+		t.Fatalf("readTagState: %v", err)
+	}
+	if own {
+		t.Error("a caller with no identity was handed a video with no owner")
+	}
+}
+
+// saveTagDecision must write to the table its surface names.
+func TestSaveTagDecision_WritesTheSurfacesOwnTable(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		surface tagSurface
+		expect  string
+	}{
+		{"challenge", challengeTagSurface, `UPDATE challenges SET custom_tags`},
+		{"response", responseTagSurface, `UPDATE challenge_responses SET custom_tags`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock, cleanup := withMockDB(t)
+			defer cleanup()
+			mock.ExpectExec(regexp.QuoteMeta(tc.expect)).
+				WillReturnResult(sqlmock.NewResult(1, 1))
+			if err := saveTagDecision(tc.surface, 1, []string{"surfing"}, nil); err != nil {
+				t.Fatalf("saveTagDecision: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Error(err)
+			}
+		})
 	}
 }
 
@@ -247,5 +371,39 @@ func TestDismissedTagsColumnExists(t *testing.T) {
 	if !strings.Contains(string(src), "ALTER TABLE challenges ADD COLUMN dismissed_tags") {
 		t.Error("dismissed_tags is never created, so remembering a 'no' " +
 			"fails and the same tags are offered forever")
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE HANDLERS HAVE TO BE REACHABLE
+// ════════════════════════════════════════════════════════════════════════════
+//
+// This repo has shipped the same bug four times: a thing that works, with
+// tests that pass, and nothing anywhere calling it. Every one was found by
+// cutting the wire and watching every test stay green.
+//
+// Routes are registered inside main(), which a test cannot call, so this reads
+// the source. Comment lines are stripped first — a test that matches the
+// COMMENT explaining a route instead of the route itself has happened in this
+// repo too, and it passed against code with the route deleted.
+func TestResponseTagSuggestions_AreRoutedAndAuthed(t *testing.T) {
+	src := readSourceFile(t, "main.go")
+	var code []string
+	for _, line := range strings.Split(src, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		code = append(code, line)
+	}
+	body := strings.Join(code, "\n")
+
+	for _, want := range []string{
+		`api.HandleFunc("/challenges/responses/{id}/tag-suggestions", authed(GetResponseTagSuggestionsHandler)).Methods("GET", "OPTIONS")`,
+		`api.HandleFunc("/challenges/responses/{id}/tag-suggestions", authed(DecideResponseTagSuggestionsHandler)).Methods("POST", "OPTIONS")`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("no route registers this, so the handler exists and "+
+				"nothing can ever reach it:\n  %s", want)
+		}
 	}
 }

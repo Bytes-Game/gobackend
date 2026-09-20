@@ -2065,6 +2065,45 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 	challenge, _ := GetChallengeByID(payload.ChallengeID)
 	relevance := computeRelevanceScore(challenge, payload.Caption)
 
+	// ── What this answer is, in the responder's own words ──────────────────
+	//
+	// The same three derivations CreateChallenge runs, against the same
+	// helpers, so a battle's two videos are described in one vocabulary
+	// rather than two. See content_tags.go.
+	//
+	// The category falls back to the challenge being answered rather than to
+	// a keyword guess, because a response has almost no words of its own to
+	// guess from — no prefix, no subject, and usually no caption. Without
+	// that fallback the answer half of every battle would be filed as
+	// "general". See categoryForResponse.
+	tags := normalizeTags(payload.Tags)
+	category := categoryForResponse(payload.Category, tags, challenge.Category, payload.Caption)
+	emotions := emotionsForContent(payload.EmotionTags, tags, "", "", payload.Caption)
+	energyLevel := payload.EnergyLevel
+	if energyLevel == "" {
+		// The responder's own last five videos feed the baseline, same as a
+		// creator's do. A first-time responder degrades cleanly — the lookup
+		// returns "" and the rest of the signals decide.
+		energyLevel = deriveEnergyLevelWithCreator(
+			category,
+			challenge.Subject,
+			challenge.Prefix+" "+challenge.Subject+" "+payload.Caption,
+			payload.ResponderID,
+		)
+	}
+
+	// Same non-nil rule as variantsJSON below: lib/pq turns a nil []byte into
+	// SQL NULL, which a JSONB column rejects on this path, so an empty list
+	// has to reach the database as [] spelled out.
+	tagsJSON, err := json.Marshal(tags)
+	if err != nil || len(tags) == 0 {
+		tagsJSON = []byte("[]")
+	}
+	emotionJSON, err := json.Marshal(emotions)
+	if err != nil || len(emotions) == 0 {
+		emotionJSON = []byte("[]")
+	}
+
 	// Marshal variants to JSONB. Default to '{}' (not nil) so lib/pq sends
 	// a real empty JSON object instead of NULL — keeps the COALESCE in
 	// populateTopResponses' SELECT and any other reader simple.
@@ -2077,12 +2116,14 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 
 	var id int
 	var createdAt time.Time
-	err := db.QueryRow(
+	err = db.QueryRow(
 		`INSERT INTO challenge_responses
-			(challenge_id, responder_id, video_url, video_variants, thumbnail_url, duration_ms, caption, relevance_score)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, created_at`,
+			(challenge_id, responder_id, video_url, video_variants, thumbnail_url, duration_ms, caption, relevance_score,
+			 category, custom_tags, emotion_tags, energy_level)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, created_at`,
 		cid, rid, payload.VideoURL, variantsJSON, payload.ThumbnailURL,
 		payload.DurationMs, payload.Caption, relevance,
+		category, tagsJSON, emotionJSON, energyLevel,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return ChallengeResponse{}, err
@@ -2113,6 +2154,10 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 		Caption:           payload.Caption,
 		RelevanceScore:    relevance,
 		CreatedAt:         createdAt.UTC().Format(time.RFC3339),
+		Category:          category,
+		EmotionTags:       emotions,
+		Tags:              tags,
+		EnergyLevel:       energyLevel,
 	}, nil
 }
 

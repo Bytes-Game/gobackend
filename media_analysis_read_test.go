@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -175,27 +176,81 @@ func TestReadAnalysis_ShowsBothAnswersWhenTheyDisagree(t *testing.T) {
 // it and never looks at the column names, so every test above passed against a
 // query the real database rejects. These two check the names themselves.
 
+// schemaAddsColumn reports whether this repo's schema adds col to table.
+//
+// It looks in BOTH places the schema is written, which is the whole point of
+// it existing. database.go re-runs its ADD COLUMN statements on every boot;
+// migrations/ holds the numbered files applied once each. A check that reads
+// only the first is blind to half the schema, and the half it cannot see is
+// the newer half — video_analysis, auto_tags, content_topics and every column
+// migration 008 adds all live in files this used to ignore.
+//
+// One ALTER TABLE statement at a time, up to its semicolon, so a column added
+// to challenges is never mistaken for one added to challenge_responses.
+func schemaAddsColumn(t *testing.T, table, col string) bool {
+	t.Helper()
+	sources := []string{}
+	b, err := os.ReadFile("database.go")
+	if err != nil {
+		t.Fatalf("read database.go: %v", err)
+	}
+	sources = append(sources, string(b))
+	files, err := filepath.Glob("migrations/*.sql")
+	if err != nil {
+		t.Fatalf("list migrations: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no migrations found — this check would silently pass for " +
+			"every column added by one")
+	}
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		sources = append(sources, string(b))
+	}
+
+	stmt := regexp.MustCompile(`(?is)ALTER TABLE\s+` + regexp.QuoteMeta(table) + `\b[^;]*;`)
+	add := regexp.MustCompile(`(?is)ADD COLUMN\s+(?:IF NOT EXISTS\s+)?` + regexp.QuoteMeta(col) + `\b`)
+	for _, src := range sources {
+		for _, one := range stmt.FindAllString(src, -1) {
+			if add.MatchString(one) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// The helper has to be able to say no, or every check built on it passes for
+// a column that was never added anywhere.
+func TestSchemaAddsColumn_SaysNoForSomethingNobodyAdded(t *testing.T) {
+	if schemaAddsColumn(t, "challenges", "not_a_real_column_xyz") {
+		t.Error("the schema check found a column that does not exist, so it " +
+			"cannot be trusted to notice a missing one either")
+	}
+	// And it must not confuse the two tables. prefix is on challenges only.
+	if schemaAddsColumn(t, "challenge_responses", "prefix") {
+		t.Error("a column on challenges was credited to challenge_responses")
+	}
+}
+
 func TestReadAnalysis_AsksChallengesForColumnsThatExist(t *testing.T) {
 	cols := analysisCreatorColumns("challenges")
 
-	if strings.Contains(cols, "custom_tags") == false {
+	if !strings.Contains(cols, "custom_tags") {
 		t.Errorf("the creator's tags are read from %q. The column is "+
 			"custom_tags — asking for anything else takes down the whole "+
 			"listing, not just the tags.", cols)
 	}
 
 	// Checked against the schema rather than against a remembered name, so
-	// renaming the column in database.go fails here too instead of failing in
-	// production.
-	schema, err := os.ReadFile("database.go")
-	if err != nil {
-		t.Fatalf("read database.go: %v", err)
-	}
+	// renaming the column fails here too instead of failing in production.
 	for _, col := range []string{"custom_tags", "category"} {
-		if !strings.Contains(string(schema), "ALTER TABLE challenges ADD COLUMN "+col+" ") {
-			t.Errorf("the analysis query asks challenges for %q, but the "+
-				"schema in database.go never adds that column to challenges",
-				col)
+		if !schemaAddsColumn(t, "challenges", col) {
+			t.Errorf("the analysis query asks challenges for %q, but nothing "+
+				"in the schema adds that column to challenges", col)
 		}
 		if !strings.Contains(cols, col) {
 			t.Errorf("the analysis query no longer reads %q from challenges", col)
@@ -203,27 +258,42 @@ func TestReadAnalysis_AsksChallengesForColumnsThatExist(t *testing.T) {
 	}
 }
 
-func TestReadAnalysis_AsksResponsesForNothingItDoesNotHave(t *testing.T) {
-	// challenge_responses has neither column: a response answers somebody
-	// else's challenge, so it never carried a category or the responder's own
-	// tags. The fragment for that table must be literals only.
-	schema, err := os.ReadFile("database.go")
-	if err != nil {
-		t.Fatalf("read database.go: %v", err)
-	}
+// The mirror of the test above, and it used to be its opposite.
+//
+// While challenge_responses had no creator columns this asserted that the
+// query asked for NEITHER. That was right at the time and it is wrong now:
+// migration 008 added both, and a response whose creator claim is not read
+// comes back looking like a response whose creator made no claim. The endpoint
+// exists to compare the two sides, so reporting one of them as silent when it
+// is not is the one failure that matters here.
+func TestReadAnalysis_AsksResponsesForTheCreatorColumnsToo(t *testing.T) {
 	cols := analysisCreatorColumns("challenge_responses")
-	for _, absent := range []string{"category", "custom_tags", "tags"} {
-		if strings.Contains(string(schema), "ALTER TABLE challenge_responses ADD COLUMN "+absent+" ") {
-			// Somebody added it. Then reading it is fine and this test is the
-			// thing that is out of date.
-			continue
+
+	for _, col := range []string{"custom_tags", "category"} {
+		if !schemaAddsColumn(t, "challenge_responses", col) {
+			t.Fatalf("challenge_responses has no %q column in the schema. "+
+				"Reading one that is not there returns nothing for every "+
+				"response, not an empty value for that field.", col)
 		}
-		if strings.Contains(cols, absent) {
-			t.Errorf("the responses query asks for %q, which that table does "+
-				"not have. One missing column returns nothing for every "+
-				"response, not an empty value for that one field. Got: %s",
-				absent, cols)
+		if !strings.Contains(cols, col) {
+			t.Errorf("the analysis query does not read %q from "+
+				"challenge_responses, so every answer in the app reports no "+
+				"creator claim and nothing disputed. Got: %s", col, cols)
 		}
+	}
+}
+
+// A table this function has never heard of must be answered with literals.
+//
+// table is picked by hlsTableForKind from a fixed pair, so this cannot happen
+// today. It is pinned because the cost of guessing wrong is not a wrong field,
+// it is an empty listing: Postgres refuses the whole statement over one column
+// name it does not recognise.
+func TestReadAnalysis_GuessesNoColumnsForAnUnknownTable(t *testing.T) {
+	cols := analysisCreatorColumns("posts")
+	if strings.Contains(cols, "category") || strings.Contains(cols, "custom_tags") {
+		t.Errorf("named a column for a table this function does not know "+
+			"about; got %s", cols)
 	}
 }
 
@@ -245,11 +315,44 @@ func TestReadAnalysis_StillWorksForResponses(t *testing.T) {
 		t.Errorf("the transcript did not come back; got %q", got[0].Speech)
 	}
 	if got[0].CreatorCategory != "" {
-		t.Errorf("a response reported a creator category of %q; there is no "+
-			"column for one", got[0].CreatorCategory)
+		t.Errorf("a response with an empty category column reported a creator "+
+			"category of %q", got[0].CreatorCategory)
 	}
 	if got[0].Disputed {
 		t.Error("a response was reported as disputed, but only one side spoke")
+	}
+}
+
+// A response can now disagree with the model, and saying so is the entire
+// reason this endpoint exists.
+//
+// Before migration 008 this was unreachable: the query handed the row two
+// literals, so every answer in the app came back with no creator claim and
+// Disputed false. That is the same output as genuine agreement, which made
+// half the catalogue silently unanswerable to the one question being asked.
+func TestReadAnalysis_AResponseCanDisagreeWithTheModel(t *testing.T) {
+	mock, cleanup := withMockDB(t)
+	defer cleanup()
+
+	stored := `{"passes":["understand"],"autoTags":["dance"]}`
+	mock.ExpectQuery(regexp.QuoteMeta("FROM challenge_responses")).
+		WillReturnRows(analysisRowsWithCreator(stored, "comedy", `["comedy"]`))
+
+	got := readAnalysisRows("challenge_responses", "responses", 0, 20)
+	if len(got) != 1 {
+		t.Fatalf("expected one row, got %d", len(got))
+	}
+	if got[0].CreatorCategory != "comedy" {
+		t.Errorf("the responder said comedy; the endpoint reported %q",
+			got[0].CreatorCategory)
+	}
+	if got[0].MachineCategory != "dance" {
+		t.Errorf("the model said dance; the endpoint reported %q",
+			got[0].MachineCategory)
+	}
+	if !got[0].Disputed {
+		t.Error("the responder said comedy and the model said dance, and the " +
+			"endpoint reported no disagreement")
 	}
 }
 
