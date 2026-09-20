@@ -38,6 +38,18 @@
 --
 -- An account with no trace at all keeps today's stamp, which is the honest
 -- answer: nothing here knows when it arrived.
+--
+-- No COALESCE around the sub-selects, deliberately. LEAST IGNORES NULLs — it
+-- returns the smallest value that is not null, and null only when every
+-- argument is null. So a MIN over a table this account has never touched
+-- comes back null and drops out on its own, which is exactly the wanted
+-- behaviour.
+--
+-- An earlier draft wrapped each one in COALESCE(..., u.created_at). It was
+-- harmless and it was misleading: it implied a null could win and pull an
+-- account back to the year zero, making it the most trusted on the platform.
+-- It cannot. u.created_at stays in the list as the floor for an account with
+-- no traces at all, and because it is never null, LEAST always has an answer.
 
 ALTER TABLE users
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
@@ -45,11 +57,11 @@ ALTER TABLE users
 UPDATE users u
    SET created_at = LEAST(
         u.created_at,
-        COALESCE((SELECT MIN(created_at) FROM challenges          WHERE creator_id   = u.id),        u.created_at),
-        COALESCE((SELECT MIN(created_at) FROM challenge_responses WHERE responder_id = u.id),        u.created_at),
-        COALESCE((SELECT MIN(created_at) FROM posts               WHERE author_id    = u.id),        u.created_at),
-        COALESCE((SELECT MIN(created_at) FROM follows             WHERE follower_id  = u.id),        u.created_at),
-        COALESCE((SELECT MIN(created_at) FROM feed_events         WHERE user_id      = u.id::text),  u.created_at)
+        (SELECT MIN(created_at) FROM challenges          WHERE creator_id   = u.id),
+        (SELECT MIN(created_at) FROM challenge_responses WHERE responder_id = u.id),
+        (SELECT MIN(created_at) FROM posts               WHERE author_id    = u.id),
+        (SELECT MIN(created_at) FROM follows             WHERE follower_id  = u.id),
+        (SELECT MIN(created_at) FROM feed_events         WHERE user_id      = u.id::text)
    );
 
 -- "Accounts created in the last N days" is a question the admin dashboard and
