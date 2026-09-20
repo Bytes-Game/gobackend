@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"log"
 	"math"
 	"strings"
 	"time"
@@ -248,17 +251,36 @@ func loadHomeFeedItemByID(itemType, id string) (HomeFeedItem, bool) {
 	case "post":
 		var p Post
 		var createdAt time.Time
+		// Four column names here did not exist: the owner is author_id, not
+		// user_id, and a post's likes and comments are rows in their own
+		// tables rather than columns. So this statement was refused outright
+		// every time a trending POST came up, and the silent false below
+		// dropped it from the feed. Only challenges ever made it through.
+		//
+		// Counted the same way postBaseQuery counts them, so a post's like
+		// count is one number in this app rather than two that drift.
 		err := db.QueryRow(`
-			SELECT p.id, p.user_id, u.username, u.league, p.type, p.content_url,
-				COALESCE(p.thumbnail_url, ''), p.caption, p.likes, p.views,
-				p.comments, p.created_at
+			SELECT p.id, p.author_id, u.username, u.league, p.type, p.content_url,
+				COALESCE(p.thumbnail_url, ''), p.caption,
+				COALESCE((SELECT COUNT(*) FROM post_likes WHERE post_id = p.id), 0),
+				p.views,
+				COALESCE((SELECT COUNT(*) FROM comments WHERE post_id = p.id), 0),
+				p.created_at
 			FROM posts p
-			JOIN users u ON p.user_id = u.id
+			JOIN users u ON p.author_id = u.id
 			WHERE p.id = $1`, id).Scan(
 			&p.ID, &p.AuthorID, &p.AuthorUsername, &p.AuthorLeague,
 			&p.Type, &p.ContentURL, &p.ThumbnailURL, &p.Caption,
 			&p.Likes, &p.Views, &p.Comments, &createdAt)
 		if err != nil {
+			// A post that is gone is ordinary — trending holds ids for a
+			// while after the row is deleted. Anything else is this server
+			// failing, and dropping it in silence is what hid the four wrong
+			// column names above for as long as they were here.
+			if !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("trending: could not load post %s, leaving it out "+
+					"of the feed: %v", id, err)
+			}
 			return HomeFeedItem{}, false
 		}
 		p.CreatedAt = createdAt.Format(time.RFC3339)

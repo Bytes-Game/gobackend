@@ -379,11 +379,15 @@ func ExperimentResultsHandler(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	var results []VariantMetrics
+	rowsBad := 0
 	for rows.Next() {
 		var m VariantMetrics
-		rows.Scan(&m.VariantID, &m.UniqueUsers, &m.TotalSessions,
-			&m.AvgSessionItems, &m.AvgCompletionRate, &m.AvgSkipRate,
-			&m.AvgLikesPerSession, &m.AvgSharesPerSession)
+		if scanFailed("the results of this experiment",
+			rows.Scan(&m.VariantID, &m.UniqueUsers, &m.TotalSessions,
+				&m.AvgSessionItems, &m.AvgCompletionRate, &m.AvgSkipRate,
+				&m.AvgLikesPerSession, &m.AvgSharesPerSession), &rowsBad) {
+			continue
+		}
 		results = append(results, m)
 	}
 

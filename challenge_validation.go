@@ -90,20 +90,28 @@ func validateChallengeResponseSubmission(payload AcceptChallengePayload, challen
 		return fmt.Errorf("invalid challenge ID")
 	}
 	var dupExists bool
-	db.QueryRow(
+	if err := db.QueryRow(
 		`SELECT EXISTS(SELECT 1 FROM challenge_responses WHERE responder_id=$1 AND video_url=$2)`,
 		rid, payload.VideoURL,
-	).Scan(&dupExists)
+	).Scan(&dupExists); err != nil {
+		queryFailed("validateChallengeResponseSubmission: could not check whether "+
+			"this video has already been used",
+			"letting the upload through, so the same video can answer twice", err)
+	}
 	if dupExists {
 		return fmt.Errorf("you have already used this video for another challenge — record a new one")
 	}
 
 	// --- One response per user per challenge ---
 	var alreadyResponded bool
-	db.QueryRow(
+	if err := db.QueryRow(
 		`SELECT EXISTS(SELECT 1 FROM challenge_responses WHERE responder_id=$1 AND challenge_id=$2)`,
 		rid, cid,
-	).Scan(&alreadyResponded)
+	).Scan(&alreadyResponded); err != nil {
+		queryFailed("validateChallengeResponseSubmission: could not check whether "+
+			"this person has already answered",
+			"letting the upload through, so one person can answer twice", err)
+	}
 	if alreadyResponded {
 		return fmt.Errorf("you have already responded to this challenge")
 	}
@@ -295,8 +303,14 @@ func FlagResponseHandler(w http.ResponseWriter, r *http.Request) {
 // both thresholds are crossed. Returns the new is_hidden state.
 func evaluateHidingThreshold(responseID int) bool {
 	var flags, views int
-	db.QueryRow(`SELECT COUNT(*) FROM challenge_response_flags WHERE response_id = $1`, responseID).Scan(&flags)
-	db.QueryRow(`SELECT COALESCE(views, 0) FROM challenge_responses WHERE id = $1`, responseID).Scan(&views)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM challenge_response_flags WHERE response_id = $1`, responseID).Scan(&flags); err != nil {
+		queryFailed("evaluateHidingThreshold: could not read challenge_response_flags",
+			"carrying on as if the answer were empty", err)
+	}
+	if err := db.QueryRow(`SELECT COALESCE(views, 0) FROM challenge_responses WHERE id = $1`, responseID).Scan(&views); err != nil {
+		queryFailed("evaluateHidingThreshold: could not read challenge_responses",
+			"carrying on as if the answer were empty", err)
+	}
 
 	// Update the cached counter on the response (used for fast feed reads)
 	db.Exec(`UPDATE challenge_responses SET off_topic_flags = $1 WHERE id = $2`, flags, responseID)
@@ -328,10 +342,16 @@ func userOffTopicRate(userID string) float64 {
 		return 0
 	}
 	var total, hidden int
-	db.QueryRow(`SELECT COUNT(*) FROM challenge_responses WHERE responder_id = $1`, rid).Scan(&total)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM challenge_responses WHERE responder_id = $1`, rid).Scan(&total); err != nil {
+		queryFailed("userOffTopicRate: could not read challenge_responses",
+			"carrying on as if the answer were empty", err)
+	}
 	if total < 5 {
 		return 0 // Not enough history to judge
 	}
-	db.QueryRow(`SELECT COUNT(*) FROM challenge_responses WHERE responder_id = $1 AND is_hidden = TRUE`, rid).Scan(&hidden)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM challenge_responses WHERE responder_id = $1 AND is_hidden = TRUE`, rid).Scan(&hidden); err != nil {
+		queryFailed("userOffTopicRate: could not read challenge_responses",
+			"carrying on as if the answer were empty", err)
+	}
 	return float64(hidden) / float64(total)
 }
