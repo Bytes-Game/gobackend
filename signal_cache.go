@@ -118,7 +118,8 @@ func warmUserSignalCaches(userID string) {
 		  AND fe.event_type = 'scroll_back'
 		  AND fe.created_at > NOW() - INTERVAL '24 hours'
 	`, userID)
-	if err == nil {
+	if !queryFailed("what user "+userID+" scrolled back to",
+		"that signal is off for them until the next refresh", err) {
 		for rows.Next() {
 			var id string
 			if rows.Scan(&id) == nil && id != "" {
@@ -141,7 +142,8 @@ func warmUserSignalCaches(userID string) {
 		  AND fe.created_at > NOW() - INTERVAL '7 days'
 		GROUP BY COALESCE(c.creator_id::text, p.author_id::text, '')
 	`, userID)
-	if err == nil {
+	if !queryFailed("which creators user "+userID+" finishes",
+		"that signal is off for them until the next refresh", err) {
 		for rows.Next() {
 			var id string
 			var cnt int

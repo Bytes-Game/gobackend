@@ -87,6 +87,41 @@ type sqlSite struct {
 	// because a check that silently skipped them would be the same blind spot
 	// in a new place.
 	dynamic bool
+	// multi is a string holding several statements. Prepare takes exactly
+	// one, so these cannot come through here — but they are not a blind spot
+	// either: the schema block in database.go is run in full by every
+	// database-backed test in this package, on the way in.
+	multi bool
+	// fn is the function the query sits in. Used to pair an unreadable query
+	// with the test that runs it — by name rather than by line, so an edit
+	// three hundred lines above does not break the pairing.
+	fn string
+}
+
+// isDatabaseHandle reports that this is something you run SQL on, rather than
+// a Redis pipeline that happens to have a method called Exec.
+//
+// Thirteen Redis pipeline flushes were being counted as "queries this cannot
+// read", which made the blind spot look a quarter bigger than it is. When the
+// query text does not fold, the receiver is the only thing left to go on.
+func isDatabaseHandle(e ast.Expr) bool {
+	root := e
+	for {
+		sel, ok := root.(*ast.SelectorExpr)
+		if !ok {
+			break
+		}
+		root = sel.X
+	}
+	id, ok := root.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	switch id.Name {
+	case "db", "tx", "conn", "sqlDB", "stmt":
+		return true
+	}
+	return false
 }
 
 // sqlMethods are the database/sql calls whose first argument is a query.
@@ -116,12 +151,25 @@ func TestEverySQLStatementCompilesAgainstTheRealSchema(t *testing.T) {
 			"broken, and a broken collector passes silently forever", len(sites))
 	}
 
-	var checked, statements, skipped int
-	var dynamic []string
+	var checked, statements, skipped, multi int
+	var dynamic, coveredElsewhere []string
 	for _, s := range sites {
+		if s.multi {
+			// Several statements in one string. Prepare takes one, so these
+			// go through the ordinary database tests instead — the schema
+			// block in database.go is run in full by every one of them.
+			multi++
+			continue
+		}
 		if s.dynamic {
 			skipped++
-			dynamic = append(dynamic, fmt.Sprintf("%s:%d", s.file, s.line))
+			key := s.file + ":" + s.fn
+			if by, ok := runByATest[key]; ok {
+				coveredElsewhere = append(coveredElsewhere, key+"  ("+by+")")
+			} else {
+				dynamic = append(dynamic, fmt.Sprintf("%s:%d  in %s",
+					s.file, s.line, s.fn))
+			}
 			continue
 		}
 		checked++
@@ -144,45 +192,138 @@ func TestEverySQLStatementCompilesAgainstTheRealSchema(t *testing.T) {
 	}
 
 	t.Logf("checked %d call sites (%d statements) against real Postgres; "+
-		"%d built at runtime and not statically checkable (baseline %d)",
-		checked, statements, skipped, sqlDynamicBaseline)
+		"%d more are built at runtime and RUN by a database-backed test; "+
+		"%d hold several statements and are run whole by those tests; "+
+		"%d neither (baseline %d)",
+		checked, statements, len(coveredElsewhere), multi,
+		len(dynamic), sqlDynamicBaseline)
 
-	// The runtime-built ones are the remaining blind spot, and a blind spot
-	// that is allowed to grow is a checker slowly switching itself off. So
-	// the COUNT is the gate, the same way .nilaway-baseline works: a new
-	// unreadable query fails here, and the ones already here stay listed.
 	sort.Strings(dynamic)
-	if skipped > sqlDynamicBaseline {
-		t.Errorf("queries this cannot read went from %d to %d.\n\n"+
+	sort.Strings(coveredElsewhere)
+
+	// The gate is what is left over: a query this cannot read AND nothing
+	// runs. Those are the ones where a wrong column name reaches production.
+	if len(dynamic) > sqlDynamicBaseline {
+		t.Errorf("queries that are neither readable here nor run by a test "+
+			"went from %d to %d.\n\n"+
 			"A query built from something the source does not show — a table "+
-			"name in a struct field, a WHERE clause glued on in a loop — is "+
-			"a query no test in this repo checks against a real schema.\n\n"+
-			"Either write it out at the call so this can see it (the switch "+
-			"in creatorOwnsContent is the pattern), or give it a test that "+
-			"RUNS it against real Postgres (TestReadTagState_QueriesTheSurfacesOwnTable "+
-			"is the shape), or raise sqlDynamicBaseline and say in the commit "+
-			"message why it cannot be checked.\n\nAll of them:\n  %s",
-			sqlDynamicBaseline, skipped, strings.Join(dynamic, "\n  "))
+			"name in a parameter, a WHERE clause glued on in a loop — is a "+
+			"query no real database has ever seen.\n\n"+
+			"Three ways out, best first:\n"+
+			"  1. write it out at the call so this can read it (the switch in "+
+			"creatorOwnsContent is the pattern)\n"+
+			"  2. give it a test that RUNS it — runtime_queries_db_test.go is "+
+			"full of them — and add its function to runByATest below\n"+
+			"  3. raise sqlDynamicBaseline and say in the commit message why "+
+			"neither was possible\n\nAll of them:\n  %s",
+			sqlDynamicBaseline, len(dynamic), strings.Join(dynamic, "\n  "))
 	}
-	if skipped < sqlDynamicBaseline {
-		t.Logf("queries this cannot read is down to %d from %d — lower "+
-			"sqlDynamicBaseline so it cannot creep back up", skipped, sqlDynamicBaseline)
+	if len(dynamic) < sqlDynamicBaseline {
+		t.Logf("down to %d from %d — lower sqlDynamicBaseline so it cannot "+
+			"creep back up", len(dynamic), sqlDynamicBaseline)
 	}
+
+	// A name here that no longer matches anything is a test that has been
+	// renamed or deleted, leaving a query nobody checks and a list that says
+	// otherwise.
+	seen := map[string]bool{}
+	for _, c := range coveredElsewhere {
+		key := c
+		if i := strings.Index(c, "  ("); i > 0 {
+			key = c[:i]
+		}
+		seen[key] = true
+	}
+	for key := range runByATest {
+		if !seen[key] {
+			t.Errorf("runByATest lists %q, but no unreadable query sits in "+
+				"that function any more. Either it became readable — remove "+
+				"the entry — or the function moved and something is now "+
+				"unchecked while this list claims otherwise.", key)
+		}
+	}
+
 	if testing.Verbose() {
+		for _, c := range coveredElsewhere {
+			t.Logf("  run by a test:    %s", c)
+		}
 		for _, d := range dynamic {
-			t.Logf("  built at runtime: %s", d)
+			t.Logf("  NOT CHECKED:      %s", d)
 		}
 	}
 }
 
-// sqlDynamicBaseline is how many call sites build their query from something
-// this file cannot read.
+// runByATest pairs a query this file cannot read with the test that runs it
+// against a real database.
 //
-// Not zero, and not a target to force to zero by making the reader cleverer
-// — some of these genuinely are assembled at runtime, like the placeholder
-// list for an IN clause whose length is the page size. The point of the
-// number is that it cannot go UP without somebody saying why.
-const sqlDynamicBaseline = 53
+// Keyed by file and enclosing FUNCTION, not by line, so ordinary edits do not
+// break the pairing. Every entry is checked both ways: an unlisted unreadable
+// query fails the test above, and a listed function that no longer holds one
+// fails too — because a stale entry is a claim of coverage that is no longer
+// true, which is worse than no claim at all.
+var runByATest = map[string]string{
+	// A table name arriving as a parameter. Both tables are passed.
+	"admin_hls_queue.go:readHLSQueue":       "TestRuntimeQueries_TableNameFromAParameter",
+	"media_requeue.go:requeueByID":          "TestRuntimeQueries_TableNameFromAParameter",
+	"video_analysis.go:storeVideoAnalysis":  "TestRuntimeQueries_TableNameFromAParameter",
+	"hls_worker_api.go:storeVideoVariants":  "TestRuntimeQueries_WorkerWritesToBothTables",
+	"hls_worker_api.go:storeVideoThumbnail": "TestRuntimeQueries_WorkerWritesToBothTables",
+	"media_analysis_read.go:readAnalysisRows": "TestAdminAnalysisRead_RunsAgainstARealResponsesTable",
+
+	// A placeholder list built in a loop.
+	"database.go:getLikedByMap":                "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
+	"database.go:enrichUsers":                  "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
+	"device_fit.go:loadVideoDimensions":        "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
+	"feed_engine.go:populateTopResponses":      "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
+	"feed_engine.go:populateChallengeCommentCounts": "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
+	"feed_engine.go:populateHLSManifestURLs":   "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
+
+	// A clause glued on depending on the caller.
+	"search_relevance.go:searchTextIndex":      "TestRuntimeQueries_ClausesGluedOnAtRequestTime",
+	"suggested_users.go:pullCategoryCandidates": "TestRuntimeQueries_ClausesGluedOnAtRequestTime",
+	"hls_dispatch.go:hlsWorkWaiting":           "TestRuntimeQueries_ClausesGluedOnAtRequestTime",
+	"audition_ladder.go:auditionsDueForReview": "TestRuntimeQueries_ClausesGluedOnAtRequestTime",
+	"topic_graph.go:buildTopicGraph":           "TestTopicGraph_CountsBothHalvesOfABattle",
+
+	// Built inside an HTTP handler, where the shape depends on the request.
+	"profile_handlers.go:UpdateUserProfileHandler":  "TestRuntimeQueries_HandlersThatBuildTheirOwnSQL",
+	"profile_handlers.go:GetLikedChallengesHandler": "TestRuntimeQueries_HandlersThatBuildTheirOwnSQL",
+	"profile_handlers.go:GetWatchHistoryHandler":    "TestRuntimeQueries_HandlersThatBuildTheirOwnSQL",
+	"account_delete.go:DeleteAccountHandler":        "TestRuntimeQueries_AccountDeletionRunsEveryStatement",
+
+	"hls_worker_api.go:HLSNextPendingHandler": "TestRuntimeQueries_WorkerClaimEndpoint",
+
+	// The two struct fields this deliberately does not guess at — see the
+	// SelectorExpr case in foldStrings for why.
+	"tag_suggestions.go:readTagState":    "TestRuntimeQueries_TagStateAgainstARealDatabase",
+	"tag_suggestions.go:saveTagDecision": "TestRuntimeQueries_TagStateAgainstARealDatabase",
+
+	// Runs whatever its caller hands it; every caller is checked above.
+	"database.go:queryPosts":      "every caller's query is checked statically",
+	"database.go:queryChallenges": "every caller's query is checked statically",
+
+	// Records a migration as applied. It has run for all nine of them in
+	// every database this suite has ever built.
+	"schema_migrations.go:applyOneMigration": "every database-backed test, on the way in",
+}
+
+// sqlDynamicBaseline is how many queries are NEITHER readable here NOR run by
+// a database-backed test.
+//
+// It is ZERO. Every query in this repo is now checked one way or the other:
+// 260 call sites handed to a real Postgres to parse, 27 more that cannot be
+// read from the source but are RUN by a test in runtime_queries_db_test.go,
+// and 5 multi-statement blocks that every database test runs on the way in.
+//
+// It was 53. Most of that was not real: thirteen were Redis pipeline flushes
+// that only look like SQL, and the rest shrank as this learned to read a
+// constant, a fmt.Sprintf, a function whose every return is a literal, a
+// parameter resolved from its callers, and a list of statements in a range
+// loop. What genuinely could not be read got a test that runs it.
+//
+// Zero is a real gate. A new query that neither can be read nor is run fails
+// this test by name, with the three ways out spelled out above.
+const sqlDynamicBaseline = 0
 
 // collectSQL parses every non-test Go file and lifts out the query strings.
 func collectSQL(t *testing.T) []sqlSite {
@@ -252,6 +393,32 @@ func collectSQL(t *testing.T) []sqlSite {
 		pkg[funcCallKey(name)] = vals
 	}
 
+	// String parameters of functions that build SQL, resolved from what every
+	// caller actually passes.
+	//
+	// This is where the largest unreadable group lived. hls_worker_api.go has
+	// a closure `claim := func(table string)` holding five statements, and
+	// every caller passes one of two table names — but a parameter has no
+	// value in the source, so all five were invisible here.
+	//
+	// EVERY call site is unioned, which matters more here than anywhere else
+	// in this file: challenges and challenge_responses do not have the same
+	// columns, so a statement that works against one can be refused by the
+	// other. One caller this cannot read and the parameter resolves to
+	// nothing, because checking half the branches while reporting full
+	// coverage is the failure this whole file exists to prevent.
+	params := map[string][]string{}
+	for _, path := range order {
+		if f := files[path]; f != nil {
+			collectParamValues(f, pkg, params)
+		}
+	}
+	for name, vals := range params {
+		if _, taken := pkg[name]; !taken {
+			pkg[name] = vals
+		}
+	}
+
 	// Locals are collected PER FUNCTION and layered on top.
 	//
 	// A flat package-wide map was the first version of this and it was wrong
@@ -280,7 +447,11 @@ func collectSQL(t *testing.T) []sqlSite {
 				collectStringNames(fn.Body, scope, true)
 				body = fn.Body
 			}
-			out = append(out, sqlInNode(body, scope, path, fset)...)
+			name := "(file scope)"
+			if ok && fn.Name != nil {
+				name = fn.Name.Name
+			}
+			out = append(out, sqlInNode(body, scope, path, fset, name)...)
 		}
 	}
 	return out
@@ -288,7 +459,7 @@ func collectSQL(t *testing.T) []sqlSite {
 
 // sqlInNode finds the database calls under one node and resolves each query
 // with the name scope that is actually in effect there.
-func sqlInNode(root ast.Node, names map[string][]string, path string, fset *token.FileSet) []sqlSite {
+func sqlInNode(root ast.Node, names map[string][]string, path string, fset *token.FileSet, fnName string) []sqlSite {
 	var out []sqlSite
 	ast.Inspect(root, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -308,9 +479,13 @@ func sqlInNode(root ast.Node, names map[string][]string, path string, fset *toke
 		if static && onlyBlank(variants) {
 			return true // not a query at all
 		}
+		if !static && !isDatabaseHandle(sel.X) {
+			return true // Redis, not SQL — see isDatabaseHandle
+		}
+		multi := false
 		for _, v := range variants {
 			if isMultiStatement(v) {
-				static = false
+				multi = true
 			}
 		}
 		out = append(out, sqlSite{
@@ -318,6 +493,8 @@ func sqlInNode(root ast.Node, names map[string][]string, path string, fset *toke
 			line:     fset.Position(call.Lparen).Line,
 			variants: variants,
 			dynamic:  !static,
+			multi:    multi,
+			fn:       fnName,
 		})
 		return true
 	})
@@ -394,6 +571,29 @@ func collectStringNames(f ast.Node, into map[string][]string, locals bool) {
 			}
 		}
 		switch d := n.(type) {
+		case *ast.RangeStmt:
+			// for _, q := range []string{`SELECT ...`, `SELECT ...`}
+			//
+			// Two statements written as a list and run in a loop. Without
+			// this the loop variable has no value here and both are invisible
+			// — which is how the two queries that find a deleted challenge's
+			// files got missed. They are literals sitting in plain sight.
+			lit, ok := d.X.(*ast.CompositeLit)
+			if !ok || d.Value == nil {
+				return true
+			}
+			id, ok := d.Value.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			for _, el := range lit.Elts {
+				if vs, ok := foldStrings(el, into); ok {
+					for _, v := range vs {
+						add(id.Name, v)
+					}
+				}
+			}
+			return true
 		case *ast.ValueSpec: // const x = "..." / var x = "..."
 			remember(d.Names, d.Values)
 		case *ast.AssignStmt: // x := "..." / x = "..." / x += "..."
@@ -681,6 +881,102 @@ func foldSprintf(call *ast.CallExpr, names map[string][]string) ([]string, bool)
 		}
 	}
 	return out, true
+}
+
+// collectParamValues works out what a string parameter can be, from what
+// every caller passes.
+//
+// Ordinary functions and closures held in a variable, both. A parameter with
+// even one caller this cannot read is dropped entirely.
+func collectParamValues(f *ast.File, pkg map[string][]string, into map[string][]string) {
+	// function name -> argument position -> parameter name, for string
+	// parameters only.
+	stringParams := map[string]map[int]string{}
+	record := func(name string, params *ast.FieldList) {
+		if params == nil {
+			return
+		}
+		at := map[int]string{}
+		i := 0
+		for _, field := range params.List {
+			id, isIdent := field.Type.(*ast.Ident)
+			if len(field.Names) == 0 {
+				i++
+				continue
+			}
+			for _, n := range field.Names {
+				if isIdent && id.Name == "string" {
+					at[i] = n.Name
+				}
+				i++
+			}
+		}
+		if len(at) > 0 {
+			stringParams[name] = at
+		}
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.FuncDecl:
+			record(v.Name.Name, v.Type.Params)
+		case *ast.AssignStmt:
+			for i, rhs := range v.Rhs {
+				lit, ok := rhs.(*ast.FuncLit)
+				if !ok || i >= len(v.Lhs) {
+					continue
+				}
+				if id, ok := v.Lhs[i].(*ast.Ident); ok {
+					record(id.Name, lit.Type.Params)
+				}
+			}
+		}
+		return true
+	})
+
+	unreadable := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		at, ok := stringParams[id.Name]
+		if !ok {
+			return true
+		}
+		for i, param := range at {
+			if i >= len(call.Args) {
+				continue
+			}
+			vs, ok := foldStrings(call.Args[i], pkg)
+			if !ok {
+				unreadable[param] = true
+				continue
+			}
+			for _, v := range vs {
+				if strings.TrimSpace(v) == "" {
+					continue
+				}
+				dup := false
+				for _, e := range into[param] {
+					if e == v {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					into[param] = append(into[param], v)
+				}
+			}
+		}
+		return true
+	})
+	for p := range unreadable {
+		delete(into, p)
+	}
 }
 
 // onlyBlank reports that nothing here is a statement.

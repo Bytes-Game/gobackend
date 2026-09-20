@@ -230,7 +230,8 @@ func computeTieStrengths() (int, error) {
 		WHERE created_at > NOW() - INTERVAL '%s'
 		GROUP BY sender_id, receiver_id
 	`, tieStrengthWindow))
-	if err == nil {
+	if !queryFailed("who has been messaging whom",
+		"the social graph is being built without chat, so everyone looks less connected", err) {
 		for chatRows.Next() {
 			var a, b string
 			var c int
@@ -254,7 +255,8 @@ func computeTieStrengths() (int, error) {
 		  AND created_at > NOW() - INTERVAL '%s'
 		GROUP BY user_id, metadata->>'targetUserId'
 	`, tieStrengthWindow))
-	if err == nil {
+	if !queryFailed("who lingers on whose profile",
+		"the social graph is being built without it", err) {
 		for dwellRows.Next() {
 			var a, b string
 			var ms int64
@@ -267,7 +269,8 @@ func computeTieStrengths() (int, error) {
 
 	// 3) Follow edges — flat +2 per direction.
 	followRows, err := db.Query(`SELECT follower_id::text, following_id::text FROM follows`)
-	if err == nil {
+	if !queryFailed("the follow graph",
+		"the social graph is being built without who follows whom, which is most of it", err) {
 		for followRows.Next() {
 			var a, b string
 			if followRows.Scan(&a, &b) == nil {
@@ -357,7 +360,8 @@ func computeSocialDrive() (int, error) {
 		WHERE created_at > NOW() - INTERVAL '%s'
 		GROUP BY sender_id
 	`, socialDriveWindow))
-	if err == nil {
+	if !queryFailed("how much each person messages",
+		"their social-drive score is being worked out without it", err) {
 		for chatRows.Next() {
 			var u string
 			var c int
@@ -374,7 +378,8 @@ func computeSocialDrive() (int, error) {
 		WHERE created_at > NOW() - INTERVAL '%s'
 		GROUP BY follower_id
 	`, socialDriveWindow))
-	if err == nil {
+	if !queryFailed("how much each person follows",
+		"their social-drive score is being worked out without it", err) {
 		for followRows.Next() {
 			var u string
 			var c int
@@ -392,7 +397,8 @@ func computeSocialDrive() (int, error) {
 		  AND created_at > NOW() - INTERVAL '%s'
 		GROUP BY user_id
 	`, socialDriveWindow))
-	if err == nil {
+	if !queryFailed("who taps notifications",
+		"their social-drive score is being worked out without it", err) {
 		for notifRows.Next() {
 			var u string
 			var c int

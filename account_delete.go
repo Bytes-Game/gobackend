@@ -45,7 +45,8 @@ func DeleteAccountHandler(w http.ResponseWriter, r *http.Request) {
 	// likes, votes, comments, and the Meilisearch document all go with
 	// each challenge.
 	rows, err := db.Query(`SELECT id FROM challenges WHERE creator_id::text = $1`, userID)
-	if err == nil {
+	if !queryFailed("the list of challenges belonging to the account being deleted",
+		"their videos are being left behind while the account goes", err) {
 		ids := []string{}
 		for rows.Next() {
 			var id string

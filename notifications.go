@@ -343,14 +343,20 @@ func fetchPendingNotifications(limit int) []OutboxRow {
 	}
 	defer rows.Close()
 	out := make([]OutboxRow, 0, limit)
+	bad := 0
 	for rows.Next() {
 		var r OutboxRow
 		var trigger string
-		if err := rows.Scan(&r.ID, &r.UserID, &trigger, &r.DedupeKey, &r.Title, &r.Body,
-			&r.Deeplink, &r.ScheduledAt, &r.QueuedAt, &r.Status); err == nil {
-			r.TriggerKind = TriggerKind(trigger)
-			out = append(out, r)
+		// A row skipped here is a notification that silently never goes out.
+		// Every row failing means the column list has drifted from this
+		// struct, and the queue would look permanently empty.
+		if scanFailed("a queued notification", rows.Scan(&r.ID, &r.UserID, &trigger,
+			&r.DedupeKey, &r.Title, &r.Body, &r.Deeplink, &r.ScheduledAt,
+			&r.QueuedAt, &r.Status), &bad) {
+			continue
 		}
+		r.TriggerKind = TriggerKind(trigger)
+		out = append(out, r)
 	}
 	return out
 }

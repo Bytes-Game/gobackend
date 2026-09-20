@@ -34,16 +34,37 @@ import (
 
 func withDB(t *testing.T) func() {
 	t.Helper()
+	// UNSET means skip. SET BUT UNREACHABLE MEANS FAIL.
+	//
+	// The difference matters more than it looks. Every database-backed test
+	// in this package comes through here, including the one that checks every
+	// query in the repo against the real schema. When all three cases were a
+	// skip, a CI run whose Postgres service failed to start reported a clean
+	// pass with none of them having run — green, fast, and meaningless.
+	//
+	// That is the same shape as the bug this whole file exists to catch: a
+	// failure that looks exactly like a good result. It caught the author of
+	// these tests too, mid-way through writing them, when a restarted
+	// container took the database with it and `go test` printed ok.
+	//
+	// So: no TEST_DATABASE_URL is a developer without a database, and skips.
+	// A TEST_DATABASE_URL that does not answer is a broken CI job, and fails.
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
-		t.Skip("no TEST_DATABASE_URL — skipping the database-backed audit")
+		t.Skip("no TEST_DATABASE_URL — skipping the database-backed tests. " +
+			"See CLAUDE.md for the four commands that start one.")
 	}
 	conn, err := sql.Open("postgres", url)
 	if err != nil {
-		t.Skipf("cannot open %s: %v", url, err)
+		t.Fatalf("TEST_DATABASE_URL is set to %q but cannot be opened: %v\n\n"+
+			"This is a failure rather than a skip on purpose: a skipped "+
+			"database test is indistinguishable from a passing one, and that "+
+			"is how a CI job with a dead database reports success.", url, err)
 	}
 	if err := conn.Ping(); err != nil {
-		t.Skipf("cannot reach the database: %v", err)
+		t.Fatalf("TEST_DATABASE_URL is set but the database does not answer: %v\n\n"+
+			"Failing rather than skipping, so a CI run whose Postgres never "+
+			"came up cannot report a clean pass with nothing having run.", err)
 	}
 	prev := db
 	db = conn
