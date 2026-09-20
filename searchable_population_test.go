@@ -12,24 +12,39 @@ import (
 // the search answering a different question than the suggestion asked.
 //
 // The cause was three places disagreeing about which videos exist.
-func TestSearchable_TheThreePlacesAgreeOnWhatIsFindable(t *testing.T) {
+func TestSearchable_EveryPlaceAgreesOnWhatIsFindable(t *testing.T) {
+	// Five, not three.
+	//
+	// The first version of this listed three and they were the three the
+	// original fix had touched. Two more were deciding the same question with
+	// no rule at all, and both were handing private videos to strangers: the
+	// autocomplete behind a public route, and the Meilisearch path that feeds
+	// results and the feed.
+	//
+	// A list of callers is only worth having if adding one is harder to
+	// forget than adding a query, so the two Go-side readers are here by the
+	// function they must call rather than by the SQL helper.
 	callers := []struct {
-		file, what string
+		file, calls, what string
 	}{
-		{"database.go", "the list of results search returns"},
-		{"search_relevance.go", "the text index search ranks with"},
-		{"topic_graph.go", "the graph that suggests related subjects"},
+		{"database.go", "searchableWhere(", "the list of results search returns"},
+		{"search_relevance.go", "searchableWhere(", "the text index search ranks with"},
+		{"topic_graph.go", "searchableWhere(", "the graph that suggests related subjects"},
+		{"suggest_handlers.go", "searchableWhere(", "the subject autocomplete, which is served on a public route"},
+		{"search.go", "isSearchable(", "the Meilisearch hits that become results and feed items"},
 	}
 	for _, c := range callers {
 		src, err := os.ReadFile(c.file)
 		if err != nil {
 			t.Fatalf("cannot read %s: %v", c.file, err)
 		}
-		if !strings.Contains(string(src), "searchableWhere(") {
-			t.Errorf("%s (%s) no longer asks searchableWhere which videos are "+
-				"findable. When these drift apart the app suggests a subject "+
-				"and then cannot find it, which looks like broken ranking "+
-				"rather than a disagreement about the catalogue.", c.file, c.what)
+		if !strings.Contains(string(src), c.calls) {
+			t.Errorf("%s (%s) no longer asks %s which videos are findable.\n"+
+				"When these drift apart two things follow, and the second is "+
+				"the serious one: the app suggests a subject and then cannot "+
+				"find it, which reads as broken ranking; and a private video "+
+				"is offered to somebody who was never allowed to see it.",
+				c.file, c.what, strings.TrimSuffix(c.calls, "("))
 		}
 	}
 }
