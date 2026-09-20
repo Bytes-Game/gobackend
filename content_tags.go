@@ -33,10 +33,22 @@ package main
 //	   adds.
 //
 //	2. WHAT A MACHINE SEES — objects and scenes in the frames, speech turned
-//	   into text, words read off the screen, the music identified by
-//	   fingerprint. Expensive, and deliberately NOT attempted here: it needs
-//	   models and a transcode pipeline this app does not have, and it would
-//	   buy little that layer 3 does not already provide.
+//	   into text, words read off the screen. THIS APP DOES THIS. See
+//	   video_analysis.go and cmd/hls-worker/understand.go: the transcode
+//	   worker already has the file open, so it reads it, listens to it and
+//	   looks at it, and sends back tags, topics and a transcript.
+//
+//	   This paragraph used to say the opposite — "deliberately NOT attempted
+//	   here: it needs models and a transcode pipeline this app does not
+//	   have". That was true when it was written and stopped being true when
+//	   the worker's understanding pass shipped, and nothing brought the two
+//	   together.
+//
+//	   It is left here as a note rather than quietly corrected because of
+//	   what it cost. Somebody reading this file to answer "is there any
+//	   machine analysis in the upload path" was told no, believed it, and
+//	   repeated it. A comment that is confidently wrong is worse than no
+//	   comment: it stops the reader looking.
 //
 //	3. WHAT PEOPLE DO — who watches a video, and what else those same people
 //	   watch. This is the layer that actually carries the weight at scale, and
