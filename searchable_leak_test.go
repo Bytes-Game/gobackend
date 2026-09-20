@@ -228,3 +228,43 @@ func TestLeak_APrivateSubjectNeverReachesTheSuggestionList(t *testing.T) {
 			"nothing, which is the usability half of the same bug.")
 	}
 }
+
+// ── a comment that is confidently wrong ─────────────────────────────────────
+//
+// content_tags.go described the machine-analysis layer as "deliberately NOT
+// attempted here". The worker has done exactly that since the understanding
+// pass shipped. Somebody reading that file to find out whether anything looks
+// at the video was told no, believed it, and repeated it.
+//
+// A stale comment is not a tidiness problem when it answers a question people
+// actually ask. This pins the correction against the code it describes.
+func TestComment_ContentTagsDoesNotDenyTheAnalysisThatExists(t *testing.T) {
+	tags := readSourceFile(t, "content_tags.go")
+
+	// The layer-2 paragraph must not claim the app lacks it.
+	if strings.Contains(tags, "Expensive, and deliberately NOT attempted here") {
+		t.Error("content_tags.go still says machine analysis is not attempted " +
+			"in this app. video_analysis.go stores it and the worker produces " +
+			"it. This exact sentence has already caused a wrong answer to the " +
+			"question it exists to answer.")
+	}
+
+	// And it must point at the code that does it, so the next reader can
+	// check rather than take a comment's word for it.
+	for _, where := range []string{"video_analysis.go", "understand.go"} {
+		if !strings.Contains(tags, where) {
+			t.Errorf("content_tags.go does not point at %s, so a reader has "+
+				"nothing to check the claim against", where)
+		}
+	}
+
+	// The thing it points at has to be real.
+	if _, err := os.Stat("video_analysis.go"); err != nil {
+		t.Errorf("content_tags.go points at video_analysis.go and it is not "+
+			"there: %v", err)
+	}
+	if _, err := os.Stat("cmd/hls-worker/understand.go"); err != nil {
+		t.Errorf("content_tags.go points at the worker's understanding pass "+
+			"and it is not there: %v", err)
+	}
+}
