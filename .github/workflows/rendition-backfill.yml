@@ -1,0 +1,214 @@
+name: rendition-backfill
+
+# Give every video that predates a rendition its missing copy.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# WHY THIS EXISTS
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Adding a rung to the ladder only helps videos uploaded AFTER it. The worker
+# sees a video once: it converts it, marks it done, and never looks again. So
+# the day 360p was added, every video already on the platform had no 360p
+# copy — which is exactly the viewers the rung was added for.
+#
+# Putting them back in the queue is a backend endpoint, and until now the only
+# way to call it was by hand with a terminal and the admin login. That makes
+# it a thing one person can do, with no record of what was run, and no way to
+# tell how far through it got.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# IT ASKS FOR THE ONES THAT NEED IT, NOT FOR EVERYTHING
+# ════════════════════════════════════════════════════════════════════════════
+#
+# The endpoint's "missing" option picks only videos that do not already have
+# the named rendition. That matters twice over:
+#
+#   - it does not re-encode videos that are already done, so the runner time
+#     goes on work that is actually needed
+#   - the selection SHRINKS as the job progresses, so this can be run over and
+#     over and it finishes rather than going round in circles
+#
+# The answer carries stillMissing — how many are left AFTER the call. That is
+# the number this loop stops on, and it is why "how many did it move" is not
+# enough on its own: fifty moved looks identical on the first round and the
+# last.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# NOTHING DISAPPEARS WHILE IT RUNS
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Re-queuing clears one column: the HLS manifest. The MP4 the app actually
+# plays (video_url and video_variants) is untouched, no file is deleted, and
+# no feed filters rows on transcode state — every query that mentions
+# hls_manifest_url does so in its SELECT list, never in a WHERE. So a video
+# being re-encoded keeps playing the whole time, from the copy it already had.
+#
+# New files land beside the old ones under a fresh prefix, and the row swaps
+# over only when the worker reports success.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# WHAT IT NEEDS
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Two repository secrets (Settings → Secrets and variables → Actions):
+#
+#   ADMIN_USER, ADMIN_PASS — the same values the backend has in its own
+#                            environment. The endpoint is admin-only.
+#
+# If they are not set, the first call comes back 401 and this says so in one
+# line rather than failing with something that has to be decoded.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rendition:
+        description: 'Which rendition to backfill (must be one the backend stores)'
+        type: string
+        default: '360p'
+      kind:
+        description: 'challenges (the main video) or responses (the answer side of a battle)'
+        type: choice
+        options: [challenges, responses]
+        default: challenges
+      batch:
+        description: 'How many videos to queue per round'
+        type: string
+        default: '25'
+      rounds:
+        description: 'Give up after this many rounds, in case something is wrong'
+        type: string
+        default: '40'
+      dry_run:
+        description: 'Only report how many are missing; queue nothing'
+        type: boolean
+        default: false
+
+# One at a time. Two of these running together would each queue the same
+# videos the other had just queued, and the counts would stop meaning
+# anything.
+concurrency:
+  group: rendition-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: queue the videos that are missing this rendition
+        env:
+          BACKEND_URL: https://gobackend-9nd8.onrender.com
+          ADMIN_USER: ${{ secrets.ADMIN_USER }}
+          ADMIN_PASS: ${{ secrets.ADMIN_PASS }}
+          RENDITION: ${{ inputs.rendition }}
+          KIND: ${{ inputs.kind }}
+          BATCH: ${{ inputs.batch }}
+          ROUNDS: ${{ inputs.rounds }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -uo pipefail
+
+          url="$BACKEND_URL/api/v1/admin/media/requeue"
+
+          # The login goes in on stdin rather than on the command line.
+          # Anything on the command line is visible to every other process on
+          # the machine through ps, and a password does not belong there even
+          # on a runner that is thrown away afterwards.
+          auth_config=$(printf 'user = "%s:%s"\n' "$ADMIN_USER" "$ADMIN_PASS")
+
+          # A dry run asks for zero videos. The endpoint still counts what is
+          # left, so this reports the size of the job without starting it.
+          limit="$BATCH"
+          if [ "$DRY_RUN" = "true" ]; then
+            limit=0
+            echo "Dry run: counting only, queueing nothing."
+          fi
+
+          queued_total=0
+          for round in $(seq 1 "$ROUNDS"); do
+            body=$(printf '{"limit":%s,"kind":"%s","missing":"%s"}' \
+              "$limit" "$KIND" "$RENDITION")
+
+            code=$(printf '%s\n' "$auth_config" | curl -sS -K - \
+              -o /tmp/resp.json -w '%{http_code}' \
+              -X POST "$url" \
+              -H 'Content-Type: application/json' \
+              -d "$body" \
+              --max-time 180)
+
+            case "$code" in
+              200) ;;
+              401)
+                echo "::error::The backend refused the login (401). This needs two"
+                echo "repository secrets, set to the same values the backend itself"
+                echo "uses: ADMIN_USER and ADMIN_PASS."
+                echo "Settings → Secrets and variables → Actions → New repository secret."
+                exit 1
+                ;;
+              400)
+                echo "::error::The backend refused the request (400):"
+                cat /tmp/resp.json
+                echo
+                echo "Most likely '$RENDITION' is not a rendition this backend stores."
+                exit 1
+                ;;
+              503)
+                echo "::error::The backend answered 503. Either its database is down,"
+                echo "or ADMIN_USER/ADMIN_PASS are not set in the BACKEND's own"
+                echo "environment (it says so rather than letting anyone in)."
+                cat /tmp/resp.json
+                exit 1
+                ;;
+              000)
+                echo "::error::Could not reach $BACKEND_URL at all."
+                exit 1
+                ;;
+              *)
+                echo "::error::The backend answered $code:"
+                cat /tmp/resp.json
+                exit 1
+                ;;
+            esac
+
+            requeued=$(jq -r '.requeued // 0' /tmp/resp.json)
+            left=$(jq -r 'if .stillMissing == null then "unknown" else .stillMissing end' /tmp/resp.json)
+            worker=$(jq -r '.workerNote // ""' /tmp/resp.json)
+
+            if [ "$left" = "unknown" ]; then
+              echo "::error::The answer carried no stillMissing count, so there is no"
+              echo "way to tell whether the backlog is finished. Stopping rather than"
+              echo "looping blind."
+              cat /tmp/resp.json
+              exit 1
+            fi
+
+            queued_total=$((queued_total + requeued))
+            echo "round $round: queued $requeued, $left still without a $RENDITION copy"
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "::notice::$left $KIND have no $RENDITION copy. Run again with"
+              echo "dry_run off to start the backfill."
+              exit 0
+            fi
+
+            if [ -n "$worker" ]; then
+              echo "  worker: $worker"
+            fi
+
+            if [ "$left" -eq 0 ]; then
+              echo "::notice::Backfill complete: $queued_total $KIND queued in $round round(s), none left without a $RENDITION copy."
+              echo "The transcode worker now has them. It drains what it can every"
+              echo "run, so the last few may finish on a later run."
+              exit 0
+            fi
+
+            # Space the rounds out. Each call also asks the worker to start, and
+            # queueing the whole catalogue in one tight loop would just make a
+            # long line for the same worker.
+            sleep 30
+          done
+
+          echo "::error::Still $left without a $RENDITION copy after $ROUNDS rounds"
+          echo "($queued_total queued). That is not necessarily wrong — a large"
+          echo "catalogue takes several runs — but it is more than this was set up"
+          echo "to do in one go. Run it again, or raise the rounds input."
+          exit 1
