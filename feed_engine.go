@@ -5646,10 +5646,51 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 			hasMore = hasMore || feedKindHasMore(rawPage, len(items), clientLimit, limit)
 		}
 
+		// ════════════════════════════════════════════════════════════════
+		// REMEMBER WHAT THIS PAGE SHOWED. THIS PATH USED TO FORGET.
+		// ════════════════════════════════════════════════════════════════
+		//
+		// Everything below this comment is the one thing the cold-start
+		// branch never did: it built a page, sent it, and returned — right
+		// past the markShownBatch that the warm path runs further down. So
+		// nothing a new account was shown was ever recorded.
+		//
+		// The cost is not subtle, and a device log caught it exactly:
+		//
+		//   feed forYou page 1: 17 items  new=17 repeat=0 againThisRun=0
+		//   feed forYou page 1: 17 items  new=17 repeat=0 againThisRun=18
+		//
+		// The same seventeen videos, twice, and the server called every one
+		// of them new both times. The app knew better; it had counted.
+		//
+		// It hits the worst possible cohort. A cold-start user is a brand-new
+		// account, this is their first session, and cold-start paging is
+		// keyed to the page number — so page 1 is the same top videos every
+		// time it is asked for. With nothing recorded there is nothing to
+		// rank them down, and refreshing changes nothing at all. That is the
+		// first thing a new user does when a feed looks stuck.
+		//
+		// It also explains why the page was SHORT whenever this happened
+		// (17 or 18 of the 20 asked for, and exactly 6 on later pages — the
+		// cold-start short budget). Same cause, two symptoms: this branch,
+		// which both caps the page per kind and forgets what it served.
+		//
+		// Sink first, then record. Already-watched items drop below fresh
+		// ones and are labelled as repeats (see sinkSeenItems), which is all
+		// a page can do when the catalogue is smaller than a page — it will
+		// not invent videos that do not exist, and it no longer claims they
+		// are new.
+		items = sinkSeenItems(items, loadSeenSet(userID))
+
 		// Last step before encoding: make every item playable on the phone
 		// that asked. AFTER finalizeFeedItems so the adaptive-streaming check
 		// sees the manifest URLs it just filled in.
 		items = applyDeviceFit(items, deviceMax)
+
+		// Before encoding, not after: the response write can fail or the
+		// client can vanish, and the next request must still know what this
+		// one served. Same call, same argument order, as the warm path.
+		markShownBatch(userID, items)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -6459,6 +6500,26 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 	// Make every item playable on the phone that asked. After the enrichment
 	// above, so the adaptive-streaming check sees the manifest URLs.
 	items = applyDeviceFit(items, deviceMax)
+
+	// Record what this page showed.
+	//
+	// This tab READ the watch history up above (sinkSeenItems) and never
+	// wrote to it. Reading without writing is a particular kind of broken:
+	// it works for as long as some OTHER feed happens to record the same
+	// videos, and silently does not for anything only ever seen here. A
+	// creator you follow, whose videos never surface in For You, could be
+	// watched every day and stay permanently "unseen".
+	//
+	// It is the same fault the cold-start branch had, found from the same
+	// device log, and it is the second time this exact step has been missed
+	// on a feed path — finalizeFeedItems carries a note about the first.
+	// The test alongside this now checks the rule for every feed surface
+	// rather than for the two that were known about.
+	//
+	// After the kind filter, like every other recording site: the seen-set
+	// is a claim about what reached the phone, so a Battles page must not
+	// record the shorts it just discarded.
+	markShownBatch(userID, items)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{

@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -59,6 +61,14 @@ import (
 // feed keeps serving. Nothing is withheld, so nothing can run out.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Said once per process rather than once per request: both sit on the path of
+// every feed call, and a line each would drown the log they are meant to make
+// legible.
+var (
+	noSeenStoreOnce sync.Once
+	noSeenUserOnce  sync.Once
+)
+
 const (
 	seenKeyPrefix = "seen:"        // + userID
 	seenTTL       = 12 * time.Hour // window after which content may reappear
@@ -76,6 +86,8 @@ func seenMember(contentType, contentID string) string {
 // unix-ts as the sorted-set score so TTL-based trimming is a single ZREMRANGEBYSCORE.
 func markShown(userID, contentType, contentID string) {
 	if rdb == nil || userID == "" || contentID == "" {
+		// loadSeenSet says this out loud once per process; repeating it here
+		// would be one line per item served.
 		return
 	}
 	key := seenKey(userID)
@@ -99,6 +111,7 @@ func markShown(userID, contentType, contentID string) {
 // composed so the next page cannot serve the same content.
 func markShownBatch(userID string, items []HomeFeedItem) {
 	if rdb == nil || userID == "" || len(items) == 0 {
+		// Nothing gets remembered. loadSeenSet already said why, once.
 		return
 	}
 	key := seenKey(userID)
@@ -119,7 +132,18 @@ func markShownBatch(userID string, items []HomeFeedItem) {
 	// synchronously — if this write were deferred, page 2 could re-serve page 1.
 	// The non-correctness maintenance (window trim, size cap, TTL refresh) is
 	// pushed to a goroutine so it never adds latency to the feed response.
-	_ = rdb.ZAdd(rctx, key, members...).Err()
+	if err := rdb.ZAdd(rctx, key, members...).Err(); err != nil {
+		// This is the write the whole feed's memory rests on. Losing it
+		// silently is why a feed can serve the same page forever while every
+		// dashboard says it is working.
+		log.Printf("seen memory: could not record the %d item(s) just served "+
+			"to user %s: %v — they will be offered again as though new",
+			len(members), userID, err)
+		if metricSeenMarks != nil {
+			metricSeenMarks.WithLabelValues("error").Add(float64(len(members)))
+		}
+		return
+	}
 	if metricSeenMarks != nil {
 		metricSeenMarks.WithLabelValues("ok").Add(float64(len(members)))
 	}
@@ -143,11 +167,37 @@ func markShownBatch(userID string, items []HomeFeedItem) {
 // every pull. Small users stay small; capped users stay capped.
 func loadSeenSet(userID string) map[string]int64 {
 	out := make(map[string]int64)
-	if rdb == nil || userID == "" {
+	if rdb == nil {
+		// SAY SO. An empty answer here means "this viewer has watched
+		// nothing", which is exactly what a brand-new account looks like —
+		// so with no store, every viewer looks brand-new forever, the feed
+		// repeats itself, and nothing anywhere explains why. Once per
+		// process: this is on the path of every feed request.
+		noSeenStoreOnce.Do(func() {
+			log.Printf("seen memory: no Redis configured — nobody's watch " +
+				"history can be recorded or read, so every feed will treat " +
+				"every viewer as brand new and repeat itself")
+		})
+		return out
+	}
+	if userID == "" {
+		// Also worth saying. A feed request with no viewer cannot look
+		// anything up, and the page it produces is unpersonalised AND
+		// unrecordable — the two symptoms that look like separate bugs.
+		noSeenUserOnce.Do(func() {
+			log.Printf("seen memory: a feed request arrived with no user id — " +
+				"its page cannot be personalised or remembered, and will " +
+				"come back identical next time")
+		})
 		return out
 	}
 	members, err := rdb.ZRangeWithScores(rctx, seenKey(userID), 0, -1).Result()
 	if err != nil {
+		// Reading failed, which is NOT the same as having watched nothing,
+		// though it returns the same empty map. Say which one happened.
+		log.Printf("seen memory: could not read what user %s has watched: %v "+
+			"— serving this page as if they had watched nothing, so it may "+
+			"repeat what they just saw", userID, err)
 		return out
 	}
 	for _, m := range members {
@@ -321,6 +371,17 @@ func sinkSeenItems(items []HomeFeedItem, seen map[string]int64) []HomeFeedItem {
 	unseen, repeats := splitSeen(items, seen)
 	if len(repeats) == 0 {
 		return items
+	}
+	// Say so on the wire, the same way applySeenPenalty does for the scored
+	// path. Moving a repeat down the page without labelling it leaves the
+	// client unable to tell a deliberate re-serve from a bug — which is the
+	// whole reason Challenge.Repeat exists. Every unscored feed used to sink
+	// repeats silently, so the app was told a video was new every time it
+	// came round again.
+	for _, it := range repeats {
+		if it.Challenge != nil {
+			it.Challenge.Repeat = true
+		}
 	}
 	return append(unseen, repeats...)
 }
