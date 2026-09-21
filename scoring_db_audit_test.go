@@ -75,27 +75,10 @@ func withDB(t *testing.T) func() {
 	disableContentScoreCache, disableUserProfileCache = true, true
 
 	// The real schema, built by the real migration path.
-	//
-	// ⚠ THIS ALSO RUNS THE ONE-TIME BACKFILLS, and that has already fooled
-	// one test. runMigrations() ends by calling backfillCategoryProvenance(),
-	// which walks existing rows and then records itself in schema_migrations
-	// so it never repeats. Both of those happen HERE, before your test body
-	// runs a single line.
-	//
-	// Two ways that bites:
-	//
-	//   * a test that seeds rows and expects the backfill to touch them sees
-	//     nothing happen — it ran before the rows existed, and it will not
-	//     run again;
-	//   * a test that checks the backfill recorded itself passes even if you
-	//     delete the statement that records it, because the row was already
-	//     put there by this line.
-	//
-	// The second one is not hypothetical: it was found by deleting that
-	// statement and watching the test stay green. If your test needs a
-	// backfill to run against rows you seeded, delete its marker row first —
-	// see TestBackfill_RunsOnlyOnce for the shape.
 	runMigrations()
+	// …and then UNDO the part of it that would quietly disarm your test.
+	// See forgetOneTimeBackfills — this line is load-bearing.
+	forgetOneTimeBackfills(t)
 	truncateAudit(t)
 	auditCreator(t)
 
@@ -104,6 +87,50 @@ func withDB(t *testing.T) func() {
 		disableContentScoreCache, disableUserProfileCache = prevCS, prevUP
 		_ = conn.Close()
 		db = prev
+	}
+}
+
+// forgetOneTimeBackfills clears the "this already ran" markers, so a test
+// starts with every one-time backfill still to do.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY THIS EXISTS, AND WHY A COMMENT WAS NOT ENOUGH
+// ════════════════════════════════════════════════════════════════════════════
+//
+// runMigrations() does not only build the schema. It ends by running the
+// one-time data backfills and recording each one in schema_migrations so it
+// never repeats. Both happen in withDB, before a test body runs a line.
+//
+// That silently disarms two whole shapes of test:
+//
+//   - seed some rows, expect a backfill to touch them → nothing happens. It
+//     ran before those rows existed and will not run again.
+//   - check that a backfill recorded itself → passes even with the recording
+//     statement deleted, because this setup already wrote the row.
+//
+// The second is not hypothetical. It was caught by deleting that statement
+// and watching the test stay green.
+//
+// The first attempt at fixing this was a comment warning the next person.
+// That was the wrong fix and it is worth saying why: a comment only works on
+// somebody who already suspects there is a problem, and the whole danger here
+// is a test that looks like it passed. CLAUDE.md is explicit that this class
+// is caught by cutting the wire and re-running, not by writing it down — and
+// a warning label on a trap is still a trap.
+//
+// So the default is inverted instead. Every test now starts with the
+// backfills un-run, which is the state that makes an assertion about them
+// mean something. A test that wants them already applied can run them itself;
+// that is a deliberate act, and a deliberate act is exactly what the previous
+// arrangement made impossible to distinguish from an accident.
+func forgetOneTimeBackfills(t *testing.T) {
+	t.Helper()
+	if _, err := db.Exec(
+		`DELETE FROM schema_migrations WHERE version LIKE '%(go)'`); err != nil {
+		t.Fatalf("could not clear the one-time backfill markers: %v\n\n"+
+			"Failing rather than carrying on: leaving them set makes every "+
+			"test about a backfill pass whether or not the code works, which "+
+			"is the exact fault this helper exists to remove.", err)
 	}
 }
 
