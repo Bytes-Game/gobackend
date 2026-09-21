@@ -310,3 +310,167 @@ func TestPlan_EveryRungIsReachable(t *testing.T) {
 		}
 	}
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE NEWER LANGUAGE, AND THE OLDER ONE NOBODY MAY LOSE
+// ════════════════════════════════════════════════════════════════════════════
+//
+// H.265 describes the same picture in about a third fewer bits. Older phones
+// cannot decode it. So it is added BESIDE H.264, never instead of it — and
+// the whole feature turns on that word "beside" staying true.
+
+func TestPlan_EverySizeKeepsSomethingEveryPhoneCanPlay(t *testing.T) {
+	// ══════════════════════════════════════════════════════════════════════
+	// THE WAY THIS FEATURE BREAKS OLDER PHONES
+	// ══════════════════════════════════════════════════════════════════════
+	//
+	// A rung reaching down to a smaller source is kept only when it is
+	// cheaper than what is already planned at that size. An H.265 rung is
+	// ALWAYS cheaper than its H.264 twin — that is the entire point of it.
+	//
+	// The guard that actually holds this is the ordering in planProgressive —
+	// every H.264 rung is planned before any H.265 one, so the fallback is
+	// always already there to be kept. This test does not reproduce one
+	// particular way of breaking that; it states the outcome that has to
+	// survive however the planner is rearranged.
+	//
+	// So: whatever else a source produces, at least one H.264 file.
+	for _, longSide := range []int{320, 500, 640, 720, 854, 960, 1080, 1280, 1920} {
+		for _, bitrate := range []int{0, 400_000, 1_200_000, 2_000_000, fatEnough()} {
+			plan := planProgressive(longSide, bitrate)
+			if len(plan) == 0 {
+				t.Errorf("%dx at %d bps produced nothing at all", longSide, bitrate)
+				continue
+			}
+			h264 := 0
+			for _, p := range plan {
+				if !p.rung.hevc {
+					h264++
+				}
+			}
+			if h264 == 0 {
+				t.Errorf("%dx at %d bps produced only H.265 (%v). Every phone "+
+					"too old to decode it has nothing to play.",
+					longSide, bitrate, labelsOf(plan))
+			}
+		}
+	}
+}
+
+func TestPlan_HevcIsOnlyMadeWhenItIsActuallySmaller(t *testing.T) {
+	// H.265 is here to shrink a big file. On a source already leaner than the
+	// H.264 ceiling, both rungs clamp to the source's own rate and the H.265
+	// one saves nothing — a second file, the same size, that half the devices
+	// cannot play, for an encode that costs more.
+	lean := planProgressive(1280, 400_000)
+	for _, p := range lean {
+		if p.rung.hevc {
+			t.Errorf("a 1280-wide source at 400 kbps produced %s. Everything "+
+				"at that size is already clamped to 400 kbps, so it is the "+
+				"same size as the H.264 file and saves nothing; got %v",
+				p.rung.label, labelsOf(lean))
+		}
+	}
+
+	// And on a fat source it IS smaller, so it is made.
+	fat := planProgressive(1920, fatEnough())
+	for _, want := range []string{"480p_hevc", "720p_hevc"} {
+		if !has(labelsOf(fat), want) {
+			t.Errorf("a big source produced no %s; got %v", want, labelsOf(fat))
+		}
+	}
+	h264, okH264 := ceilingOf(fat, "720p")
+	hevc, okHevc := ceilingOf(fat, "720p_hevc")
+	if okH264 && okHevc && hevc >= h264 {
+		t.Errorf("720p_hevc was planned at %d bps against 720p's %d. It is "+
+			"supposed to be the cheaper way to send the same picture; if it "+
+			"is not, it is a second file for nothing.", hevc, h264)
+	}
+}
+
+func TestProgressive_HevcIsTaggedForApple(t *testing.T) {
+	// ══════════════════════════════════════════════════════════════════════
+	// ONE FLAG DECIDES WHETHER APPLE PLAYS THIS AT ALL
+	// ══════════════════════════════════════════════════════════════════════
+	//
+	// H.265 in an MP4 carries one of two labels: hev1 or hvc1. Same video.
+	// ffmpeg writes hev1 unless told otherwise. Apple plays ONLY hvc1 — an
+	// hev1 file opens on an iPhone to a black screen with the sound playing.
+	//
+	// It fails in the worst possible shape: the encode succeeds, the upload
+	// succeeds, the worker logs success, Android plays it perfectly, and only
+	// Apple users see a black rectangle with nothing anywhere to explain it.
+	var hevc progressiveRendition
+	for _, r := range progressiveLadder {
+		if r.hevc {
+			hevc = r
+			break
+		}
+	}
+	if hevc.label == "" {
+		t.Fatal("no H.265 rung on the ladder, so this check is checking nothing")
+	}
+
+	args := progressiveArgs("in.mp4", "out.mp4", hevc, 1280, true, 0)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-tag:v hvc1") {
+		t.Errorf("%s is built without -tag:v hvc1, so every Apple device gets "+
+			"a black screen. Command: %s", hevc.label, joined)
+	}
+	if !strings.Contains(joined, "-c:v libx265") {
+		t.Errorf("%s is not actually encoded with H.265: %s", hevc.label, joined)
+	}
+	// Main, not Main10. A decoder built for Main refuses Main10 outright, and
+	// the source is 8-bit phone video, so there is nothing to gain by asking.
+	if !strings.Contains(joined, "-profile:v main") {
+		t.Errorf("%s does not ask for the Main profile, which is the one "+
+			"phones that decode H.265 at all actually support: %s",
+			hevc.label, joined)
+	}
+}
+
+func TestProgressive_BothCodecsAreShapedTheSame(t *testing.T) {
+	// The two codecs are built by separate branches. Everything about the
+	// SHAPE of the file — how big the picture is, how often a keyframe lands,
+	// which pixel format, where the index sits — has to stay identical, or
+	// H.265 quietly loses a fix that H.264 has.
+	//
+	// The keyframe spacing is the one that would hurt most: a reel loops, and
+	// every loop seeks back to the start. Sparse keyframes are what makes a
+	// loop stutter, and it would stutter only for the viewers on newer phones.
+	var h264, hevc progressiveRendition
+	for _, r := range progressiveLadder {
+		if r.hevc && hevc.label == "" {
+			hevc = r
+		}
+		if !r.hevc && h264.label == "" {
+			h264 = r
+		}
+	}
+	if h264.label == "" || hevc.label == "" {
+		t.Fatal("need one rung of each codec for this check")
+	}
+
+	const box = 1280
+	a := strings.Join(progressiveArgs("in.mp4", "a.mp4", h264, box, true, 0), " ")
+	b := strings.Join(progressiveArgs("in.mp4", "b.mp4", hevc, box, true, 0), " ")
+
+	for _, shape := range []string{
+		"-vf " + scaleFilter(box),
+		"-g 30",
+		"-keyint_min 30",
+		"-pix_fmt yuv420p",
+		"-movflags +faststart",
+		// Audio is encoded once, outside the codec branch, and must stay so.
+		"-c:a aac",
+		"-ar 48000",
+	} {
+		if !strings.Contains(a, shape) {
+			t.Errorf("the H.264 command lost %q", shape)
+		}
+		if !strings.Contains(b, shape) {
+			t.Errorf("the H.265 command is missing %q, so it has drifted from "+
+				"the H.264 one", shape)
+		}
+	}
+}
