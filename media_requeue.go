@@ -144,6 +144,28 @@ type requeueRequest struct {
 	//
 	// Ignored when IDs is given: a named list has already said which videos.
 	Missing string `json:"missing"`
+	// Count what is left and change nothing.
+	//
+	// ══════════════════════════════════════════════════════════════════
+	// WHY A LIMIT OF ZERO WAS NOT THIS
+	// ══════════════════════════════════════════════════════════════════
+	//
+	// The obvious way to ask "how many are there?" is to request none of
+	// them. It does not work here: a limit of zero means "the caller named
+	// no size", and falls through to the default batch of fifty. That is
+	// the right reading of an empty request body, and it is a trap for
+	// anybody who meant zero literally.
+	//
+	// It caught the backfill workflow's own dry run, which reported
+	// "queueing nothing" and queued forty-four videos. Nothing was harmed —
+	// re-queuing is safe and those were the videos we wanted anyway — but a
+	// switch labelled "change nothing" that changes something is worth more
+	// than the one line it saves.
+	//
+	// So asking is its own flag, and it cannot be confused with a number.
+	// Only valid with Missing, because counting with nothing to count is
+	// not a question.
+	CountOnly bool `json:"countOnly"`
 }
 
 type requeueResponse struct {
@@ -268,6 +290,16 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 	// request would quietly become "re-encode the whole catalogue" — the
 	// opposite of what naming a rendition is for. Refuse it instead.
 	req.Missing = strings.TrimSpace(req.Missing)
+	if req.CountOnly && req.Missing == "" {
+		http.Error(w, `"countOnly" needs "missing" — there is nothing to count `+
+			`without a rendition to look for`, http.StatusBadRequest)
+		return
+	}
+	if req.CountOnly && len(req.IDs) > 0 {
+		http.Error(w, `"countOnly" and "ids" ask for different things: one `+
+			`counts, the other queues named videos`, http.StatusBadRequest)
+		return
+	}
 	if req.Missing != "" && !videoVariantLabels[req.Missing] {
 		http.Error(w, fmt.Sprintf("%q is not a rendition this backend stores; "+
 			"every video would match it", req.Missing), http.StatusBadRequest)
@@ -294,7 +326,9 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 	var n int64
 	var requeuedIDs, skippedIDs []int
 	var err error
-	if len(req.IDs) > 0 {
+	if req.CountOnly {
+		// Nothing to do. The count below is the whole answer.
+	} else if len(req.IDs) > 0 {
 		requeuedIDs, err = requeueByID(table, req.IDs)
 		if err == nil {
 			n = int64(len(requeuedIDs))
@@ -352,12 +386,18 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "requeue failed", http.StatusInternalServerError)
 		return
 	}
-	// How much of this backlog is left. Asked AFTER the update, so the rows
-	// just moved are not counted — they are queued, not missing.
+	// How much of this backlog is LEFT TO QUEUE. Asked after the update, so
+	// the rows just moved are not counted — they are queued, not waiting.
 	//
 	// A count of rows moved cannot say whether the job is finished: fifty
 	// moved looks the same on the first call and the last. This is the number
 	// that says when to stop calling.
+	//
+	// It is deliberately not "videos without this rendition". A video the
+	// worker is part-way through has no rendition yet and is not counted,
+	// because queueing it again would be wrong. So zero means "nothing left
+	// to hand over", not "every video now has one" — those become the same
+	// thing only once the worker has drained.
 	var stillMissing *int
 	if req.Missing != "" {
 		left := 0
@@ -396,8 +436,14 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 			"queued, or held by the worker): %v", table, skippedIDs)
 	}
 
-	started, workerNote := startWorkerNow(r.Context())
-	log.Printf("admin requeue: worker started=%v: %s", started, workerNote)
+	// A question does not wake the worker. Counting queues nothing, so
+	// there is nothing new for it to do, and starting it would burn a runner
+	// to find an empty queue.
+	started, workerNote := false, ""
+	if !req.CountOnly {
+		started, workerNote = startWorkerNow(r.Context())
+		log.Printf("admin requeue: worker started=%v: %s", started, workerNote)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(requeueResponse{
