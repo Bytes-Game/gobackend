@@ -75,6 +75,26 @@ func withDB(t *testing.T) func() {
 	disableContentScoreCache, disableUserProfileCache = true, true
 
 	// The real schema, built by the real migration path.
+	//
+	// ⚠ THIS ALSO RUNS THE ONE-TIME BACKFILLS, and that has already fooled
+	// one test. runMigrations() ends by calling backfillCategoryProvenance(),
+	// which walks existing rows and then records itself in schema_migrations
+	// so it never repeats. Both of those happen HERE, before your test body
+	// runs a single line.
+	//
+	// Two ways that bites:
+	//
+	//   * a test that seeds rows and expects the backfill to touch them sees
+	//     nothing happen — it ran before the rows existed, and it will not
+	//     run again;
+	//   * a test that checks the backfill recorded itself passes even if you
+	//     delete the statement that records it, because the row was already
+	//     put there by this line.
+	//
+	// The second one is not hypothetical: it was found by deleting that
+	// statement and watching the test stay green. If your test needs a
+	// backfill to run against rows you seeded, delete its marker row first —
+	// see TestBackfill_RunsOnlyOnce for the shape.
 	runMigrations()
 	truncateAudit(t)
 	auditCreator(t)
