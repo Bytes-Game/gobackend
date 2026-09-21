@@ -215,18 +215,10 @@ func TestBackfill_SettlesVideosTheModelAlreadyWatched(t *testing.T) {
 func TestBackfill_RunsOnlyOnce(t *testing.T) {
 	defer withDB(t)()
 
-	// Clear the marker FIRST.
-	//
-	// withDB builds the schema by calling runMigrations(), which now runs the
-	// backfill — so by the time this test body starts, the marker row is
-	// already there. Without this line the "did it record itself" check below
-	// passes on a row somebody else wrote, and deleting the INSERT entirely
-	// would not turn it red. That is not hypothetical: it was caught by
-	// deleting the INSERT and watching this test pass.
-	if _, err := db.Exec(
-		`DELETE FROM schema_migrations WHERE version = $1`, backfillVersion); err != nil {
-		t.Fatalf("clear the marker: %v", err)
-	}
+	// No need to clear the marker here: withDB does it for every test now,
+	// via forgetOneTimeBackfills. This test used to do it by hand, and that
+	// was the clue the default was wrong — a test that has to undo its own
+	// setup before it can assert anything is a setup that disarms assertions.
 
 	// First run records itself.
 	backfillCategoryProvenance()
@@ -278,5 +270,67 @@ func TestBackfill_IsActuallyCalledAtBoot(t *testing.T) {
 			"video that existed before the provenance columns did keeps the " +
 			"category upload guessed for it, forever — and every other test " +
 			"in this file still passes, because they all call it by hand")
+	}
+}
+
+// TestWithDB_StartsWithTheBackfillsUnRun is the guard on the guard.
+//
+// forgetOneTimeBackfills is what makes every other backfill test in this repo
+// mean anything, and nothing else would notice if it were deleted: the tests
+// it protects would all go back to passing, quietly, against broken code.
+// That is the shape it exists to stop, so it needs a check of its own.
+//
+// Deliberately asserts on the STATE a test body starts in, not on the source,
+// so it also catches the reset being moved, reordered after something that
+// re-records, or narrowed to the wrong version string.
+func TestWithDB_StartsWithTheBackfillsUnRun(t *testing.T) {
+	defer withDB(t)()
+
+	var stillRecorded []string
+	rows, err := db.Query(
+		`SELECT version FROM schema_migrations WHERE version LIKE '%(go)'`)
+	if err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		stillRecorded = append(stillRecorded, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("walking schema_migrations: %v", err)
+	}
+
+	if len(stillRecorded) > 0 {
+		t.Errorf("a test body starts with these backfills already marked as "+
+			"run: %v\n\nThat makes every assertion about them meaningless — "+
+			"seed rows and the backfill will not touch them, check that it "+
+			"recorded itself and it passes with the recording deleted. "+
+			"withDB must clear these; see forgetOneTimeBackfills.",
+			stillRecorded)
+	}
+
+	// And the PRESENCE half. Everything above checks that something is NOT
+	// there, and a reset widened to `DELETE FROM schema_migrations` with no
+	// WHERE would sail through all of it — while making every versioned
+	// migration re-run on every single test.
+	//
+	// So: the .sql migrations must still be recorded. Only the Go backfills
+	// are the reset's business.
+	var sqlMigrations int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM schema_migrations WHERE version NOT LIKE '%(go)'`,
+	).Scan(&sqlMigrations); err != nil {
+		t.Fatalf("count the versioned migrations: %v", err)
+	}
+	if sqlMigrations == 0 {
+		t.Error("the versioned .sql migrations are no longer recorded as " +
+			"applied. forgetOneTimeBackfills is meant to clear the Go " +
+			"backfills and nothing else — widened to everything, it makes " +
+			"every migration re-run on every test, and the absence check " +
+			"above would not notice.")
 	}
 }
