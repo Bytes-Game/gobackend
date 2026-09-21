@@ -63,6 +63,19 @@ package main
 // reach them by re-running the whole catalogue — hours of worker time to
 // correct one tag on one video. That is how it went the first time.
 //
+// The third way is "missing": name a rendition, and only videos that do not
+// already have it are picked. That is what a NEW RUNG needs.
+//
+// 360p was added to the ladder for people on mobile data, and every video
+// already on the platform was encoded before it existed. Oldest-first would
+// get there eventually, but it re-encodes everything on the way — including
+// the videos that already have the rung — so a catalogue of a few hundred
+// costs hours of runner time to add one small file to each.
+//
+// "missing" asks the question the job is actually about, and it is safe to
+// run over and over: a video that has been done drops out of the selection,
+// so repeated calls walk through what is left and then stop finding anything.
+//
 // Nothing decides quality here. Whether a video is worth re-encoding is a
 // question about the file, and only the worker has the file — see
 // progressiveSkipBps, which leaves an already-lean source alone.
@@ -83,8 +96,8 @@ import (
 
 // requeueMaxBatch bounds one call.
 //
-// Each video costs the worker a download, four HLS renditions and up to two
-// progressive ones — roughly forty seconds of runner time. The worker drains
+// Each video costs the worker a download, four HLS renditions and up to four
+// progressive ones — roughly a minute of runner time. The worker drains
 // what it can inside its own runtime cap and the rest waits for the next
 // scheduled run, so a large batch is not lost, just spread out. The ceiling is
 // here so one mistyped request cannot queue up hours of work.
@@ -113,12 +126,45 @@ type requeueRequest struct {
 	// reported back in SkippedIDs rather than silently dropped. Asking for a
 	// video and being told nothing happened is the whole reason to name it.
 	IDs []int `json:"ids"`
+	// Only pick videos that do NOT already have this rendition.
+	//
+	// The case this is for: a rung is added to the ladder and every video
+	// already on the platform predates it. Without this the only way to reach
+	// them is the oldest-first walk, which re-encodes the whole catalogue to
+	// add one small file to each video — and repeats that work every time it
+	// is run, because nothing in the selection knows what has been done.
+	//
+	// With it the selection shrinks as the job progresses, so calling this
+	// repeatedly finishes the backlog and then starts returning zero.
+	//
+	// Must be a label the backend would actually store (videoVariantLabels),
+	// both because anything else can never be produced — so the request could
+	// only ever queue the entire catalogue — and because this value reaches
+	// the database.
+	//
+	// Ignored when IDs is given: a named list has already said which videos.
+	Missing string `json:"missing"`
 }
 
 type requeueResponse struct {
 	Requeued int    `json:"requeued"`
 	Kind     string `json:"kind"`
 	Note     string `json:"note"`
+	// The rendition asked for, echoed back. Empty for an ordinary batch.
+	// Without it a run of zero is ambiguous: "the backlog is finished" and
+	// "the filter was ignored" look the same in a bare count.
+	Missing string `json:"missing,omitempty"`
+	// How many finished videos still lack that rendition AFTER this call.
+	// The point of a backlog job is knowing when it is over, and a count of
+	// rows moved does not say that. Zero here means done.
+	//
+	// A pointer, because zero is the answer that matters most and a plain
+	// int cannot say it. "The backlog is finished" and "this sweep never
+	// counted anything" are both 0, and they mean opposite things: stop
+	// running this, versus this number is not about you.
+	//
+	// So: absent means "not asked for", and 0 means "none left".
+	StillMissing *int `json:"stillMissing"`
 	// Which of the named ids were actually put back, and which were not.
 	// Only filled in when the request named ids — the batch path picks its
 	// own rows, so listing them would say nothing the count does not.
@@ -178,6 +224,7 @@ func startWorkerNow(ctx context.Context) (bool, string) {
 //
 // POST /api/v1/admin/media/requeue   {"limit": 50, "kind": "challenges"}
 // POST /api/v1/admin/media/requeue   {"ids": [260, 262], "kind": "challenges"}
+// POST /api/v1/admin/media/requeue   {"limit": 50, "missing": "360p"}
 //
 // Without ids: oldest first, deliberately. The oldest rows are the ones
 // transcoded by the oldest worker, so they are the ones with the most to gain,
@@ -186,6 +233,10 @@ func startWorkerNow(ctx context.Context) (bool, string) {
 //
 // With ids: exactly those, in any order, and the answer says which of them
 // actually moved.
+//
+// With missing: only videos that do not already have that rendition, oldest
+// first. The answer carries stillMissing, which is how many are left after
+// this call — run it again until that reaches zero.
 func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 	var req requeueRequest
 	// An empty body is a valid request for the default batch, so a decode
@@ -211,6 +262,15 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 	if len(req.IDs) > requeueMaxBatch {
 		http.Error(w, fmt.Sprintf("%d ids is more than the %d a single call "+
 			"may queue", len(req.IDs), requeueMaxBatch), http.StatusBadRequest)
+		return
+	}
+	// A rendition nobody could ever store would match every row, so the
+	// request would quietly become "re-encode the whole catalogue" — the
+	// opposite of what naming a rendition is for. Refuse it instead.
+	req.Missing = strings.TrimSpace(req.Missing)
+	if req.Missing != "" && !videoVariantLabels[req.Missing] {
+		http.Error(w, fmt.Sprintf("%q is not a rendition this backend stores; "+
+			"every video would match it", req.Missing), http.StatusBadRequest)
 		return
 	}
 
@@ -247,19 +307,42 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 		// and without this a video that failed four times years ago would be
 		// offered once and then dropped.
 		var res sql.Result
-		res, err = db.Exec(`
-			UPDATE `+table+`
-			   SET hls_manifest_url = '',
-			       hls_attempts     = 0,
-			       hls_claimed_at    = NULL
-			 WHERE id IN (
-			   SELECT id FROM `+table+`
-			    WHERE hls_manifest_url <> ''
-			      AND hls_manifest_url <> 'PENDING'
-			      AND COALESCE(video_url, '') <> ''
-			    ORDER BY created_at ASC
-			    LIMIT $1
-			 )`, limit)
+		if req.Missing != "" {
+			// Oldest first among the ones that still lack the rendition.
+			//
+			// ->> 'label' IS NULL rather than the key-exists operator: `?`
+			// is also a placeholder character in a lot of database tooling,
+			// and a query that reads differently depending on who is looking
+			// at it is not worth the two characters it saves.
+			res, err = db.Exec(`
+				UPDATE `+table+`
+				   SET hls_manifest_url = '',
+				       hls_attempts     = 0,
+				       hls_claimed_at    = NULL
+				 WHERE id IN (
+				   SELECT id FROM `+table+`
+				    WHERE hls_manifest_url <> ''
+				      AND hls_manifest_url <> 'PENDING'
+				      AND COALESCE(video_url, '') <> ''
+				      AND COALESCE(video_variants, '{}'::jsonb)->>$2::text IS NULL
+				    ORDER BY created_at ASC
+				    LIMIT $1
+				 )`, limit, req.Missing)
+		} else {
+			res, err = db.Exec(`
+				UPDATE `+table+`
+				   SET hls_manifest_url = '',
+				       hls_attempts     = 0,
+				       hls_claimed_at    = NULL
+				 WHERE id IN (
+				   SELECT id FROM `+table+`
+				    WHERE hls_manifest_url <> ''
+				      AND hls_manifest_url <> 'PENDING'
+				      AND COALESCE(video_url, '') <> ''
+				    ORDER BY created_at ASC
+				    LIMIT $1
+				 )`, limit)
+		}
 		if err == nil {
 			n, _ = res.RowsAffected()
 		}
@@ -269,7 +352,45 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "requeue failed", http.StatusInternalServerError)
 		return
 	}
+	// How much of this backlog is left. Asked AFTER the update, so the rows
+	// just moved are not counted — they are queued, not missing.
+	//
+	// A count of rows moved cannot say whether the job is finished: fifty
+	// moved looks the same on the first call and the last. This is the number
+	// that says when to stop calling.
+	var stillMissing *int
+	if req.Missing != "" {
+		left := 0
+		if cErr := db.QueryRow(`
+			SELECT COUNT(*) FROM `+table+`
+			 WHERE hls_manifest_url <> ''
+			   AND hls_manifest_url <> 'PENDING'
+			   AND COALESCE(video_url, '') <> ''
+			   AND COALESCE(video_variants, '{}'::jsonb)->>$1::text IS NULL
+			`, req.Missing).Scan(&left); cErr != nil {
+			// Not fatal — the rows really were queued. But it must not read
+			// as "nothing left", which is exactly what a swallowed error here
+			// would look like to whoever is running the backlog.
+			queryFailed("how many videos still lack the "+req.Missing+
+				" rendition", "reporting -1 so the count is not mistaken "+
+				"for a finished backlog", cErr)
+			left = -1
+		}
+		stillMissing = &left
+	}
+
 	log.Printf("admin requeue: %d %s rows put back in the transcode queue", n, table)
+	// Guarded on the pointer itself, not on req.Missing.
+	//
+	// The two say the same thing today — the count is only taken when a
+	// rendition was named — and that is the problem: it is true because two
+	// separate blocks agree, not because anything makes them agree. Reading
+	// the pointer through a condition somewhere else is how a nil
+	// dereference gets introduced later by an edit that looks harmless.
+	if stillMissing != nil {
+		log.Printf("admin requeue: %s rows still without a %s rendition: %d",
+			table, req.Missing, *stillMissing)
+	}
 	if len(skippedIDs) > 0 {
 		log.Printf("admin requeue: %s ids not put back (unknown, still "+
 			"queued, or held by the worker): %v", table, skippedIDs)
@@ -284,6 +405,8 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 		Kind:     table,
 		Note: "nothing was deleted and the current files keep serving until " +
 			"each one is replaced",
+		Missing:       req.Missing,
+		StillMissing:  stillMissing,
 		RequeuedIDs:   requeuedIDs,
 		SkippedIDs:    skippedIDs,
 		WorkerStarted: started,
