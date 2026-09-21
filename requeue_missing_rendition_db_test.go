@@ -213,3 +213,89 @@ func TestRequeueMissing_AcceptsEveryRenditionItDoesStore(t *testing.T) {
 		}
 	}
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// ASKING HOW MANY, WITHOUT CHANGING ANY
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The backfill workflow's dry run asked for a limit of ZERO videos and
+// reported "queueing nothing". It queued forty-four.
+//
+// A limit of zero means "the caller named no size" and falls through to the
+// default batch of fifty. That is the right reading of an empty request body,
+// and it made the one switch labelled "change nothing" change something.
+//
+// Nothing was harmed — re-queuing is safe, and those were the videos we
+// wanted anyway. But a safety mode that is not safe is worse than no safety
+// mode, because it is the one people reach for when they are unsure.
+
+func TestRequeueCount_ChangesNothing(t *testing.T) {
+	defer withDB(t)()
+
+	withIt := requeueSeed(t, map[string]string{"360p": "https://cdn/a/360p.mp4"})
+	withoutA := requeueSeed(t, map[string]string{"480p": "https://cdn/b/480p.mp4"})
+	withoutB := requeueSeed(t, map[string]string{"720p": "https://cdn/c/720p.mp4"})
+
+	w := requeuePost(t, `{"countOnly":true,"missing":"360p"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d: %s", w.Code, w.Body.String())
+	}
+	got := decodeRequeue(t, w.Body.Bytes())
+
+	if got.Requeued != 0 {
+		t.Errorf("a count said it moved %d videos. It is supposed to move none.",
+			got.Requeued)
+	}
+	// The real check: every row still finished. This is the assertion the
+	// old dry run would have failed.
+	for _, id := range []int{withIt, withoutA, withoutB} {
+		if m := requeueManifest(t, id); m == "" {
+			t.Errorf("video %d was queued by a call that only asked a question", id)
+		}
+	}
+	if got.StillMissing == nil || *got.StillMissing != 2 {
+		t.Errorf("counted %v, want 2 — the answer has to be right as well as "+
+			"harmless", got.StillMissing)
+	}
+}
+
+func TestRequeueCount_IsNotTheSameAsALimitOfZero(t *testing.T) {
+	// The exact trap, pinned. A limit of zero is "no size given" and queues
+	// the default batch; countOnly queues nothing. If these two ever start
+	// behaving the same, one of them is wrong.
+	defer withDB(t)()
+
+	a := requeueSeed(t, map[string]string{"480p": "https://cdn/a/480p.mp4"})
+	b := requeueSeed(t, map[string]string{"480p": "https://cdn/b/480p.mp4"})
+
+	if w := requeuePost(t, `{"limit":0,"missing":"360p"}`); w.Code != http.StatusOK {
+		t.Fatalf("limit 0: got %d: %s", w.Code, w.Body.String())
+	}
+	queued := 0
+	for _, id := range []int{a, b} {
+		if requeueManifest(t, id) == "" {
+			queued++
+		}
+	}
+	if queued == 0 {
+		t.Error("a limit of zero queued nothing. That is a kinder reading, but " +
+			"it is not what the handler does — and if it has changed, the " +
+			"comment on CountOnly explaining why zero is a trap is now wrong.")
+	}
+}
+
+func TestRequeueCount_RefusesAQuestionItCannotAnswer(t *testing.T) {
+	// Counting with no rendition named is not a question. And counting while
+	// naming ids asks for two different things at once.
+	//
+	// No database needed: both are refused before the handler looks at one.
+	for _, body := range []string{
+		`{"countOnly":true}`,
+		`{"countOnly":true,"missing":"360p","ids":[1,2]}`,
+	} {
+		w := requeuePost(t, body)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s got %d, want 400", body, w.Code)
+		}
+	}
+}

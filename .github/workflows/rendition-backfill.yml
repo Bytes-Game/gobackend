@@ -28,10 +28,16 @@ name: rendition-backfill
 #   - the selection SHRINKS as the job progresses, so this can be run over and
 #     over and it finishes rather than going round in circles
 #
-# The answer carries stillMissing — how many are left AFTER the call. That is
-# the number this loop stops on, and it is why "how many did it move" is not
-# enough on its own: fifty moved looks identical on the first round and the
-# last.
+# The answer carries stillMissing — how many are left TO QUEUE after the call.
+# That is the number this loop stops on, and it is why "how many did it move"
+# is not enough on its own: fifty moved looks identical on the first round and
+# the last.
+#
+# It counts videos that are FINISHED and lack the rendition. A video the
+# worker is part-way through is not counted, because queueing it again would
+# be wrong. So zero means "nothing left to hand over", not "every video now
+# has one" — those become the same thing once the worker has drained, which
+# is why a second dry run after the queue goes quiet is the real confirmation.
 #
 # ════════════════════════════════════════════════════════════════════════════
 # NOTHING DISAPPEARS WHILE IT RUNS
@@ -79,7 +85,7 @@ on:
         type: string
         default: '40'
       dry_run:
-        description: 'Only report how many are missing; queue nothing'
+        description: 'Only count what is left to queue; change nothing'
         type: boolean
         default: false
 
@@ -115,18 +121,36 @@ jobs:
           # on a runner that is thrown away afterwards.
           auth_config=$(printf 'user = "%s:%s"\n' "$ADMIN_USER" "$ADMIN_PASS")
 
-          # A dry run asks for zero videos. The endpoint still counts what is
-          # left, so this reports the size of the job without starting it.
-          limit="$BATCH"
+          # ══════════════════════════════════════════════════════════════
+          # A DRY RUN ASKS A QUESTION. IT DOES NOT QUEUE ANYTHING.
+          # ══════════════════════════════════════════════════════════════
+          #
+          # This used to request a limit of ZERO videos and say "queueing
+          # nothing". It queued forty-four. A limit of zero means "the caller
+          # named no size" to the backend, and falls through to its default
+          # batch of fifty.
+          #
+          # Nothing was harmed — re-queuing is safe and those were the videos
+          # we wanted anyway — but a switch labelled "change nothing" that
+          # changes something is the worst kind, because it is the one people
+          # reach for when they are unsure.
+          #
+          # countOnly is its own flag now and cannot be mistaken for a number.
+          count_only=false
           if [ "$DRY_RUN" = "true" ]; then
-            limit=0
-            echo "Dry run: counting only, queueing nothing."
+            count_only=true
+            echo "Counting only. Nothing will be queued."
           fi
 
           queued_total=0
           for round in $(seq 1 "$ROUNDS"); do
-            body=$(printf '{"limit":%s,"kind":"%s","missing":"%s"}' \
-              "$limit" "$KIND" "$RENDITION")
+            if [ "$count_only" = "true" ]; then
+              body=$(printf '{"countOnly":true,"kind":"%s","missing":"%s"}' \
+                "$KIND" "$RENDITION")
+            else
+              body=$(printf '{"limit":%s,"kind":"%s","missing":"%s"}' \
+                "$BATCH" "$KIND" "$RENDITION")
+            fi
 
             code=$(printf '%s\n' "$auth_config" | curl -sS -K - \
               -o /tmp/resp.json -w '%{http_code}' \
@@ -182,11 +206,17 @@ jobs:
             fi
 
             queued_total=$((queued_total + requeued))
-            echo "round $round: queued $requeued, $left still without a $RENDITION copy"
+            echo "round $round: queued $requeued, $left left to queue"
 
             if [ "$DRY_RUN" = "true" ]; then
-              echo "::notice::$left $KIND have no $RENDITION copy. Run again with"
-              echo "dry_run off to start the backfill."
+              if [ "$requeued" -ne 0 ]; then
+                echo "::error::A count said it queued $requeued videos. It is"
+                echo "meant to change nothing. Stopping — something is wrong"
+                echo "with countOnly on the backend."
+                exit 1
+              fi
+              echo "::notice::$left $KIND are waiting for a $RENDITION copy."
+              echo "Run again with dry_run off to start the backfill."
               exit 0
             fi
 
@@ -195,9 +225,10 @@ jobs:
             fi
 
             if [ "$left" -eq 0 ]; then
-              echo "::notice::Backfill complete: $queued_total $KIND queued in $round round(s), none left without a $RENDITION copy."
-              echo "The transcode worker now has them. It drains what it can every"
-              echo "run, so the last few may finish on a later run."
+              echo "::notice::Backfill queued: $queued_total $KIND in $round round(s), none left to hand over."
+              echo "The transcode worker has them now. It drains what it can each"
+              echo "run, so the last few finish on a later run — run this again"
+              echo "with dry_run on once it is quiet to confirm none came back."
               exit 0
             fi
 
@@ -207,7 +238,7 @@ jobs:
             sleep 30
           done
 
-          echo "::error::Still $left without a $RENDITION copy after $ROUNDS rounds"
+          echo "::error::Still $left left to queue after $ROUNDS rounds"
           echo "($queued_total queued). That is not necessarily wrong — a large"
           echo "catalogue takes several runs — but it is more than this was set up"
           echo "to do in one go. Run it again, or raise the rounds input."
