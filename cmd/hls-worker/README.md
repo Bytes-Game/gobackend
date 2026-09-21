@@ -24,6 +24,55 @@ and they are the ones the settings below turn on.
 
 ---
 
+## Where do these get set? (read this first)
+
+**On the machine that runs the transcode worker — not on your API server.**
+
+Your backend on Render never touches these. It does not have the model, does
+not run llama.cpp, and does not need to: it only reads the results out of the
+database. Setting them there does nothing at all.
+
+Your worker is **GitHub Actions**. `.github/workflows/hls-worker.yml` runs
+every half hour and whenever the backend pokes it after an upload, and that
+workflow already builds llama.cpp, downloads the model, proves it runs, and
+exports all four variables into the job.
+
+So, concretely:
+
+| Where you run the worker | What you have to do |
+|---|---|
+| **GitHub Actions** (what you use today) | **Nothing.** Already set up in `hls-worker.yml` |
+| Your own laptop, for testing | Export the four variables — recipe below |
+| A VM or container you run yourself | Same recipe, in the service's environment |
+
+They are **not** repo secrets. Nothing here is a password, so none of it goes
+in Settings → Secrets. They are just file paths on whichever machine is doing
+the work, and the workflow writes them into `$GITHUB_ENV` at the point it has
+proved the files work.
+
+### How to check whether it is on right now
+
+Open any recent `hls-worker` run in the **Actions** tab and look at the step
+called **"check the understanding model works"**. Its last lines say so
+outright:
+
+```
+understanding: ON        ← reading works
+looking: ON              ← silent videos work too
+```
+
+If you do not see those lines, the step failed and the worker ran without a
+model. That is **not** a broken build — the step is `continue-on-error` on
+purpose, because a model that will not start must cost you tags and never the
+whole transcode queue. The videos from that run get the keyword fallback
+described further down.
+
+The second place to look is the video itself, on the admin analysis page: its
+`passes` list says which passes actually ran. `understand` or `frames` in that
+list means a model looked at it.
+
+---
+
 ## The four settings
 
 ```
@@ -177,6 +226,40 @@ words that will ever exist about it.
 > cheaper for four times fewer pixels. And it costs nothing that matters; the
 > small version read a title card *more* plainly than the large one. If frames
 > ever need to be bigger, measure again before raising it.
+
+---
+
+## What about videos uploaded before all this existed?
+
+They are not left behind. On the next boot after this change, the backend
+walks the videos that already exist and settles what it can
+(`backfill_category_provenance.go`). It runs once and records itself, so it
+never repeats.
+
+Two different jobs there, and they are very different in how much they can
+recover:
+
+- **What the model concluded: fully recoverable.** Those videos were already
+  watched — their conclusion has been sitting in `auto_tags` the whole time,
+  and nothing ever turned it into a category. The backfill carries it the last
+  few inches. No guessing involved.
+
+- **What the creator said: mostly NOT recoverable, on purpose.** The old app
+  always sent a category (its dropdown defaulted to "other"), so a stored
+  category came either from a person choosing, or from the server deriving it.
+  Nothing recorded which. The backfill only claims a creator pick where it can
+  be *proven* by elimination: the creator's tags name one category and the row
+  stores a different one, which the server's own derivation could never have
+  produced. Everything else stays empty, because "we do not know" is the true
+  answer and a column meaning "a person said so" must never hold anything
+  else.
+
+It deliberately never re-runs the keyword matcher to decide this. That table
+has been corrected at least once — four of its answers were not categories at
+all, and ten real categories had no keywords and were unreachable — so
+re-running today's rules over a row written under the old ones would produce a
+different answer for reasons that have nothing to do with the creator, and
+record it as a human claim nobody made.
 
 ---
 

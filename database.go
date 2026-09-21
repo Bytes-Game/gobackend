@@ -773,6 +773,15 @@ func runMigrations() error {
 		return err
 	}
 
+	// Give the videos that already exist the answers the new provenance
+	// columns were built to hold. Deliberately AFTER the versioned
+	// migrations, because it reads and writes the columns they add.
+	//
+	// Not fatal, unlike a migration: the worst case is that old videos keep
+	// the category upload gave them, which is the state the app handled for
+	// its whole life until now. See backfill_category_provenance.go.
+	backfillCategoryProvenance()
+
 	log.Println("Database migrations completed")
 	return nil
 }

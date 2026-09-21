@@ -263,28 +263,29 @@ func TestEverySQLStatementCompilesAgainstTheRealSchema(t *testing.T) {
 // true, which is worse than no claim at all.
 var runByATest = map[string]string{
 	// A table name arriving as a parameter. Both tables are passed.
-	"admin_hls_queue.go:readHLSQueue":       "TestRuntimeQueries_TableNameFromAParameter",
-	"media_requeue.go:requeueByID":          "TestRuntimeQueries_TableNameFromAParameter",
-	"video_analysis.go:storeVideoAnalysis":  "TestRuntimeQueries_TableNameFromAParameter",
-	"video_analysis.go:settleCategory":       "TestSettleCategory_WritesTheModelsAnswerToTheRow",
-	"hls_worker_api.go:storeVideoVariants":  "TestRuntimeQueries_WorkerWritesToBothTables",
-	"hls_worker_api.go:storeVideoThumbnail": "TestRuntimeQueries_WorkerWritesToBothTables",
-	"media_analysis_read.go:readAnalysisRows": "TestAdminAnalysisRead_RunsAgainstARealResponsesTable",
+	"admin_hls_queue.go:readHLSQueue":                  "TestRuntimeQueries_TableNameFromAParameter",
+	"media_requeue.go:requeueByID":                     "TestRuntimeQueries_TableNameFromAParameter",
+	"video_analysis.go:storeVideoAnalysis":             "TestRuntimeQueries_TableNameFromAParameter",
+	"video_analysis.go:settleCategory":                 "TestSettleCategory_WritesTheModelsAnswerToTheRow",
+	"backfill_category_provenance.go:backfillOneTable": "TestBackfill_SettlesVideosTheModelAlreadyWatched",
+	"hls_worker_api.go:storeVideoVariants":             "TestRuntimeQueries_WorkerWritesToBothTables",
+	"hls_worker_api.go:storeVideoThumbnail":            "TestRuntimeQueries_WorkerWritesToBothTables",
+	"media_analysis_read.go:readAnalysisRows":          "TestAdminAnalysisRead_RunsAgainstARealResponsesTable",
 
 	// A placeholder list built in a loop.
-	"database.go:getLikedByMap":                "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
-	"database.go:enrichUsers":                  "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
-	"device_fit.go:loadVideoDimensions":        "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
-	"feed_engine.go:populateTopResponses":      "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
+	"database.go:getLikedByMap":                     "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
+	"database.go:enrichUsers":                       "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
+	"device_fit.go:loadVideoDimensions":             "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
+	"feed_engine.go:populateTopResponses":           "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
 	"feed_engine.go:populateChallengeCommentCounts": "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
-	"feed_engine.go:populateHLSManifestURLs":   "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
+	"feed_engine.go:populateHLSManifestURLs":        "TestRuntimeQueries_PlaceholderListsBuiltInALoop",
 
 	// A clause glued on depending on the caller.
-	"search_relevance.go:searchTextIndex":      "TestRuntimeQueries_ClausesGluedOnAtRequestTime",
-	"suggested_users.go:pullCategoryCandidates": "TestRuntimeQueries_ClausesGluedOnAtRequestTime",
-	"hls_dispatch.go:hlsWorkWaiting":           "TestRuntimeQueries_ClausesGluedOnAtRequestTime",
-	"audition_ladder.go:auditionsDueForReview": "TestRuntimeQueries_ClausesGluedOnAtRequestTime",
-	"topic_graph.go:buildTopicGraph":           "TestTopicGraph_CountsBothHalvesOfABattle",
+	"search_relevance.go:searchTextIndex":        "TestRuntimeQueries_ClausesGluedOnAtRequestTime",
+	"suggested_users.go:pullCategoryCandidates":  "TestRuntimeQueries_ClausesGluedOnAtRequestTime",
+	"hls_dispatch.go:hlsWorkWaiting":             "TestRuntimeQueries_ClausesGluedOnAtRequestTime",
+	"audition_ladder.go:auditionsDueForReview":   "TestRuntimeQueries_ClausesGluedOnAtRequestTime",
+	"topic_graph.go:buildTopicGraph":             "TestTopicGraph_CountsBothHalvesOfABattle",
 	"suggest_handlers.go:subjectsPeopleHaveUsed": "TestLeak_APrivateSubjectNeverReachesTheSuggestionList",
 
 	// Built inside an HTTP handler, where the shape depends on the request.
