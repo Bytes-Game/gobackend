@@ -357,13 +357,20 @@ func HLSCompleteHandler(w http.ResponseWriter, r *http.Request) {
 
 // videoVariantLabels are the only labels that may be stored.
 //
-// The app's chooser understands exactly these three and ignores anything else,
+// The app's chooser understands exactly these labels and ignores anything else,
 // so an unrecognised label would be a file nobody ever plays taking up a row.
 // More to the point, this map is written from a worker request and read back
 // as a playback URL — an allow-list is how "the worker sends what it sends"
 // stops being the same thing as "whatever arrives gets served".
+//
+// ⚠ EVERY LABEL THE WORKER CAN PRODUCE MUST BE HERE.
+//
+// A rung added to progressiveLadder and not added here is encoded, uploaded,
+// sent back — and dropped on this line, silently. The worker's logs say it
+// succeeded, the storage bill says it exists, and the app never sees it.
+// TestWorkerLadderLabelsAreAccepted exists to make that impossible to ship.
 var videoVariantLabels = map[string]bool{
-	"480p": true, "720p": true, "720p_hq": true, "1080p": true,
+	"360p": true, "480p": true, "720p": true, "720p_hq": true, "1080p": true,
 }
 
 // storeVideoVariants records the worker's own MP4 renditions.

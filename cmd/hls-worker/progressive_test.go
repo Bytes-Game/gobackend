@@ -264,9 +264,17 @@ func TestProgressive_TheLadderMatchesWhatTheAppCanChoose(t *testing.T) {
 	//
 	// Keep in step with:
 	//   - videoVariantLabels in hls_worker_api.go   (what may be stored)
+	//   - variantToExt in media_storage.go          (where a phone may put one)
 	//   - bitrateNeededFor in the app's NetworkQualityService (what it needs)
+	//
+	// The first two of those are now checked against the real maps rather than
+	// a copy — see TestWorkerLadderLabelsAreAccepted and
+	// TestWorkerLadderLabelsAreStorable in the root package, which read this
+	// ladder out of the source file. This list stays as the reminder that the
+	// APP is the third place, and the app is in another repository where no
+	// test here can reach it.
 	known := map[string]bool{
-		"480p": true, "720p": true, "720p_hq": true, "1080p": true,
+		"360p": true, "480p": true, "720p": true, "720p_hq": true, "1080p": true,
 	}
 	for _, r := range progressiveLadder {
 		if !known[r.label] {

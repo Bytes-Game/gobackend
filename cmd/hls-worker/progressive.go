@@ -70,12 +70,12 @@ import (
 
 // progressiveLadder is what we serve as plain MP4.
 //
-// Three rungs, not six. The HLS ladder can afford 240p and 360p because a
-// player switches between them mid-video; a progressive file is chosen once,
-// before playback, so a rung nobody would deliberately pick is a rung nobody
-// picks.
+// Four rungs. The HLS ladder has a 240p one below these because a player
+// switches between them mid-video and can drop to it for a few seconds; a
+// progressive file is chosen once, before playback, so a rung nobody would
+// deliberately pick for a whole video is a rung nobody picks.
 //
-// The three cover the range of connections rather than the range of screen
+// The four cover the range of connections rather than the range of screen
 // sizes, because that is what actually varies here — every viewer is holding
 // a phone, and their links are not alike. Two of them are the same 1280-wide
 // picture at different bitrates for exactly that reason.
@@ -126,6 +126,58 @@ var progressiveLadder = []progressiveRendition{
 	// decode; device logs showed 1920x1080 sessions with render intervals in
 	// the seconds. What a fast link is short of here is bits, not pixels.
 	{label: "720p_hq", maxLongSide: 1280, crf: 20, maxBps: 3_500_000, audioBps: 128_000},
+	// ════════════════════════════════════════════════════════════════════════
+	// WHY THE SMALLEST RUNG IS LISTED LAST
+	// ════════════════════════════════════════════════════════════════════════
+	//
+	// planProgressive walks this list in order, and the first rung to claim a
+	// picture size owns it — see cheapestAtBox. So where a rung sits in this
+	// list decides which NAME a small upload's file gets.
+	//
+	// A 640-wide upload is inside 360p's box and inside every other rung's box
+	// too. Listed first, 360p would claim it and the upload's only rendition
+	// would be capped at 600k. Listed last, the 480p rung claims it at 1.5 Mbps
+	// and 360p is then added underneath as the cheap option — which is what we
+	// wanted: the good file AND something a slow link can still play.
+	//
+	// TestProgressive_ASmallSourceGetsBothItsRungs pins that outcome, so
+	// re-sorting this list turns it red rather than quietly halving the
+	// quality of every small upload.
+	//
+	// ════════════════════════════════════════════════════════════════════════
+	// THE RUNG FOR A REAL MOBILE CONNECTION
+	// ════════════════════════════════════════════════════════════════════════
+	//
+	// For a long time the bottom of this ladder was 480p, and 480p costs
+	// 1.5 Mbps of video plus 96k of audio — about 1.6 Mbps. The app will not
+	// choose a rendition unless the link is a third again faster than the
+	// file (see bitrateHeadroom), so 480p really asks for about 2.1 Mbps, and
+	// it asks for it BEFORE anything is set aside to fetch the next reel.
+	//
+	// Mobile data in the field runs at 2–3 Mbps and dips below 2 routinely.
+	// At 2.6 Mbps the 480p rung swallowed nearly the whole link; at 1.5 Mbps
+	// it could not play at all — and there was nothing underneath it to fall
+	// back to. The app's own picker said as much: its floor was the string
+	// "480p", so on a very slow link it chose a file the link could not carry
+	// and the video stopped.
+	//
+	// The reasoning in that picker was right — "a soft picture that plays
+	// still beats a sharp one that stops" — and the ladder simply did not
+	// give it anything soft enough to keep the promise.
+	//
+	// So: 640x360 at 600k video + 64k audio, about 0.66 Mbps. With headroom
+	// that is roughly 0.9 Mbps for the picture, which leaves real room on a
+	// 1.5 Mbps link instead of overrunning it.
+	//
+	// 640x360 and 600k are the HLS ladder's own 360p numbers (main.go), so
+	// the two halves of this app agree about what "360p" looks like and what
+	// it costs. The audio is 64k here rather than that ladder's 96k: 32 kbps
+	// is 5% of this rung's whole budget, which is worth more to the picture
+	// than it is to speech at this size, and it is what the 240p rung below
+	// it already uses.
+	//
+	// Nobody on wifi ever sees this. It is a floor, not a change of default.
+	{label: "360p", maxLongSide: 640, crf: 26, maxBps: 600_000, audioBps: 64_000},
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -333,49 +385,46 @@ func durationCutArgs(maxSeconds int) []string {
 	return []string{"-t", strconv.Itoa(cutSeconds(maxSeconds))}
 }
 
-func buildProgressiveMP4s(ctx context.Context, src, outDir string, maxSeconds int) map[string]string {
-	made := map[string]string{}
-	longSide, bitrate, ok := sourceShape(ctx, src)
-	if !ok {
-		log.Printf("progressive: could not measure %s, skipping our own encode", src)
-		return made
-	}
-	hasAudio := probeHasAudio(src)
+// plannedRendition is one file we have decided to make: the rung, already
+// adjusted for this source, and the picture box it will be encoded into.
+type plannedRendition struct {
+	rung progressiveRendition
+	box  int
+}
 
-	// ════════════════════════════════════════════════════════════════════════
-	// HOW LEAN THE SOURCE ALREADY IS
-	// ════════════════════════════════════════════════════════════════════════
-	//
-	// A rung must never aim above this, because bits the source never spent
-	// cannot be recovered by spending them now. Zero means the container did
-	// not declare a bitrate, which is not "zero bits" — it is "unknown", so no
-	// rung gets clamped and every one runs at its own ceiling.
-	//
-	// The old rule read the same measurement and returned here with nothing
-	// encoded. See the section comment above for why serving the upload
-	// untouched turned out to cost more than the generation it saved.
-	if r, ok := rungForSize(longSide); ok && bitrate > 0 && bitrate <= r.maxBps {
-		log.Printf("progressive: %s is %d-tall-side at %.2f Mbps, already "+
-			"inside the %s ceiling of %.2f Mbps — holding it at its own rate",
-			filepath.Base(src), longSide, float64(bitrate)/1e6,
-			r.label, float64(r.maxBps)/1e6)
-	}
-
-	// Renditions already made, so a rung that would repeat one is skipped.
-	//
-	// Keyed on picture size AND ceiling, not size alone. Two rungs now share
-	// 1280 on purpose — the same picture at different bitrates, which is the
-	// whole point of having a fast-connection rung — and keying on size alone
-	// would have silently dropped the second one. See the loop below.
+// planProgressive decides which renditions a source of this shape should get,
+// before any encoding happens.
+//
+// Split out from the encoder on purpose. Every bug this ladder has had was a
+// decision bug — a rung silently dropped, a picture blown up, two names for
+// one file — and none of them needed ffmpeg to find. A pure function can be
+// checked on every push; a function that shells out to an encoder only gets
+// checked where ffmpeg happens to be installed.
+//
+// longSide is the source's larger side in pixels. bitrate is what the source
+// already spends, or 0 when the container did not say.
+func planProgressive(longSide, bitrate int) []plannedRendition {
+	// Exactly this picture size at exactly this ceiling.
 	type rendition struct {
 		box    int
 		maxBps int
 	}
-	// Exactly this picture size at exactly this ceiling.
 	madeExact := map[rendition]bool{}
-	// Any rendition at this picture size, whatever its ceiling.
-	madeAtBox := map[int]bool{}
+	// The CHEAPEST ceiling already planned at each picture size.
+	//
+	// It used to be a plain yes/no, which was fine while every rung at a
+	// given size cost about the same. It stopped being fine when 360p joined
+	// the ladder: a 640-wide upload would have had its one and only rendition
+	// capped at 600k, because the first rung to claim the size owned it
+	// outright and nothing dearer could follow.
+	//
+	// Cheapest, because a cheaper option at a size we already cover is
+	// exactly what a slow connection needs, and a DEARER one at that size is
+	// what we do not want — it would be the same picture under a bigger
+	// rung's name, which the app reads as both more bits AND more pixels.
+	cheapestAtBox := map[int]int{}
 
+	plan := make([]plannedRendition, 0, len(progressiveLadder))
 	for _, r := range progressiveLadder {
 		// ════════════════════════════════════════════════════════════════════
 		// NEVER ENLARGE THE PICTURE
@@ -426,11 +475,15 @@ func buildProgressiveMP4s(ctx context.Context, src, outDir string, maxSeconds in
 		key := rendition{box: box, maxBps: r.maxBps}
 		if box < r.maxLongSide {
 			// Clamped: this rung is reaching DOWN to a source smaller than
-			// itself, so a rung below it already covers this size. Its higher
-			// ceiling buys nothing either — the source has fewer bits than
-			// that to begin with, so crf lands in the same place and we would
-			// be storing the same video twice.
-			if madeAtBox[box] {
+			// itself, so its name already promises more picture than there
+			// is. Worth doing only if it is CHEAPER than anything else we
+			// are making at this size — a smaller file of the same picture,
+			// for a connection that cannot carry the one we have.
+			//
+			// Anything at or above what is already planned here is refused.
+			// It would be the same picture again, no better, under a name
+			// that claims more pixels than the file has.
+			if cheap, ok := cheapestAtBox[box]; ok && r.maxBps >= cheap {
 				continue
 			}
 		} else if madeExact[key] {
@@ -440,10 +493,51 @@ func buildProgressiveMP4s(ctx context.Context, src, outDir string, maxSeconds in
 		}
 
 		madeExact[key] = true
-		madeAtBox[box] = true
+		if cheap, ok := cheapestAtBox[box]; !ok || r.maxBps < cheap {
+			cheapestAtBox[box] = r.maxBps
+		}
+		plan = append(plan, plannedRendition{rung: r, box: box})
+	}
+	return plan
+}
 
+// buildProgressiveMP4s encodes our renditions and returns label → local path.
+//
+// Never fatal, and never partial in a way the caller has to reason about: a
+// rendition that fails is left out of the map, and the caller serves whatever
+// did work — down to nothing at all, which is exactly today's behaviour.
+func buildProgressiveMP4s(ctx context.Context, src, outDir string, maxSeconds int) map[string]string {
+	made := map[string]string{}
+	longSide, bitrate, ok := sourceShape(ctx, src)
+	if !ok {
+		log.Printf("progressive: could not measure %s, skipping our own encode", src)
+		return made
+	}
+	hasAudio := probeHasAudio(src)
+
+	// ════════════════════════════════════════════════════════════════════════
+	// HOW LEAN THE SOURCE ALREADY IS
+	// ════════════════════════════════════════════════════════════════════════
+	//
+	// A rung must never aim above this, because bits the source never spent
+	// cannot be recovered by spending them now. Zero means the container did
+	// not declare a bitrate, which is not "zero bits" — it is "unknown", so no
+	// rung gets clamped and every one runs at its own ceiling.
+	//
+	// The old rule read the same measurement and returned here with nothing
+	// encoded. See the section comment above for why serving the upload
+	// untouched turned out to cost more than the generation it saved.
+	if r, ok := rungForSize(longSide); ok && bitrate > 0 && bitrate <= r.maxBps {
+		log.Printf("progressive: %s is %d-tall-side at %.2f Mbps, already "+
+			"inside the %s ceiling of %.2f Mbps — holding it at its own rate",
+			filepath.Base(src), longSide, float64(bitrate)/1e6,
+			r.label, float64(r.maxBps)/1e6)
+	}
+
+	for _, p := range planProgressive(longSide, bitrate) {
+		r := p.rung
 		out := filepath.Join(outDir, r.label+".mp4")
-		if err := encodeProgressive(ctx, src, out, r, box, hasAudio, maxSeconds); err != nil {
+		if err := encodeProgressive(ctx, src, out, r, p.box, hasAudio, maxSeconds); err != nil {
 			log.Printf("progressive: %s failed, carrying on without it: %v", r.label, err)
 			_ = os.Remove(out)
 			continue

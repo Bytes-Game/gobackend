@@ -327,9 +327,23 @@ var mediaKindAllowed = map[string]struct{}{
 // variantToExt maps the requested variant name to the file extension we
 // store under. For thumbnails we use "jpg" regardless of variant since
 // a single thumbnail is enough.
+//
+// ⚠ EVERY LABEL A PHONE CAN NAME ITS UPLOAD MUST BE HERE.
+//
+// The app names its upload after the picture size it measured — see
+// labelForLongSide in the app's NetworkQualityService — and asks us to sign
+// a slot under that name. A label missing from this map has no extension, so
+// buildObjectKey has no key to sign and the whole upload is refused. Not
+// degraded: refused. The person sees their post fail.
+//
+// 360p arrived with the ladder's smallest rung and was missing here, which
+// would have broken uploads of any video 640 pixels or smaller.
+// TestWorkerLadderLabelsAreStorable is what caught it.
 var variantToExt = map[string]string{
+	"360p":     "mp4",
 	"480p":     "mp4",
 	"720p":     "mp4",
+	"720p_hq":  "mp4",
 	"1080p":    "mp4",
 	"original": "mp4",
 	"default":  "jpg", // thumbnail
