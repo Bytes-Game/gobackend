@@ -275,6 +275,7 @@ func TestProgressive_TheLadderMatchesWhatTheAppCanChoose(t *testing.T) {
 	// test here can reach it.
 	known := map[string]bool{
 		"360p": true, "480p": true, "720p": true, "720p_hq": true, "1080p": true,
+		"480p_hevc": true, "720p_hevc": true,
 	}
 	for _, r := range progressiveLadder {
 		if !known[r.label] {

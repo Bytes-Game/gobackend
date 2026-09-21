@@ -340,13 +340,15 @@ var mediaKindAllowed = map[string]struct{}{
 // would have broken uploads of any video 640 pixels or smaller.
 // TestWorkerLadderLabelsAreStorable is what caught it.
 var variantToExt = map[string]string{
-	"360p":     "mp4",
-	"480p":     "mp4",
-	"720p":     "mp4",
-	"720p_hq":  "mp4",
-	"1080p":    "mp4",
-	"original": "mp4",
-	"default":  "jpg", // thumbnail
+	"360p":      "mp4",
+	"480p_hevc": "mp4",
+	"720p_hevc": "mp4",
+	"480p":      "mp4",
+	"720p":      "mp4",
+	"720p_hq":   "mp4",
+	"1080p":     "mp4",
+	"original":  "mp4",
+	"default":   "jpg", // thumbnail
 }
 
 // buildObjectKey constructs the S3 path for one variant of one upload.

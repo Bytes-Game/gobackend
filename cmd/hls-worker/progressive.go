@@ -178,6 +178,55 @@ var progressiveLadder = []progressiveRendition{
 	//
 	// Nobody on wifi ever sees this. It is a floor, not a change of default.
 	{label: "360p", maxLongSide: 640, crf: 26, maxBps: 600_000, audioBps: 64_000},
+	// ════════════════════════════════════════════════════════════════════════
+	// THE SAME TWO PICTURES, IN THE NEWER LANGUAGE
+	// ════════════════════════════════════════════════════════════════════════
+	//
+	// These are not extra sizes. They are the 480p and 720p pictures above,
+	// described in H.265 instead of H.264, which takes about a third fewer
+	// bits for the same thing.
+	//
+	//	480p   1.5 Mbps  ->  480p_hevc   0.9 Mbps
+	//	720p   2.5 Mbps  ->  720p_hevc   1.5 Mbps
+	//
+	// Read the second line again: a phone that can decode H.265 gets the FULL
+	// 720p picture for less than 480p costs today. That is the win, and it is
+	// the one thing on this whole page that makes a video smaller without
+	// making it look worse.
+	//
+	// WHY ONLY TWO
+	//
+	// Encoding H.265 is slower, and the worker already runs out of its twelve
+	// minutes with a queue left over. So these go where they buy the most:
+	// the two picture sizes people actually watch on a phone.
+	//
+	// 360p is left alone because it is already tiny — a third off 600k saves
+	// 200k, and it has to stay H.264 anyway, because it is the floor every
+	// device must be able to play. 720p_hq is left alone because it is the
+	// rung for links with bandwidth to spare, and saving bits there is
+	// solving a problem that rung does not have.
+	//
+	// WHY THEY ARE LAST, AND WHY THAT IS NOT WHAT KEEPS THEM SAFE
+	//
+	// A rung reaching down to a small source is only made when it is cheaper
+	// than what is already planned at that size (see planProgressive). An
+	// H.265 rung is ALWAYS cheaper than its H.264 twin — that is the entire
+	// point — so listing these first would have let each one push its own
+	// fallback off the ladder, leaving older phones with nothing at that size.
+	//
+	// What actually prevents it is that planProgressive plans all the H.264
+	// rungs BEFORE any H.265 one, in an order it builds for itself rather
+	// than reading off this list. By the time an H.265 rung is considered,
+	// the fallback it sits beside is already made and cannot be displaced.
+	//
+	// The cheaper-wins rule is applied per codec too, which is the right
+	// model and stops the two families interfering in either direction. But
+	// it is not what is load-bearing: cutting it leaves the tests green,
+	// because the ordering has already done the work. Cutting the ordering
+	// turns them red. Said plainly, because a comment naming the wrong guard
+	// is worse than no comment.
+	{label: "480p_hevc", maxLongSide: 854, crf: 28, maxBps: 900_000, audioBps: 96_000, hevc: true},
+	{label: "720p_hevc", maxLongSide: 1280, crf: 26, maxBps: 1_500_000, audioBps: 128_000, hevc: true},
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -298,6 +347,29 @@ type progressiveRendition struct {
 	// for how these particular numbers were chosen.
 	maxBps   int
 	audioBps int
+	// hevc picks H.265 instead of H.264 for this rung.
+	//
+	// ════════════════════════════════════════════════════════════════════
+	// THE SAME PICTURE FOR A THIRD FEWER BITS
+	// ════════════════════════════════════════════════════════════════════
+	//
+	// H.264 is from 2003. Every device made since understands it, which is
+	// why it is what we serve. H.265 is the newer way of describing the
+	// same pictures, and it needs roughly 35% fewer bits to describe them
+	// equally well.
+	//
+	// That is the whole point for this app. Fewer bits is a video that
+	// starts sooner and does not stop on mobile data, WITHOUT the picture
+	// getting worse — which is the trade every other lever here forces.
+	//
+	// The catch is that older phones cannot decode it. So these rungs are
+	// added ALONGSIDE the H.264 ones, never instead of them: a phone that
+	// can decode H.265 is served the small file, and a phone that cannot
+	// is served exactly what it gets today. Nobody is left without
+	// something to play. That is what TikTok does, and it is only possible
+	// because the app's chooser already asks "can this device handle this
+	// file" before every pick.
+	hevc bool
 }
 
 // rungForSize returns the rung a source of this size naturally sits at: the
@@ -404,10 +476,15 @@ type plannedRendition struct {
 // longSide is the source's larger side in pixels. bitrate is what the source
 // already spends, or 0 when the container did not say.
 func planProgressive(longSide, bitrate int) []plannedRendition {
-	// Exactly this picture size at exactly this ceiling.
+	// Exactly this picture size at exactly this ceiling, in this codec.
+	//
+	// The codec is part of the key because an H.265 rung is a different file
+	// from an H.264 one even at identical numbers — half the devices can play
+	// one and not the other.
 	type rendition struct {
 		box    int
 		maxBps int
+		hevc   bool
 	}
 	madeExact := map[rendition]bool{}
 	// The CHEAPEST ceiling already planned at each picture size.
@@ -422,10 +499,50 @@ func planProgressive(longSide, bitrate int) []plannedRendition {
 	// exactly what a slow connection needs, and a DEARER one at that size is
 	// what we do not want — it would be the same picture under a bigger
 	// rung's name, which the app reads as both more bits AND more pixels.
-	cheapestAtBox := map[int]int{}
+	// Keyed by codec as well as size. An H.265 rung is always cheaper than
+	// its H.264 twin — that is what H.265 is FOR — so letting them share a
+	// bucket would let each new rung delete the fallback it was meant to sit
+	// beside, and older phones would be left with nothing at that size.
+	//
+	// Per codec, they cannot touch each other: H.264 competes with H.264,
+	// H.265 with H.265.
+	//
+	// This is the right model rather than the active guard — the ordering
+	// below already makes sure a fallback exists before any H.265 rung is
+	// considered. Keep both: the ordering is what holds today, and this is
+	// what keeps holding if the ordering is ever rearranged.
+	type boxCodec struct {
+		box  int
+		hevc bool
+	}
+	cheapestAtBox := map[boxCodec]int{}
+
+	// ════════════════════════════════════════════════════════════════════════
+	// H.264 FIRST, THEN H.265 — AND NOT BY ACCIDENT OF THE LIST
+	// ════════════════════════════════════════════════════════════════════════
+	//
+	// An H.265 rung is only worth making when it comes out SMALLER than the
+	// H.264 file at the same picture size. That answer does not exist until
+	// the H.264 rungs have been planned, so they have to go first.
+	//
+	// Built here rather than trusted to the order of the ladder literal. A
+	// rule that lives in how a list happens to be sorted is a rule the next
+	// person deletes by tidying, and this one decides whether older phones
+	// have anything to play.
+	ordered := make([]progressiveRendition, 0, len(progressiveLadder))
+	for _, r := range progressiveLadder {
+		if !r.hevc {
+			ordered = append(ordered, r)
+		}
+	}
+	for _, r := range progressiveLadder {
+		if r.hevc {
+			ordered = append(ordered, r)
+		}
+	}
 
 	plan := make([]plannedRendition, 0, len(progressiveLadder))
-	for _, r := range progressiveLadder {
+	for _, r := range ordered {
 		// ════════════════════════════════════════════════════════════════════
 		// NEVER ENLARGE THE PICTURE
 		// ════════════════════════════════════════════════════════════════════
@@ -472,7 +589,29 @@ func planProgressive(longSide, bitrate int) []plannedRendition {
 		// Read AFTER the clamp above, so two rungs sharing a picture size
 		// collapse into one whenever the source is leaner than both of their
 		// ceilings — they would otherwise be the same file twice.
-		key := rendition{box: box, maxBps: r.maxBps}
+		key := rendition{box: box, maxBps: r.maxBps, hevc: r.hevc}
+		bc := boxCodec{box: box, hevc: r.hevc}
+
+		// ════════════════════════════════════════════════════════════════
+		// AN H.265 RUNG THAT SAVES NOTHING IS NOT WORTH ENCODING
+		// ════════════════════════════════════════════════════════════════
+		//
+		// H.265 exists here to make a big file smaller. When the source is
+		// already leaner than the H.264 ceiling, both rungs get clamped to
+		// the source's own rate and the H.265 one saves nothing at all —
+		// it is a second file, the same size, that half the devices cannot
+		// play, for an encode that costs more than the H.264 one did.
+		//
+		// A 500-wide upload at 400 kbps is the case: 480p and 480p_hevc
+		// both land at 400 kbps. There is nothing to shrink.
+		//
+		// So the test is the honest one — is this actually smaller than
+		// what we are already serving at this size?
+		if r.hevc {
+			if h264, ok := cheapestAtBox[boxCodec{box: box, hevc: false}]; ok && r.maxBps >= h264 {
+				continue
+			}
+		}
 		if box < r.maxLongSide {
 			// Clamped: this rung is reaching DOWN to a source smaller than
 			// itself, so its name already promises more picture than there
@@ -483,7 +622,7 @@ func planProgressive(longSide, bitrate int) []plannedRendition {
 			// Anything at or above what is already planned here is refused.
 			// It would be the same picture again, no better, under a name
 			// that claims more pixels than the file has.
-			if cheap, ok := cheapestAtBox[box]; ok && r.maxBps >= cheap {
+			if cheap, ok := cheapestAtBox[bc]; ok && r.maxBps >= cheap {
 				continue
 			}
 		} else if madeExact[key] {
@@ -493,8 +632,8 @@ func planProgressive(longSide, bitrate int) []plannedRendition {
 		}
 
 		madeExact[key] = true
-		if cheap, ok := cheapestAtBox[box]; !ok || r.maxBps < cheap {
-			cheapestAtBox[box] = r.maxBps
+		if cheap, ok := cheapestAtBox[bc]; !ok || r.maxBps < cheap {
+			cheapestAtBox[bc] = r.maxBps
 		}
 		plan = append(plan, plannedRendition{rung: r, box: box})
 	}
@@ -575,85 +714,173 @@ func buildProgressiveMP4s(ctx context.Context, src, outDir string, maxSeconds in
 // -preset medium rather than veryfast. The ladder uses veryfast because it
 // encodes four rungs and lives inside a job timeout; this encodes two, and
 // medium buys roughly 20% smaller files at the same quality for CPU we have.
-func encodeProgressive(ctx context.Context, src, out string, r progressiveRendition, box int, hasAudio bool, maxSeconds int) error {
+// hevcVideoArgs is the H.265 half of encodeProgressive.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// THE ONE LINE THAT DECIDES WHETHER APPLE PLAYS THIS AT ALL
+// ════════════════════════════════════════════════════════════════════════════
+//
+//	-tag:v hvc1
+//
+// H.265 inside an MP4 can be labelled two ways: hev1 or hvc1. They describe
+// the same video. ffmpeg writes hev1 by default. Apple plays ONLY hvc1 — an
+// hev1 file opens on an iPhone to a black screen, usually with the sound
+// still playing.
+//
+// It is the classic way to ship broken H.265, and it fails in the worst shape
+// this repo knows: the encode succeeds, the file uploads, the worker logs
+// success, the storage bill goes up, Android plays it perfectly, and only
+// Apple users see a black rectangle. Nothing anywhere says why.
+//
+// TestProgressive_HevcIsTaggedForApple reads the built command and fails
+// without it.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// THE REST IS ABOUT BEING PLAYABLE, NOT ABOUT BEING SMALL
+// ════════════════════════════════════════════════════════════════════════════
+//
+// profile main (8-bit): Main10 carries more colour depth, and a decoder built
+// for Main refuses it outright. Phones that do H.265 at all nearly always do
+// Main; Main10 is a narrower set. The source is 8-bit video off a phone
+// camera, so there is nothing here to gain and devices to lose.
+//
+// preset fast, not medium: x265 is slower than x264, and the worker already
+// runs out of its twelve minutes with a queue left over. fast still
+// compresses far better than x264 at any preset. medium would buy a few
+// percent for encode time this worker does not have.
+//
+// The CRF numbers are NOT x264's scale. x265 lands about four to six higher
+// for the same visible quality, which is why these read 28 and 26 beside the
+// H.264 rungs' 24 and 22. Same picture quality, different unit.
+func hevcVideoArgs(r progressiveRendition) []string {
+	return []string{
+		"-c:v", "libx265",
+		"-crf", fmt.Sprintf("%d", r.crf),
+		"-maxrate", fmt.Sprintf("%d", r.maxBps),
+		"-bufsize", fmt.Sprintf("%d", r.maxBps),
+		"-preset", "fast",
+		"-profile:v", "main",
+		// Apple plays hvc1 and not hev1. See above. Do not remove.
+		"-tag:v", "hvc1",
+		// x265 prints a banner and per-frame stats to stderr, which buries the
+		// real ffmpeg error on the rare occasion there is one.
+		"-x265-params", "log-level=error",
+	}
+}
+
+// scaleFilter fits the picture inside a square box without ever enlarging it.
+//
+// Shared by both codecs on purpose. It carries two fixes that were each paid
+// for once — see the H.264 branch below for the full account — and a copy of
+// it that drifted would re-introduce them for one codec only, which is the
+// hardest kind of bug to notice.
+func scaleFilter(box int) string {
+	return fmt.Sprintf(
+		"scale=w=%d:h=%d:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=30",
+		box, box)
+}
+
+// progressiveArgs builds the ffmpeg command for one rendition.
+//
+// Split out from running it so the command can be CHECKED without ffmpeg
+// installed. Two of the things that matter most about it — the hvc1 tag that
+// decides whether Apple plays H.265 at all, and the shape settings the two
+// codecs must keep in step — are invisible from the outside: a wrong one
+// produces a file that encodes, uploads and plays on the machine that made
+// it. Only some viewers see the failure, and nothing logs it.
+//
+// So they are read off this list on every push, by tests that need no encoder.
+func progressiveArgs(src, out string, r progressiveRendition, box int, hasAudio bool, maxSeconds int) []string {
 	args := []string{"-y", "-i", src}
 	args = append(args, durationCutArgs(maxSeconds)...)
 	args = append(args, "-map", "0:v:0")
 	if hasAudio {
 		args = append(args, "-map", "0:a:0")
 	}
-	args = append(args,
-		"-c:v", "libx264",
-		"-crf", fmt.Sprintf("%d", r.crf),
-		// ════════════════════════════════════════════════════════════════════
-		// THE CEILING, AND WHY CRF ALONE WAS NOT ENOUGH
-		// ════════════════════════════════════════════════════════════════════
-		//
-		// -crf says "hold this quality, spend whatever it takes". On easy
-		// video that is exactly right and the file comes out small. On hard
-		// video — fast cuts, grain, heavy motion — "whatever it takes" is a
-		// lot, and nothing was stopping it.
-		//
-		// Measured on files this encoder actually produced and served:
-		//
-		//	video 251   720p   4.48 Mbps
-		//	video 248   720p   4.64 Mbps
-		//	video 247   720p   4.14 Mbps
-		//	video 241   720p   0.97 Mbps   ← easy content, crf behaving
-		//
-		// The app downloads 768 KB before it starts playing. At 4.5 Mbps that
-		// is 1.4 seconds of video; the player then has to keep pace with a
-		// 4.5 Mbps stream live, and any dip in the connection is a stall.
-		// That was worse than the untouched sources this was meant to fix.
-		//
-		// -maxrate with -bufsize is the standard pairing for this: quality
-		// stays the target, but a stretch of hard video cannot buy its way
-		// past the ceiling.
-		//
-		// bufsize is the window the limit is measured over, and it is one
-		// second's worth rather than the more usual two. Measured by
-		// re-encoding the 4.14 Mbps file this bug shipped:
-		//
-		//	bufsize 2s   2.15 Mbps    768 KB covers 2.9s
-		//	bufsize 1s   2.04 Mbps    768 KB covers 3.1s
-		//	bufsize 0.5s 1.72 Mbps    768 KB covers 3.7s
-		//
-		// A wider window lets the opening seconds run over the ceiling and
-		// pay it back later. Normally that is a good trade. Here it is the
-		// worst place to spend it: the opening is precisely the part the app
-		// pre-downloads, so an overspend there is a shorter head start, which
-		// is the whole problem. Half a second holds the rate tighter still,
-		// at a real cost to quality on scene cuts — reels are all scene cuts.
-		"-maxrate", fmt.Sprintf("%d", r.maxBps),
-		"-bufsize", fmt.Sprintf("%d", r.maxBps),
-		"-preset", "medium",
-		// A square box, so the same setting works on a portrait reel and a
-		// landscape one — whichever side is longer is the one that meets the
-		// limit. The box is pre-clamped to the source by the caller, because
-		// "decrease" alone will enlarge a small video to fill it.
-		//
-		// force_divisible_by=2 — libx264 refuses odd dimensions, and a
-		// portrait source scaled by aspect lands on them constantly. This
-		// failed every upload once already; see transcodeHLS.
-		"-vf", fmt.Sprintf(
-			"scale=w=%d:h=%d:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=30",
-			box, box),
-		// Keyframe every second. Twice as often as the HLS ladder, and worth
-		// it here: a reel loops, and every loop is a seek back to the start.
-		// Sparse keyframes are what makes a loop stutter before it catches.
-		"-g", "30",
-		"-keyint_min", "30",
-		// yuv420p and High@4.0 — the combination every phone shipped in the
-		// last decade can decode in hardware. A source in 4:2:2 or 10-bit
-		// (some newer phones, some editing apps) would otherwise produce a
-		// file that plays on the encoder's machine and nowhere else.
-		"-pix_fmt", "yuv420p",
-		"-profile:v", "high",
-		"-level", "4.0",
-		// The index at the FRONT. This is the whole point of faststart.go,
-		// applied here by construction instead of as a repair.
-		"-movflags", "+faststart",
-	)
+	if r.hevc {
+		args = append(args, hevcVideoArgs(r)...)
+		args = append(args,
+			"-vf", scaleFilter(box),
+			// Same keyframe spacing, pixel format and index placement as the
+			// H.264 rungs, and for the same reasons — see the block below.
+			// TestProgressive_BothCodecsAreShapedTheSame keeps them together.
+			"-g", "30",
+			"-keyint_min", "30",
+			"-pix_fmt", "yuv420p",
+			"-movflags", "+faststart",
+		)
+	} else {
+		args = append(args,
+			"-c:v", "libx264",
+			"-crf", fmt.Sprintf("%d", r.crf),
+			// ════════════════════════════════════════════════════════════════════
+			// THE CEILING, AND WHY CRF ALONE WAS NOT ENOUGH
+			// ════════════════════════════════════════════════════════════════════
+			//
+			// -crf says "hold this quality, spend whatever it takes". On easy
+			// video that is exactly right and the file comes out small. On hard
+			// video — fast cuts, grain, heavy motion — "whatever it takes" is a
+			// lot, and nothing was stopping it.
+			//
+			// Measured on files this encoder actually produced and served:
+			//
+			//	video 251   720p   4.48 Mbps
+			//	video 248   720p   4.64 Mbps
+			//	video 247   720p   4.14 Mbps
+			//	video 241   720p   0.97 Mbps   ← easy content, crf behaving
+			//
+			// The app downloads 768 KB before it starts playing. At 4.5 Mbps that
+			// is 1.4 seconds of video; the player then has to keep pace with a
+			// 4.5 Mbps stream live, and any dip in the connection is a stall.
+			// That was worse than the untouched sources this was meant to fix.
+			//
+			// -maxrate with -bufsize is the standard pairing for this: quality
+			// stays the target, but a stretch of hard video cannot buy its way
+			// past the ceiling.
+			//
+			// bufsize is the window the limit is measured over, and it is one
+			// second's worth rather than the more usual two. Measured by
+			// re-encoding the 4.14 Mbps file this bug shipped:
+			//
+			//	bufsize 2s   2.15 Mbps    768 KB covers 2.9s
+			//	bufsize 1s   2.04 Mbps    768 KB covers 3.1s
+			//	bufsize 0.5s 1.72 Mbps    768 KB covers 3.7s
+			//
+			// A wider window lets the opening seconds run over the ceiling and
+			// pay it back later. Normally that is a good trade. Here it is the
+			// worst place to spend it: the opening is precisely the part the app
+			// pre-downloads, so an overspend there is a shorter head start, which
+			// is the whole problem. Half a second holds the rate tighter still,
+			// at a real cost to quality on scene cuts — reels are all scene cuts.
+			"-maxrate", fmt.Sprintf("%d", r.maxBps),
+			"-bufsize", fmt.Sprintf("%d", r.maxBps),
+			"-preset", "medium",
+			// A square box, so the same setting works on a portrait reel and a
+			// landscape one — whichever side is longer is the one that meets the
+			// limit. The box is pre-clamped to the source by the caller, because
+			// "decrease" alone will enlarge a small video to fill it.
+			//
+			// force_divisible_by=2 — libx264 refuses odd dimensions, and a
+			// portrait source scaled by aspect lands on them constantly. This
+			// failed every upload once already; see transcodeHLS.
+			"-vf", scaleFilter(box),
+			// Keyframe every second. Twice as often as the HLS ladder, and worth
+			// it here: a reel loops, and every loop is a seek back to the start.
+			// Sparse keyframes are what makes a loop stutter before it catches.
+			"-g", "30",
+			"-keyint_min", "30",
+			// yuv420p and High@4.0 — the combination every phone shipped in the
+			// last decade can decode in hardware. A source in 4:2:2 or 10-bit
+			// (some newer phones, some editing apps) would otherwise produce a
+			// file that plays on the encoder's machine and nowhere else.
+			"-pix_fmt", "yuv420p",
+			"-profile:v", "high",
+			"-level", "4.0",
+			// The index at the FRONT. This is the whole point of faststart.go,
+			// applied here by construction instead of as a repair.
+			"-movflags", "+faststart",
+		)
+	}
 	if hasAudio {
 		args = append(args,
 			"-c:a", "aac",
@@ -665,7 +892,11 @@ func encodeProgressive(ctx context.Context, src, out string, r progressiveRendit
 		)
 	}
 	args = append(args, out)
+	return args
+}
 
+func encodeProgressive(ctx context.Context, src, out string, r progressiveRendition, box int, hasAudio bool, maxSeconds int) error {
+	args := progressiveArgs(src, out, r, box, hasAudio, maxSeconds)
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	if o, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w: %s", err, lastLine(string(o)))

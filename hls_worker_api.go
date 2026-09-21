@@ -371,6 +371,9 @@ func HLSCompleteHandler(w http.ResponseWriter, r *http.Request) {
 // TestWorkerLadderLabelsAreAccepted exists to make that impossible to ship.
 var videoVariantLabels = map[string]bool{
 	"360p": true, "480p": true, "720p": true, "720p_hq": true, "1080p": true,
+	// The same 480p and 720p pictures in H.265, about a third smaller. Only
+	// served to devices that say they can decode it — see the app's picker.
+	"480p_hevc": true, "720p_hevc": true,
 }
 
 // storeVideoVariants records the worker's own MP4 renditions.
