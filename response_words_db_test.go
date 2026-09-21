@@ -457,10 +457,16 @@ func TestAdminAnalysisRead_RunsAgainstARealResponsesTable(t *testing.T) {
 
 	cid := auditChallenge(t, map[string]any{"subject": "who cooks better"})
 	rid := answerFixture(t, cid, `["night market"]`, `["food"]`, `["chaat"]`)
+	// creator_category is what the RESPONDER said. category is the app's own
+	// best answer, and it is deliberately set to something else here: this
+	// view exists to compare a person against the model, so it must read the
+	// person's column and not the app's. Setting them to the same value
+	// would let a version that reads either one pass.
 	if _, err := db.Exec(`
 		UPDATE challenge_responses
 		   SET video_analysis = '{"passes":["understand"],"autoTags":["food"]}'::jsonb,
-		       category = 'comedy'
+		       creator_category = 'comedy',
+		       category = 'dance'
 		 WHERE id = $1`, rid); err != nil {
 		t.Fatalf("store an analysis: %v", err)
 	}
@@ -471,7 +477,9 @@ func TestAdminAnalysisRead_RunsAgainstARealResponsesTable(t *testing.T) {
 			"have takes down the whole listing", len(rows))
 	}
 	if rows[0].CreatorCategory != "comedy" {
-		t.Errorf("the responder's category came back as %q, want comedy",
+		t.Errorf("the responder's category came back as %q, want comedy. "+
+			"If it came back \"dance\" this view is reading the app's own "+
+			"answer and calling it the responder's word.",
 			rows[0].CreatorCategory)
 	}
 	if rows[0].MachineCategory != "food" {

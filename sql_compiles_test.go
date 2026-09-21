@@ -266,6 +266,7 @@ var runByATest = map[string]string{
 	"admin_hls_queue.go:readHLSQueue":       "TestRuntimeQueries_TableNameFromAParameter",
 	"media_requeue.go:requeueByID":          "TestRuntimeQueries_TableNameFromAParameter",
 	"video_analysis.go:storeVideoAnalysis":  "TestRuntimeQueries_TableNameFromAParameter",
+	"video_analysis.go:settleCategory":       "TestSettleCategory_WritesTheModelsAnswerToTheRow",
 	"hls_worker_api.go:storeVideoVariants":  "TestRuntimeQueries_WorkerWritesToBothTables",
 	"hls_worker_api.go:storeVideoThumbnail": "TestRuntimeQueries_WorkerWritesToBothTables",
 	"media_analysis_read.go:readAnalysisRows": "TestAdminAnalysisRead_RunsAgainstARealResponsesTable",

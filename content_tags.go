@@ -461,3 +461,26 @@ func categoryFromEvidence(machineTags, creatorTags []string, explicit, subject, 
 // side wins a disagreement. That is exactly what CategorySource is recorded
 // for.
 const disputedCategoryTrust = 0.6
+
+// categorySourceAtUpload says where a just-stored category came from, at the
+// only moment where the answer is knowable cheaply: the insert itself.
+//
+// It is deliberately blind to the machine. Nothing has watched the video yet
+// at upload time — the transcode worker has not even claimed it — so the only
+// honest answers here are "the creator said so" and "we worked it out". When
+// the worker finishes, settleCategory overwrites this with the real verdict.
+//
+// See migrations/010 for why a column recording this had to exist at all.
+func categorySourceAtUpload(creatorCategory, stored string) string {
+	if creatorCategory != "" && creatorCategory == stored {
+		return "creator"
+	}
+	if stored == "" || !isRealCategoryClaim(stored) {
+		return ""
+	}
+	return "guess"
+}
+
+// isRealCategoryClaim reports whether a stored category says anything at all.
+// Same rule as usableCategory, named for the question callers are asking.
+func isRealCategoryClaim(stored string) bool { return usableCategory(stored) != "" }
