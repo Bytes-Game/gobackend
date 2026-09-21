@@ -380,7 +380,14 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("admin requeue: %d %s rows put back in the transcode queue", n, table)
-	if req.Missing != "" {
+	// Guarded on the pointer itself, not on req.Missing.
+	//
+	// The two say the same thing today — the count is only taken when a
+	// rendition was named — and that is the problem: it is true because two
+	// separate blocks agree, not because anything makes them agree. Reading
+	// the pointer through a condition somewhere else is how a nil
+	// dereference gets introduced later by an edit that looks harmless.
+	if stillMissing != nil {
 		log.Printf("admin requeue: %s rows still without a %s rendition: %d",
 			table, req.Missing, *stillMissing)
 	}
