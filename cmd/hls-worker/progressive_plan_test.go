@@ -150,19 +150,19 @@ func TestPlan_ASourceSmallerThanEveryRungStillGetsACheapOne(t *testing.T) {
 	}
 }
 
-func TestPlan_NothingIsNamedBiggerThanItIs(t *testing.T) {
-	// A rendition's label is read by the app as BOTH a bitrate and a picture
-	// size — see NetworkQualityService's _labelRank and decodeRank. So a
-	// 640-wide file called "720p" is two lies: it tells a low-RAM phone to
-	// skip a file it could easily decode, and it tells the picker the file
-	// costs 2.5 Mbps.
-	//
-	// The rule that prevents it: a rung reaching DOWN to a smaller source is
-	// only kept when it is CHEAPER than anything already planned at that
-	// size. A dearer one would be the same picture under a bigger name.
+func TestPlan_NeverPlansAPictureBiggerThanTheSource(t *testing.T) {
+	// ffmpeg's "fit inside this box" does NOT mean "only shrink" — it will
+	// happily grow a smaller source to fill the box. A real upload, 960x720,
+	// came out of the 720p rung at 1280x960: more pixels than it started
+	// with, no more detail, and a file 97% the size of the original instead
+	// of a third of it.
 	for _, longSide := range []int{320, 480, 500, 640, 720, 854, 960, 1080, 1280, 1920} {
 		for _, bitrate := range []int{0, 400_000, 1_200_000, fatEnough()} {
 			plan := planProgressive(longSide, bitrate)
+			if len(plan) == 0 {
+				t.Errorf("%dx source at %d bps got no renditions at all",
+					longSide, bitrate)
+			}
 			bySize := map[int][]string{}
 			for _, p := range plan {
 				if p.box > longSide {
@@ -172,8 +172,6 @@ func TestPlan_NothingIsNamedBiggerThanItIs(t *testing.T) {
 				}
 				bySize[p.box] = append(bySize[p.box], p.rung.label)
 			}
-			// At most one rung per picture size may be a "reaching down" one,
-			// and it has to be the cheapest there.
 			for box, labels := range bySize {
 				if len(labels) < 2 {
 					continue
@@ -182,6 +180,38 @@ func TestPlan_NothingIsNamedBiggerThanItIs(t *testing.T) {
 				t.Logf("%dx @%d: box %d holds %v", longSide, bitrate, box,
 					strings.Join(labels, ","))
 			}
+		}
+	}
+}
+
+func TestPlan_ALabelMeansThePictureSizeItSays(t *testing.T) {
+	// ══════════════════════════════════════════════════════════════════════
+	// A NAME IS READ AS A SIZE, NOT JUST A BITRATE
+	// ══════════════════════════════════════════════════════════════════════
+	//
+	// The app reads a rendition's name as BOTH what it costs and how many
+	// pixels it has — see _labelRank and decodeRank in the app's
+	// NetworkQualityService. A 640-wide file called "720p" is two lies at
+	// once: it tells a low-RAM phone to skip a file it could easily have
+	// decoded, and it tells the picker the file costs 2.5 Mbps when it does
+	// not.
+	//
+	// For a source smaller than a rung there is no way round it — the picture
+	// is the size it is, and the file has to be called something. But for a
+	// source at least as big as every rung, which is what a phone actually
+	// uploads, each name must mean exactly the size it says.
+	plan := planProgressive(1920, fatEnough())
+	for _, r := range progressiveLadder {
+		box, ok := boxOf(plan, r.label)
+		if !ok {
+			t.Errorf("a 1920-wide source produced no %s at all", r.label)
+			continue
+		}
+		if box != r.maxLongSide {
+			t.Errorf("%s came out %d pixels wide from a source big enough for "+
+				"its full %d. The app reads that name as %d pixels, so it "+
+				"would judge this file by a size it does not have.",
+				r.label, box, r.maxLongSide, r.maxLongSide)
 		}
 	}
 }
