@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -82,19 +83,31 @@ func TestRequeue_BatchSizeIsBounded(t *testing.T) {
 // across the file was the previous approach and it would pass happily with a
 // guard in one statement and a hole in the other — which is exactly what a
 // guard test must not do.
-func requeueUpdates(t *testing.T) (batch, byID string) {
+// requeueUpdateCount is how many re-queue UPDATE statements media_requeue.go
+// is expected to hold.
+//
+// Pinned so a NEW way of choosing rows cannot be added without the guard
+// tests below seeing it. This used to read only the first statement in each
+// half of the file, and the day a second batch selection was added — pick the
+// videos missing a rendition — the guard tests silently moved onto it and
+// stopped checking the original. Two paths, one of them unguarded, and every
+// test still green.
+const requeueUpdateCount = 3
+
+// requeueUpdates returns every re-queue UPDATE in the file, flattened to one
+// line each and keyed by which path it is.
+//
+// A source-level test is unusual and it is here because these guards are SQL:
+// a clause that loses a leg still compiles, still runs, and still returns rows
+// — just the wrong ones, against production video.
+func requeueUpdates(t *testing.T) map[string]string {
 	t.Helper()
 	src := readSourceFile(t, "media_requeue.go")
 	split := strings.Index(src, "func requeueByID(")
 	if split < 0 {
 		t.Fatal("requeueByID is gone; move these tests with it")
 	}
-	flat := func(s string) string {
-		i := strings.Index(s, "SET hls_manifest_url = ''")
-		if i < 0 {
-			t.Fatal("no re-queue UPDATE found in one half of media_requeue.go")
-		}
-		s = s[i:]
+	flatten := func(s string) string {
 		// Stop at the end of the SQL literal, so one path cannot be read as
 		// containing a guard that actually lives further down the file.
 		j := strings.Index(s, "`,")
@@ -109,7 +122,53 @@ func requeueUpdates(t *testing.T) (batch, byID string) {
 		s = strings.ReplaceAll(s, "`+table+`", "the_table")
 		return regexp.MustCompile(`\s+`).ReplaceAllString(s, " ")
 	}
-	return flat(src[:split]), flat(src[split:])
+	// Every statement, not the first one. Named by where it is and what it
+	// filters on, so a failure says which path is wrong.
+	all := func(half string) []string {
+		var out []string
+		for {
+			i := strings.Index(half, "SET hls_manifest_url = ''")
+			if i < 0 {
+				return out
+			}
+			half = half[i:]
+			out = append(out, flatten(half))
+			half = half[len("SET hls_manifest_url = ''"):]
+		}
+	}
+	found := map[string]string{}
+	for i, q := range all(src[:split]) {
+		name := "batch " + strconv.Itoa(i+1)
+		if strings.Contains(q, "video_variants") {
+			name = "batch: missing a rendition"
+		} else if strings.Contains(q, "ORDER BY created_at") {
+			name = "batch: oldest first"
+		}
+		found[name] = q
+	}
+	for i, q := range all(src[split:]) {
+		name := "by id"
+		if i > 0 {
+			name = "by id " + strconv.Itoa(i+1)
+		}
+		found[name] = q
+	}
+	if len(found) != requeueUpdateCount {
+		t.Fatalf("found %d re-queue UPDATEs (%v) and expected %d. If a new "+
+			"way of choosing rows was added, add it to the count so the "+
+			"guards below cover it — do not leave one unchecked.",
+			len(found), keysOf(found), requeueUpdateCount)
+	}
+	return found
+}
+
+func keysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func TestRequeue_NeverDisturbsAVideoAWorkerIsHolding(t *testing.T) {
@@ -120,8 +179,7 @@ func TestRequeue_NeverDisturbsAVideoAWorkerIsHolding(t *testing.T) {
 	// Source-level because the guard is a WHERE clause, and a WHERE clause
 	// that loses a leg still compiles and still returns rows — against real
 	// video.
-	batch, byID := requeueUpdates(t)
-	for name, sql := range map[string]string{"batch": batch, "by id": byID} {
+	for name, sql := range requeueUpdates(t) {
 		if !strings.Contains(sql, "hls_manifest_url <> 'PENDING'") {
 			t.Errorf("the %s path can reset a video a worker is holding", name)
 		}
@@ -138,12 +196,17 @@ func TestRequeue_BatchPathOnlyTakesFinishedVideos(t *testing.T) {
 	// still waiting its turn is already queued, and one that never finished
 	// is a different problem — see the by-id path below, which is where
 	// somebody names it deliberately.
-	batch, _ := requeueUpdates(t)
-	if !strings.Contains(batch, "hls_manifest_url <> '' AND") ||
-		strings.Contains(batch, "OR hls_attempts") {
-		t.Error("the oldest-first batch no longer restricts itself to videos " +
-			"that finished, so a routine re-encode sweep can now reach videos " +
-			"that are mid-queue or broken")
+	// Both batch paths, not just the first one in the file.
+	for name, sql := range requeueUpdates(t) {
+		if !strings.HasPrefix(name, "batch") {
+			continue
+		}
+		if !strings.Contains(sql, "hls_manifest_url <> '' AND") ||
+			strings.Contains(sql, "OR hls_attempts") {
+			t.Errorf("the %q sweep no longer restricts itself to videos that "+
+				"finished, so a routine re-encode can now reach videos that "+
+				"are mid-queue or broken", name)
+		}
 	}
 }
 
@@ -154,7 +217,7 @@ func TestRequeue_ByIDRescuesAVideoTheQueueGaveUpOn(t *testing.T) {
 	// will not offer it again, so nothing plays and nothing retries. Fifteen
 	// were in that state in production, and naming every one of them returned
 	// "skipped" with no way to do anything about it.
-	_, byID := requeueUpdates(t)
+	byID := requeueUpdates(t)["by id"]
 
 	rescue := "(hls_manifest_url <> '' OR hls_attempts >= " +
 		strconv.Itoa(maxHLSAttempts) + ")"
