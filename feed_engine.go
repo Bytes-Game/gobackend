@@ -5646,10 +5646,51 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 			hasMore = hasMore || feedKindHasMore(rawPage, len(items), clientLimit, limit)
 		}
 
+		// ════════════════════════════════════════════════════════════════
+		// REMEMBER WHAT THIS PAGE SHOWED. THIS PATH USED TO FORGET.
+		// ════════════════════════════════════════════════════════════════
+		//
+		// Everything below this comment is the one thing the cold-start
+		// branch never did: it built a page, sent it, and returned — right
+		// past the markShownBatch that the warm path runs further down. So
+		// nothing a new account was shown was ever recorded.
+		//
+		// The cost is not subtle, and a device log caught it exactly:
+		//
+		//   feed forYou page 1: 17 items  new=17 repeat=0 againThisRun=0
+		//   feed forYou page 1: 17 items  new=17 repeat=0 againThisRun=18
+		//
+		// The same seventeen videos, twice, and the server called every one
+		// of them new both times. The app knew better; it had counted.
+		//
+		// It hits the worst possible cohort. A cold-start user is a brand-new
+		// account, this is their first session, and cold-start paging is
+		// keyed to the page number — so page 1 is the same top videos every
+		// time it is asked for. With nothing recorded there is nothing to
+		// rank them down, and refreshing changes nothing at all. That is the
+		// first thing a new user does when a feed looks stuck.
+		//
+		// It also explains why the page was SHORT whenever this happened
+		// (17 or 18 of the 20 asked for, and exactly 6 on later pages — the
+		// cold-start short budget). Same cause, two symptoms: this branch,
+		// which both caps the page per kind and forgets what it served.
+		//
+		// Sink first, then record. Already-watched items drop below fresh
+		// ones and are labelled as repeats (see sinkSeenItems), which is all
+		// a page can do when the catalogue is smaller than a page — it will
+		// not invent videos that do not exist, and it no longer claims they
+		// are new.
+		items = sinkSeenItems(items, loadSeenSet(userID))
+
 		// Last step before encoding: make every item playable on the phone
 		// that asked. AFTER finalizeFeedItems so the adaptive-streaming check
 		// sees the manifest URLs it just filled in.
 		items = applyDeviceFit(items, deviceMax)
+
+		// Before encoding, not after: the response write can fail or the
+		// client can vanish, and the next request must still know what this
+		// one served. Same call, same argument order, as the warm path.
+		markShownBatch(userID, items)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{

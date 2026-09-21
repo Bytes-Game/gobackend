@@ -44,19 +44,44 @@ func TestSeenSetRecordsOnlyWhatWasServed(t *testing.T) {
 		}
 		text := string(src)
 
-		mark := strings.Index(text, "markShownBatch(userID, items)")
-		if mark < 0 {
+		// EVERY recording site, not just the first.
+		//
+		// This used to take strings.Index of each, which silently assumed one
+		// recording site per file. The moment SmartFeedHandler grew a second
+		// one — the cold-start branch, which had been serving pages without
+		// recording them at all — the comparison started pairing the cold
+		// branch's write against the WARM branch's filter and reporting a
+		// fault that did not exist. A check that cannot survive a second call
+		// site is a check that goes off at the wrong time and gets switched
+		// off.
+		//
+		// The rule itself never needed the assumption: by the time ANY
+		// recording happens, the page must already be narrowed to the tab.
+		// So every occurrence is paired with the nearest filter above it.
+		marks := allIndexes(text, "markShownBatch(userID, items)")
+		if len(marks) == 0 {
 			t.Fatalf("%s: no markShownBatch call found. If impressions moved "+
 				"somewhere else, this test has to move with them — do not "+
 				"just delete it", c.file)
 		}
-		filter := indexOfAny(text, "filterFeedKindScored(composed, kindFilter)",
-			"filterFeedKind(items, kindFilter)")
-		if filter < 0 {
+		filters := append(
+			allIndexes(text, "filterFeedKindScored(composed, kindFilter)"),
+			allIndexes(text, "filterFeedKind(items, kindFilter)")...)
+		if len(filters) == 0 {
 			t.Fatalf("%s: no kind filter found", c.file)
 		}
 
-		if filter > mark {
+		for _, mark := range marks {
+			narrowed := false
+			for _, f := range filters {
+				if f < mark {
+					narrowed = true
+					break
+				}
+			}
+			if narrowed {
+				continue
+			}
 			t.Errorf(`%s — %s: the tab filter runs AFTER the seen-set write.
 
 That records videos the viewer never saw as watched. On a Battles page it
@@ -67,6 +92,23 @@ Move the filter above markShownBatch. The seen-set is a claim about what
 reached the phone, so it has to be written from the final page.`,
 				c.file, c.handler)
 		}
+	}
+}
+
+// allIndexes returns every position of needle, not just the first.
+//
+// The whole reason this exists: a file may record impressions from more than
+// one branch, and a rule about ordering has to hold at each of them. Checking
+// only the first both misses a later violation and misreports a valid one.
+func allIndexes(text, needle string) []int {
+	var out []int
+	for at := 0; ; {
+		i := strings.Index(text[at:], needle)
+		if i < 0 {
+			return out
+		}
+		out = append(out, at+i)
+		at += i + len(needle)
 	}
 }
 
