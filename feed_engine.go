@@ -3143,14 +3143,16 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 
 	// Category, creator info, and created_at — single query per content type
 	if contentType == "challenge" {
-		var subject, prefix, dbCategory, dbEnergy string
+		var subject, prefix, dbCategory, creatorCategory, dbEnergy string
 		var emotionJSON, tagsJSON, autoTagsJSON, topicsJSON, analysisJSON []byte
 		var creatorID, league string
 		var followers, wins, losses, respCount, chViews, chLikes int
 		var createdAt time.Time
 		if err := db.QueryRow(`
 			SELECT COALESCE(c.subject,''), COALESCE(c.prefix,''),
-			COALESCE(c.category,'other'), COALESCE(c.energy_level,'medium'),
+			COALESCE(c.category,'other'),
+			COALESCE(c.creator_category,''),
+			COALESCE(c.energy_level,'medium'),
 			COALESCE(c.emotion_tags,'[]'::JSONB),
 			COALESCE(c.custom_tags,'[]'::JSONB),
 			COALESCE(c.auto_tags,'[]'::JSONB),
@@ -3165,7 +3167,7 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			FROM challenges c
 			JOIN users u ON c.creator_id = u.id
 			WHERE c.id = $1`, contentID).Scan(
-			&subject, &prefix, &dbCategory, &dbEnergy, &emotionJSON, &tagsJSON,
+			&subject, &prefix, &dbCategory, &creatorCategory, &dbEnergy, &emotionJSON, &tagsJSON,
 			&autoTagsJSON, &topicsJSON, &analysisJSON,
 			&creatorID, &league, &followers, &wins, &losses, &createdAt, &respCount,
 			&chViews, &chLikes); err != nil {
@@ -3276,9 +3278,34 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 		// The two sides are passed separately and deliberately. Merged
 		// into one list the creator's tags come first and would win on
 		// position alone, which is the old behaviour under a new name.
+		//
+		// creator_category, NOT category. That is the whole point of the
+		// column existing. category is the app's best answer and holds
+		// whatever won at upload — including a keyword guess this server
+		// made off the title. Handing that in as "what the creator said"
+		// meant our own guess got weighed against the model as if a person
+		// had made a claim, and Disputed() reported a disagreement between
+		// the model and somebody who never said anything.
 		catVerdict := categoryFromEvidence(
 			normalizeTags(rawAutoTags), normalizeTags(rawTags),
-			dbCategory, subject, prefix, analysisText(analysis))
+			creatorCategory, subject, prefix, analysisText(analysis))
+		// The stored category is still worth something, but only as a LAST
+		// resort and never as somebody's claim.
+		//
+		// Every row that existed before creator_category did has it empty,
+		// because for those rows there is no way to tell a creator's pick
+		// from this server's guess (see migrations/010). Without this, a
+		// video whose creator really did choose "food", and which the model
+		// cannot make sense of, would drop all the way to keyword-matching
+		// its own title — worse than what shipped before.
+		//
+		// So: when nothing else knew, and the column holds a real answer,
+		// use it. Source stays "guess" because that is what it is; this
+		// swaps one guess for a better-informed one, it does not turn it
+		// into a claim.
+		if catVerdict.Source == "guess" && usableCategory(dbCategory) != "" {
+			catVerdict.Category = usableCategory(dbCategory)
+		}
 		cs.Category = catVerdict.Category
 		cs.CategorySource = catVerdict.Source
 		cs.CategoryDisputed = catVerdict.Disputed()

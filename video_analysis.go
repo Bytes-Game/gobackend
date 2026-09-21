@@ -45,9 +45,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"strconv"
+	"strings"
 )
 
 // VideoAnalysis mirrors the worker's struct. Kept as its own declaration
@@ -136,6 +138,10 @@ func storeVideoAnalysis(table string, id int, raw json.RawMessage) {
 		return
 	}
 
+	// Now the video has actually been watched, decide what it IS and write
+	// that down. See settleCategory — this is the wire that was missing.
+	settleCategory(table, id, tags, &a)
+
 	// Tell search the video now has words attached to it.
 	//
 	// Without this the whole reading, listening and looking pipeline was
@@ -148,6 +154,120 @@ func storeVideoAnalysis(table string, id int, raw json.RawMessage) {
 	if table == "challenges" {
 		go reindexChallengeForSearch(id)
 	}
+}
+
+// settleCategory writes down what the video turned out to be, now that
+// something has actually watched it.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY THIS HAD TO EXIST
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The category column was written once, at upload, before a single frame had
+// been looked at. Nothing ever updated it. The model's conclusion went into
+// auto_tags and stayed there.
+//
+// The feed got away with that because it recomputes the answer from auto_tags
+// every time it scores something — so ranking used the model. Nothing else
+// did. The creator dashboard's "by category", any report that groups by it,
+// the admin views: all of them read the column, and the column still held a
+// keyword guess at a title from before the video existed as anything but
+// bytes.
+//
+// So the pipeline that reads, listens to and looks at every upload was
+// invisible to every part of the app that asks the database a question. A
+// feature that works and that nothing calls, which is the most common bug in
+// this repo — this one just took the long way round.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHAT IT WILL AND WILL NOT OVERWRITE
+// ════════════════════════════════════════════════════════════════════════════
+//
+// category is replaced ONLY when the model actually had an opinion. If it
+// looked and could not tell, the upload-time answer stays: that answer had
+// the creator's own pick and their tags behind it, and replacing it with a
+// fresh keyword guess at the same title would be a downgrade dressed up as
+// an update.
+//
+// machine_category is written every time, including as empty. "The model
+// looked and had nothing to say" is a real finding, and one somebody reading
+// this row needs to be able to tell apart from "nothing has looked yet".
+//
+// creator_category is never touched here. It is the one column in this group
+// that holds a claim by a person, and no machine gets to write to it.
+func settleCategory(table string, id int, machineTags []string, a *VideoAnalysis) {
+	if db == nil {
+		return
+	}
+
+	// What the creator gave us, read back rather than assumed. creator_category
+	// holds only a real pick — see migrations/010.
+	var creatorCategory, subject, prefix, creatorTagsJSON string
+	q := `SELECT COALESCE(creator_category,''), COALESCE(custom_tags::text,'[]'), '', ''
+	        FROM challenge_responses WHERE id = $1`
+	if table == "challenges" {
+		q = `SELECT COALESCE(creator_category,''), COALESCE(custom_tags::text,'[]'),
+		            COALESCE(subject,''), COALESCE(prefix,'')
+		       FROM challenges WHERE id = $1`
+	}
+	if err := db.QueryRow(q, id).Scan(
+		&creatorCategory, &creatorTagsJSON, &subject, &prefix); err != nil {
+		queryFailed(
+			fmt.Sprintf("settleCategory: could not read %s id=%d back", table, id),
+			"leaving its category at the value upload gave it", err)
+		return
+	}
+	var creatorTags []string
+	if !jsonUnmarshalQuiet([]byte(creatorTagsJSON), &creatorTags) {
+		log.Printf("settleCategory: %s id=%d has unreadable custom_tags — "+
+			"deciding its category without the creator's own words", table, id)
+	}
+
+	// The same decision the ranker makes, from the same function, so the
+	// stored answer and the ranked answer cannot drift apart.
+	v := categoryFromEvidence(
+		machineTags, normalizeTags(creatorTags),
+		creatorCategory, subject, prefix, analysisText(a))
+
+	// One statement so a row is never briefly half-updated, and so "the model
+	// had no opinion" is recorded without discarding what upload decided.
+	//
+	// EVERY PARAMETER IS CAST. $2 appears three times — once as the value of
+	// a VARCHAR column and twice compared against '' — and without the casts
+	// Postgres deduces a different type each time and refuses the whole
+	// statement: "inconsistent types deduced for parameter $2". That is not a
+	// warning and it is not partial; nothing is written at all, for every
+	// video, forever. It is the same trap as CAST($1::text AS INT) elsewhere
+	// in this repo, and it got through review here once already — the test
+	// that runs this statement is what caught it.
+	if _, err := db.Exec(
+		`UPDATE `+table+`
+		    SET machine_category = $2::text,
+		        category        = CASE WHEN $2::text <> '' THEN $3::text ELSE category END,
+		        category_source = CASE WHEN $2::text <> '' THEN $4::text ELSE category_source END
+		  WHERE id = $1`,
+		id, v.Machine, v.Category, v.Source,
+	); err != nil {
+		queryFailed(
+			fmt.Sprintf("settleCategory: could not save the verdict for %s id=%d", table, id),
+			"the video keeps the category it was given at upload, so the feed "+
+				"still ranks it correctly but reports about it will not", err)
+		return
+	}
+
+	// Worth a line either way. A reader asking "did watching this video change
+	// what we think it is" should not have to infer the answer from silence.
+	if v.Machine == "" {
+		log.Printf("category: %s id=%d — the model looked and could not tell; "+
+			"keeping what upload decided", table, id)
+		return
+	}
+	if v.Disputed() {
+		log.Printf("category: %s id=%d is %q (the model), though its creator "+
+			"said %q", table, id, v.Machine, v.Creator)
+		return
+	}
+	log.Printf("category: %s id=%d is %q (%s)", table, id, v.Category, v.Source)
 }
 
 // reindexChallengeForSearch re-upserts one challenge into the search index
@@ -228,23 +348,55 @@ func hasAnalysisPass(a *VideoAnalysis, name string) bool {
 	return false
 }
 
-// analysisText is everything the video said, on screen and out loud, as one
-// string for the keyword matchers to read.
+// analysisText is every word the machine has about a video — what was said
+// out loud, what was written on screen, and what the model said it SAW — as
+// one string for the keyword matchers to read.
 //
 // The existing category and emotion matchers take text and look for words in
 // it. Handing them this means the machine's findings reach both without
 // either needing to learn about analysis at all.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// TOPICS ARE IN HERE, AND LEAVING THEM OUT COST THE SILENT HALF EVERYTHING
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Most of this catalogue says nothing. Of 114 videos, 79 produce no
+// transcript, and 62 of those have no readable text on screen either. For
+// every one of them ScreenText and Speech are both empty, so this used to
+// return "" — and "" is what reached the last-resort category guess and the
+// mood matcher.
+//
+// Those videos are not evidence-free. The worker LOOKS at them (see
+// understand_frames.go) and the model writes down what it saw: "street food",
+// "temple doorway", "cricket bat". Those phrases were the only words in
+// existence about that video, they were sitting in the same struct, and the
+// one function whose whole job is "hand the matchers every word we have" did
+// not pass them on.
+//
+// So the pass that exists precisely to rescue silent videos was rescuing them
+// into a dead end. Topics went to the ranker's topic matching and nowhere
+// else; the category fallback still had nothing to read and dropped back to
+// keyword-matching the creator's subject line, which is the guess the whole
+// understanding pipeline was built to replace.
 func analysisText(a *VideoAnalysis) string {
 	if a == nil {
 		return ""
 	}
-	if a.ScreenText == "" {
-		return a.Speech
+	parts := make([]string, 0, 3)
+	if a.ScreenText != "" {
+		parts = append(parts, a.ScreenText)
 	}
-	if a.Speech == "" {
-		return a.ScreenText
+	if a.Speech != "" {
+		parts = append(parts, a.Speech)
 	}
-	return a.ScreenText + " " + a.Speech
+	// Last, so a video that both speaks AND was looked at reads in the order
+	// the evidence was gathered. Joined with a space like the other two: these
+	// are separate short phrases, and running them together would invent words
+	// that are in none of them.
+	if len(a.Topics) > 0 {
+		parts = append(parts, strings.Join(a.Topics, " "))
+	}
+	return strings.Join(parts, " ")
 }
 
 // jsonUnmarshalQuiet decodes into v and reports success, for the many callers

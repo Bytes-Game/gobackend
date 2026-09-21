@@ -158,13 +158,32 @@ func TestSpeech_ReachesTheThingsThatJudgeAVideo(t *testing.T) {
 	// contributes little, but the path has to be complete now or a longer
 	// upload later would still be judged on nothing.
 	//
-	// Three consumers, and all three must see it.
+	// The backend's own text view is checked by CALLING it rather than by
+	// searching for the expression that used to build it.
+	//
+	// It was a source match, for the literal `a.ScreenText + " " + a.Speech`.
+	// That is a check on one way of writing the function, not on what it
+	// does — and it went red the day the function started carrying what the
+	// model SAW as well, which is strictly more of what this test is about.
+	// A source match cannot tell an improvement from a regression. Asking
+	// the function can.
+	said := analysisText(&VideoAnalysis{
+		ScreenText: "biryani recipe",
+		Speech:     "today we are making hyderabadi biryani",
+	})
+	for _, want := range []string{"biryani recipe", "hyderabadi biryani"} {
+		if !strings.Contains(said, want) {
+			t.Errorf("video_analysis.go: the backend's own text view of a "+
+				"video dropped %q — it returned %q", want, said)
+		}
+	}
+
+	// The other two are still read from source: neither is reachable from a
+	// test here (one lives in the worker binary, one needs a Meili client).
 	for _, c := range []struct{ file, needs, why string }{
 		{"cmd/hls-worker/understand.go", "a.ScreenText + \"\\n\" + a.Speech",
 			"the model that decides what a video is about is not shown what " +
 				"was said in it"},
-		{"video_analysis.go", "a.ScreenText + \" \" + a.Speech",
-			"the backend's own text view of a video drops the transcript"},
 		{"meilisearch.go", "a.ScreenText + \" \" + a.Speech",
 			"what somebody said out loud is not searchable, so a video about " +
 				"biryani cannot be found by searching biryani"},

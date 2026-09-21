@@ -76,6 +76,26 @@ const alterStmts = `
 	DO $$ BEGIN ALTER TABLE posts ADD COLUMN emotion_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE posts ADD COLUMN energy_level VARCHAR(10) DEFAULT 'medium'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN custom_tags JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	-- Who said what this video is, kept apart from the app's best answer.
+	--
+	-- category is the answer. These three say where it came from, because one
+	-- column holding "the creator picked this" and "we guessed this off the
+	-- title" is how a guess this server made ends up being weighed against
+	-- the model as though a person had made a claim.
+	--
+	--   creator_category  ONLY a human's pick. '' = they did not pick.
+	--   machine_category  what the model concluded. '' = it had no opinion.
+	--   category_source   agreed | machine | creator | guess | '' (pre-dates this)
+	--
+	-- Mirrored from migrations/010 so a database built from scratch by this
+	-- function has them too. A check that reads only one of the two systems
+	-- is blind to half the schema — see migrations/README.md.
+	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN creator_category VARCHAR(30) NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN machine_category VARCHAR(30) NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN category_source  VARCHAR(16) NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN creator_category VARCHAR(30) NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN machine_category VARCHAR(30) NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN category_source  VARCHAR(16) NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	-- Suggestions the creator has turned down. Kept so the same ones are not
 	-- offered again every time they open their own video — see
 	-- tag_suggestions.go. Separate from custom_tags because "no" and "not yet
@@ -752,6 +772,15 @@ func runMigrations() error {
 	if err := applyVersionedMigrations(); err != nil {
 		return err
 	}
+
+	// Give the videos that already exist the answers the new provenance
+	// columns were built to hold. Deliberately AFTER the versioned
+	// migrations, because it reads and writes the columns they add.
+	//
+	// Not fatal, unlike a migration: the worst case is that old videos keep
+	// the category upload gave them, which is the state the app handled for
+	// its whole life until now. See backfill_category_provenance.go.
+	backfillCategoryProvenance()
 
 	log.Println("Database migrations completed")
 	return nil
@@ -1686,11 +1715,20 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 		tagsJSON = []byte("[]")
 	}
 
+	// What the CREATOR actually said, kept apart from what we worked out.
+	//
+	// usableCategory strips the two words that mean "nobody chose" ('other'
+	// and 'general'), so this column only ever holds a real pick by a person.
+	// category above may be that pick, or their tags, or a keyword guess at
+	// the subject line — and until this column existed there was no way to
+	// tell which, so the ranker weighed our own guesses against the model as
+	// though somebody had made a claim. See migrations/010.
+	creatorCategory := usableCategory(strings.ToLower(strings.TrimSpace(payload.Category)))
 	err = db.QueryRow(
-		`INSERT INTO challenges (creator_id, video_url, video_variants, thumbnail_url, prefix, subject, visibility, category, emotion_tags, custom_tags, energy_level)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, created_at`,
+		`INSERT INTO challenges (creator_id, video_url, video_variants, thumbnail_url, prefix, subject, visibility, category, creator_category, category_source, emotion_tags, custom_tags, energy_level)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id, created_at`,
 		creatorID, payload.VideoURL, variantsJSON, payload.ThumbnailURL, payload.Prefix, payload.Subject, payload.Visibility,
-		category, emotionJSON, tagsJSON, energyLevel,
+		category, creatorCategory, categorySourceAtUpload(creatorCategory, category), emotionJSON, tagsJSON, energyLevel,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return Challenge{}, err
@@ -2094,6 +2132,11 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 	// "general". See categoryForResponse.
 	tags := normalizeTags(payload.Tags)
 	category := categoryForResponse(payload.Category, tags, challenge.Category, payload.Caption)
+	// Only what the RESPONDER themselves chose, with the two words that mean
+	// "nobody chose" stripped. category above may instead be their tags, the
+	// challenge they answered, or a keyword guess — all perfectly good answers
+	// and none of them a claim by a person. See migrations/010.
+	responderCategory := usableCategory(strings.ToLower(strings.TrimSpace(payload.Category)))
 	emotions := emotionsForContent(payload.EmotionTags, tags, "", "", payload.Caption)
 	energyLevel := payload.EnergyLevel
 	if energyLevel == "" {
@@ -2135,11 +2178,12 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 	err = db.QueryRow(
 		`INSERT INTO challenge_responses
 			(challenge_id, responder_id, video_url, video_variants, thumbnail_url, duration_ms, caption, relevance_score,
-			 category, custom_tags, emotion_tags, energy_level)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, created_at`,
+			 category, creator_category, category_source, custom_tags, emotion_tags, energy_level)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id, created_at`,
 		cid, rid, payload.VideoURL, variantsJSON, payload.ThumbnailURL,
 		payload.DurationMs, payload.Caption, relevance,
-		category, tagsJSON, emotionJSON, energyLevel,
+		category, responderCategory, categorySourceAtUpload(responderCategory, category),
+		tagsJSON, emotionJSON, energyLevel,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return ChallengeResponse{}, err

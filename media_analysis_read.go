@@ -157,7 +157,12 @@ func AdminReadAnalysisHandler(w http.ResponseWriter, r *http.Request) {
 func analysisCreatorColumns(table string) string {
 	switch table {
 	case "challenges", "challenge_responses":
-		return `COALESCE(category, ''), COALESCE(custom_tags::text, '[]')`
+		// creator_category, not category. This view exists to answer "do the
+		// creator and the model agree", and category is the app's own best
+		// answer — which for most rows is a keyword guess this server made
+		// off the title. Reading that as the creator's word made the page
+		// report disagreements with people who never said anything.
+		return `COALESCE(creator_category, ''), COALESCE(custom_tags::text, '[]')`
 	}
 	// Literals, not columns. Nothing we can name safely, so nothing is named.
 	return `'', '[]'`
