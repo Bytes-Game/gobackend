@@ -6501,6 +6501,26 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 	// above, so the adaptive-streaming check sees the manifest URLs.
 	items = applyDeviceFit(items, deviceMax)
 
+	// Record what this page showed.
+	//
+	// This tab READ the watch history up above (sinkSeenItems) and never
+	// wrote to it. Reading without writing is a particular kind of broken:
+	// it works for as long as some OTHER feed happens to record the same
+	// videos, and silently does not for anything only ever seen here. A
+	// creator you follow, whose videos never surface in For You, could be
+	// watched every day and stay permanently "unseen".
+	//
+	// It is the same fault the cold-start branch had, found from the same
+	// device log, and it is the second time this exact step has been missed
+	// on a feed path — finalizeFeedItems carries a note about the first.
+	// The test alongside this now checks the rule for every feed surface
+	// rather than for the two that were known about.
+	//
+	// After the kind filter, like every other recording site: the seen-set
+	// is a claim about what reached the phone, so a Battles page must not
+	// record the shorts it just discarded.
+	markShownBatch(userID, items)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"items":   items,
