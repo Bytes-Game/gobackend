@@ -31,7 +31,7 @@ func TestSettled_EverythingMadeOrNotPlannedIsSettled(t *testing.T) {
 	for _, p := range plan {
 		made[p.rung.label] = "/tmp/" + p.rung.label + ".mp4"
 	}
-	got := settledLabels(plan, made)
+	got := settledLabels(plan, made, nil)
 	if strings.Join(got, ",") != strings.Join(ladderLabels(), ",") {
 		t.Errorf("settled %v, want the whole ladder %v: a rung the plan left "+
 			"out on purpose is an answer too", got, ladderLabels())
@@ -53,7 +53,7 @@ func TestSettled_AFailedRungIsNotSettled(t *testing.T) {
 			made[p.rung.label] = "/tmp/" + p.rung.label + ".mp4"
 		}
 	}
-	for _, l := range settledLabels(plan, made) {
+	for _, l := range settledLabels(plan, made, nil) {
 		if l == "720p_hevc" {
 			t.Fatal("a rung that was planned and failed was reported as " +
 				"settled, so no backfill would ever try it again")
@@ -98,8 +98,9 @@ func TestProcessJob_PassesTheSettledListOn(t *testing.T) {
 	}
 	src := strings.Join(code, "\n")
 	for _, re := range []string{
-		`progressive\s*:=\s*buildProgressive\(`,
-		`Ladder:\s+progressive\.settled`,
+		`progressive\s*:=\s*startProgressive\(`,
+		`outcome\s*:=\s*progressive\.outcome\(\)`,
+		`Ladder:\s+outcome\.settled`,
 	} {
 		if !regexp.MustCompile(re).MatchString(src) {
 			t.Errorf("main.go no longer matches %s — the settled list does "+

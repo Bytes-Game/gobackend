@@ -64,6 +64,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"mymodule/internal/mp4layout"
 )
@@ -680,10 +681,15 @@ type progressiveOutcome struct {
 // A rung that was planned and FAILED is left off on purpose. That is not an
 // answer, it is an accident, and leaving it off means the next backfill tries
 // it again.
-func settledLabels(plan []plannedRendition, made map[string]string) []string {
+//
+// A rung left out because the job had no time for it IS an answer, and is
+// settled. The same video on the same machine takes the same time, so offering
+// it again would re-encode everything else just to run out of time at the same
+// place — the loop this list exists to stop.
+func settledLabels(plan []plannedRendition, made map[string]string, outOfTime map[string]bool) []string {
 	failed := map[string]bool{}
 	for _, p := range plan {
-		if _, ok := made[p.rung.label]; !ok {
+		if _, ok := made[p.rung.label]; !ok && !outOfTime[p.rung.label] {
 			failed[p.rung.label] = true
 		}
 	}
@@ -697,16 +703,69 @@ func settledLabels(plan []plannedRendition, made map[string]string) []string {
 }
 
 // buildProgressive is buildProgressiveMP4s plus the list of labels it
-// settled. A source it could not even measure settles nothing, so the next
-// backfill offers it again.
+// settled: both halves of the ladder, one after the other, with no time
+// limit. processJob runs the halves itself, with its upload in between.
 func buildProgressive(ctx context.Context, src, outDir string, maxSeconds int) progressiveOutcome {
-	made := map[string]string{}
+	run := startProgressive(ctx, src, outDir, maxSeconds)
+	run.finishExtras(ctx, outDir, extrasBudget{})
+	return run.outcome()
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// TWO HALVES, BECAUSE A JOB HAS A TIME LIMIT
+// ════════════════════════════════════════════════════════════════════════════
+//
+// A job gets sixteen minutes. For a three-minute video on the runner's two
+// cores that is not enough for everything: the H.265 files take several times
+// as long as the H.264 ones. On 2026-09-26 the trailer in challenge 9 ran out
+// of time part way through its upload, and the whole job was thrown away —
+// the stream and the H.264 files that were already made included. Every retry
+// would have gone the same way, and the video had no stream at all meanwhile.
+//
+// So the ladder runs in two halves:
+//
+//  1. The H.264 files. Every phone can play them; the job is not done
+//     without them.
+//  2. The H.265 files. Smaller, but only a smaller copy of what the first
+//     half already made.
+//
+// processJob uploads the first half before starting the second, and the
+// second half starts each file only if the time left covers making it AND
+// uploading it. One that does not fit is left out, and that video plays its
+// H.264 file, exactly as every video did before H.265 existed.
+
+// progressiveRun is one video's trip down the ladder.
+type progressiveRun struct {
+	src        string
+	maxSeconds int
+	hasAudio   bool
+	plan       []plannedRendition
+	// label → local path of every rendition that came out right.
+	made map[string]string
+	// took is how long each H.264 file took, by picture size. It is what the
+	// second half uses to judge whether an H.265 file will fit.
+	took map[int]time.Duration
+	// outOfTime is every H.265 rung left out for lack of time.
+	outOfTime map[string]bool
+}
+
+// startProgressive measures the source, plans the ladder and makes the
+// first half: every H.264 file.
+//
+// Never fatal: a rendition that fails is left out of made. A source it could
+// not even measure plans nothing and settles nothing, so the next backfill
+// offers it again.
+func startProgressive(ctx context.Context, src, outDir string, maxSeconds int) *progressiveRun {
+	run := &progressiveRun{
+		src: src, maxSeconds: maxSeconds,
+		made: map[string]string{}, took: map[int]time.Duration{}, outOfTime: map[string]bool{},
+	}
 	longSide, bitrate, ok := sourceShape(ctx, src)
 	if !ok {
 		log.Printf("progressive: could not measure %s, skipping our own encode", src)
-		return progressiveOutcome{made: made}
+		return run
 	}
-	hasAudio := probeHasAudio(src)
+	run.hasAudio = probeHasAudio(src)
 
 	// ════════════════════════════════════════════════════════════════════════
 	// HOW LEAN THE SOURCE ALREADY IS
@@ -727,23 +786,170 @@ func buildProgressive(ctx context.Context, src, outDir string, maxSeconds int) p
 			r.label, float64(r.maxBps)/1e6)
 	}
 
-	plan := planProgressive(longSide, bitrate)
-	for _, p := range plan {
-		r := p.rung
-		out := filepath.Join(outDir, r.label+".mp4")
-		if err := encodeProgressive(ctx, src, out, r, p.box, hasAudio, maxSeconds); err != nil {
-			log.Printf("progressive: %s failed, carrying on without it: %v", r.label, err)
-			_ = os.Remove(out)
+	run.plan = planProgressive(longSide, bitrate)
+	for _, p := range run.plan {
+		if p.rung.hevc {
 			continue
 		}
-		if err := progressiveLooksRight(ctx, out, r); err != nil {
-			log.Printf("progressive: %s came out wrong, dropping it: %v", r.label, err)
-			_ = os.Remove(out)
-			continue
+		began := time.Now()
+		if run.makeOne(ctx, outDir, p) {
+			run.took[p.box] = time.Since(began)
 		}
-		made[r.label] = out
 	}
-	return progressiveOutcome{made: made, settled: settledLabels(plan, made)}
+	return run
+}
+
+// makeOne encodes one planned rendition into outDir and checks it, and
+// reports whether it was kept.
+func (run *progressiveRun) makeOne(ctx context.Context, outDir string, p plannedRendition) bool {
+	r := p.rung
+	out := filepath.Join(outDir, r.label+".mp4")
+	began := time.Now()
+	err := encodeProgressive(ctx, run.src, out, r, p.box, run.hasAudio, run.maxSeconds)
+	// How long each file took. Without this a job that runs out of time
+	// shows fourteen silent minutes and then a failed upload, with nothing
+	// to say which step ate them.
+	log.Printf("progressive: %s took %s", r.label, time.Since(began).Round(time.Second))
+	if err != nil {
+		log.Printf("progressive: %s failed, carrying on without it: %v", r.label, err)
+		_ = os.Remove(out)
+		return false
+	}
+	if err := progressiveLooksRight(ctx, out, r); err != nil {
+		log.Printf("progressive: %s came out wrong, dropping it: %v", r.label, err)
+		_ = os.Remove(out)
+		return false
+	}
+	run.made[r.label] = out
+	return true
+}
+
+// extrasBudget is what the second half knows about the job's clock.
+type extrasBudget struct {
+	// deadline is when the job will be stopped. Zero means never.
+	deadline time.Time
+	// uploadBytesPerSec is how fast the first half's files went up. Zero
+	// means not measured, and uploadFallbackBytesPerSec is assumed.
+	uploadBytesPerSec float64
+}
+
+// hevcCostFactor is how many times longer an H.265 file takes to make than
+// the H.264 file of the same picture size. Measured on the three-minute
+// trailer from challenge 9, on two cores:
+//
+//	480p   H.264 1m28s   H.265 1m53s   1.28x
+//	720p   H.264 2m30s   H.265 2m42s   1.08x
+//
+// Rounded up, because guessing short is the expensive direction: a guess
+// that is too long costs one smaller file; a guess that is too short costs
+// the file, the time spent on it, and — without the stop in finishExtras —
+// the job.
+var hevcCostFactor = 1.5
+
+// extrasMargin is held back after the last H.265 file for what still follows
+// it: reporting the job, and slack for a slow moment on a shared machine.
+const extrasMargin = time.Minute
+
+// uploadFallbackBytesPerSec is assumed when the first half's upload was not
+// measured. One megabyte a second is well under what the runner has managed.
+const uploadFallbackBytesPerSec = 1 << 20
+
+// fitsInTime says whether a file that takes encode to make and holds size
+// bytes can be made and uploaded before the job is stopped. With no deadline
+// everything fits.
+func fitsInTime(now time.Time, b extrasBudget, encode time.Duration, size int64) bool {
+	if b.deadline.IsZero() {
+		return true
+	}
+	return now.Add(encode + uploadTime(b, size) + extrasMargin).Before(b.deadline)
+}
+
+func uploadTime(b extrasBudget, size int64) time.Duration {
+	bps := b.uploadBytesPerSec
+	if bps <= 0 {
+		bps = uploadFallbackBytesPerSec
+	}
+	return time.Duration(float64(size) / bps * float64(time.Second))
+}
+
+// finishExtras makes the second half — the H.265 files — into outDir, each one
+// only if it fits in the time left.
+//
+// Its guess at each file comes from the H.264 file of the same size, which it
+// has just watched being made on this machine: that time times
+// hevcCostFactor, plus uploading something no bigger than the H.264 file.
+//
+// The guess can still be wrong, so each encode also runs against its own
+// deadline, early enough to leave room for the upload. An encode that hits it
+// is stopped and left out; the job carries on and finishes with what it has.
+func (run *progressiveRun) finishExtras(ctx context.Context, outDir string, b extrasBudget) {
+	for _, p := range run.plan {
+		if !p.rung.hevc {
+			continue
+		}
+		label := p.rung.label
+		took, size := run.twin(p.box)
+		encode := time.Duration(float64(took) * hevcCostFactor)
+		if !fitsInTime(time.Now(), b, encode, size) {
+			log.Printf("progressive: %s left out — about %s to make and %s to "+
+				"upload would not fit in the %s left; this video plays its "+
+				"H.264 file instead", label, encode.Round(time.Second),
+				uploadTime(b, size).Round(time.Second),
+				time.Until(b.deadline).Round(time.Second))
+			run.outOfTime[label] = true
+			continue
+		}
+		encodeCtx, cancel := ctx, context.CancelFunc(func() {})
+		if !b.deadline.IsZero() {
+			stop := b.deadline.Add(-uploadTime(b, size) - extrasMargin)
+			encodeCtx, cancel = context.WithDeadline(ctx, stop)
+		}
+		made := run.makeOne(encodeCtx, outDir, p)
+		stoppedForTime := encodeCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil
+		cancel()
+		if !made && stoppedForTime {
+			log.Printf("progressive: %s took longer than guessed and was stopped "+
+				"to leave time for the upload; this video plays its H.264 file "+
+				"instead", label)
+			run.outOfTime[label] = true
+		}
+	}
+}
+
+// twin is how long the H.264 file at this picture size took, and how big it
+// is. When there is none at this size it answers for the slowest and biggest
+// H.264 file there is, which errs toward leaving an H.265 file out.
+func (run *progressiveRun) twin(box int) (time.Duration, int64) {
+	var took time.Duration
+	var size int64
+	for _, p := range run.plan {
+		path, ok := run.made[p.rung.label]
+		if p.rung.hevc || !ok {
+			continue
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if p.box == box {
+			return run.took[p.box], fi.Size()
+		}
+		if run.took[p.box] > took {
+			took = run.took[p.box]
+		}
+		if fi.Size() > size {
+			size = fi.Size()
+		}
+	}
+	return took, size
+}
+
+// outcome is what the run produced, and what it settled.
+func (run *progressiveRun) outcome() progressiveOutcome {
+	if run.plan == nil {
+		return progressiveOutcome{made: run.made}
+	}
+	return progressiveOutcome{made: run.made, settled: settledLabels(run.plan, run.made, run.outOfTime)}
 }
 
 // encodeProgressive writes one rendition.

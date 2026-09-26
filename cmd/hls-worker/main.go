@@ -52,6 +52,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -428,13 +429,16 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (jobResu
 	}
 
 	// 2a. Our own progressive MP4s, written into the same output directory so
-	// the upload loop below carries them without knowing about them.
+	// the upload below carries them without knowing about them.
 	//
 	// This is what the app actually plays — see progressive.go. Never fatal:
 	// an empty map means the app keeps playing the uploaded file, exactly as
 	// it did before this existed.
-	progressive := buildProgressive(ctx, srcPath, outDir, job.MaxSeconds)
-	localMP4s := progressive.made
+	//
+	// Only the first half, the H.264 files, is made here. The H.265 half
+	// waits until everything else is uploaded and done — see "TWO HALVES" in
+	// progressive.go for the video that taught us why.
+	progressive := startProgressive(ctx, srcPath, outDir, job.MaxSeconds)
 
 	// 3. Upload everything in outDir to R2 under hls/<id>/ for
 	// challenges, hls/resp/<id>/ for battle responses — the two tables
@@ -445,31 +449,9 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (jobResu
 	if jobKind(job) == "response" {
 		prefix = fmt.Sprintf("hls/resp/%s/%s", job.ChallengeID, randHex(8))
 	}
-	files, err := os.ReadDir(outDir)
+	sent, err := uploadTree(ctx, cfg, outDir, prefix)
 	if err != nil {
 		return jobResult{}, err
-	}
-	for _, f := range files {
-		if f.IsDir() {
-			// nested rendition dirs: walk them
-			sub, _ := os.ReadDir(filepath.Join(outDir, f.Name()))
-			for _, g := range sub {
-				if g.IsDir() {
-					continue
-				}
-				local := filepath.Join(outDir, f.Name(), g.Name())
-				key := prefix + "/" + f.Name() + "/" + g.Name()
-				if err := uploadFile(ctx, cfg, local, key); err != nil {
-					return jobResult{}, fmt.Errorf("upload %s: %w", key, err)
-				}
-			}
-			continue
-		}
-		local := filepath.Join(outDir, f.Name())
-		key := prefix + "/" + f.Name()
-		if err := uploadFile(ctx, cfg, local, key); err != nil {
-			return jobResult{}, fmt.Errorf("upload %s: %w", key, err)
-		}
 	}
 
 	// Env override wins (custom domain / CDN in front of R2); otherwise
@@ -484,13 +466,6 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (jobResu
 	}
 	manifestURL := base + "/" + prefix + "/master.m3u8"
 
-	// Turn the encoded files into the label → URL map the app already knows
-	// how to choose from. Built from the same prefix the upload loop used, so
-	// a URL here can only name a file that was just written.
-	variants := make(map[string]string, len(localMP4s))
-	for label := range localMP4s {
-		variants[label] = base + "/" + prefix + "/" + label + ".mp4"
-	}
 	// Work out what the video actually is, now that the file is local and
 	// the expensive part (download + transcode) is already paid for. Never
 	// fatal: analyzeVideo returns whatever it managed and the job completes
@@ -506,11 +481,45 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (jobResu
 		log.Printf("poster for %s=%s: %v", jobKind(job), job.ChallengeID, err)
 	} else {
 		key := prefix + "/poster.jpg"
-		if err := uploadFile(ctx, cfg, posterPath, key); err != nil {
+		if err := putFile(ctx, cfg, posterPath, key); err != nil {
 			log.Printf("poster upload for %s=%s: %v", jobKind(job), job.ChallengeID, err)
 		} else {
 			thumbURL = base + "/" + key
 		}
+	}
+
+	// 4. The H.265 half, in whatever time is left. Last on purpose: it is
+	// the only step whose loss costs nothing but a smaller copy of a file
+	// that is already up.
+	extrasDir := filepath.Join(work, "extras")
+	if err := os.MkdirAll(extrasDir, 0o755); err != nil {
+		return jobResult{}, err
+	}
+	deadline, _ := ctx.Deadline()
+	progressive.finishExtras(ctx, extrasDir, extrasBudget{
+		deadline: deadline, uploadBytesPerSec: sent.bytesPerSec(),
+	})
+	if _, err := uploadTree(ctx, cfg, extrasDir, prefix); err != nil {
+		// The job is already whole without these, so it is not failed over
+		// them. They are dropped from the result — a URL naming a file that
+		// never arrived plays as nothing — and not settled, so the next
+		// backfill offers them again.
+		log.Printf("progressive: H.265 upload for %s=%s failed, finishing "+
+			"without it: %v", jobKind(job), job.ChallengeID, err)
+		for label, path := range progressive.made {
+			if filepath.Dir(path) == extrasDir {
+				delete(progressive.made, label)
+			}
+		}
+	}
+	outcome := progressive.outcome()
+
+	// Turn the encoded files into the label → URL map the app already knows
+	// how to choose from. Every file of both halves was uploaded flat under
+	// the same prefix, so a URL here can only name a file that was written.
+	variants := make(map[string]string, len(outcome.made))
+	for label := range outcome.made {
+		variants[label] = base + "/" + prefix + "/" + label + ".mp4"
 	}
 
 	return jobResult{
@@ -518,8 +527,132 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (jobResu
 		ThumbnailURL:  thumbURL,
 		Analysis:      analysis,
 		VideoVariants: variants,
-		Ladder:        progressive.settled,
+		Ladder:        outcome.settled,
 	}, nil
+}
+
+// putFile is the one way a file reaches the bucket. A variable so a test can
+// run a whole job against a pretend bucket and see exactly what arrived.
+var putFile = uploadFile
+
+// uploaded is what one uploadTree call sent, and how long it took.
+type uploaded struct {
+	files int
+	bytes int64
+	took  time.Duration
+}
+
+func (u uploaded) bytesPerSec() float64 {
+	if u.took <= 0 || u.bytes == 0 {
+		return 0
+	}
+	return float64(u.bytes) / u.took.Seconds()
+}
+
+// uploadParallel is how many files go up at once.
+//
+// One at a time, a three-minute video is about four hundred separate uploads
+// — every two-second piece of every stream quality is its own file — and each
+// one waits a full round trip to the bucket before the next can start. On
+// 2026-09-26 challenge 9 had every file made and was stopped by its sixteen
+// minutes part way through uploading them, sixty pieces into the 720p stream.
+// Eight at a time keeps the line busy while each one waits.
+const uploadParallel = 8
+
+// uploadClient keeps a connection open for every upload running at once. The
+// default client keeps two, so six of eight would set up a fresh encrypted
+// connection for every file — the very wait running them together is meant
+// to hide.
+var uploadClient = func() *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConnsPerHost = uploadParallel
+	return &http.Client{Transport: t}
+}()
+
+// uploadTree uploads every file under dir to prefix, keeping the folder
+// layout one level deep (the HLS renditions each live in their own folder),
+// uploadParallel files at a time. The first failure stops the rest and is
+// what it returns.
+func uploadTree(ctx context.Context, cfg *workerConfig, dir, prefix string) (uploaded, error) {
+	type item struct{ local, key string }
+	var items []item
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return uploaded{}, err
+	}
+	for _, f := range files {
+		if f.IsDir() {
+			// nested rendition dirs: walk them
+			sub, _ := os.ReadDir(filepath.Join(dir, f.Name()))
+			for _, g := range sub {
+				if !g.IsDir() {
+					items = append(items, item{
+						filepath.Join(dir, f.Name(), g.Name()),
+						prefix + "/" + f.Name() + "/" + g.Name(),
+					})
+				}
+			}
+			continue
+		}
+		items = append(items, item{filepath.Join(dir, f.Name()), prefix + "/" + f.Name()})
+	}
+
+	began := time.Now()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		mu    sync.Mutex
+		u     uploaded
+		first error
+		wg    sync.WaitGroup
+	)
+	work := make(chan item)
+	for i := 0; i < uploadParallel; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for it := range work {
+				err := putFile(ctx, cfg, it.local, it.key)
+				mu.Lock()
+				if err != nil {
+					if first == nil {
+						first = fmt.Errorf("upload %s: %w", it.key, err)
+						cancel()
+					}
+				} else {
+					u.files++
+					if fi, err := os.Stat(it.local); err == nil {
+						u.bytes += fi.Size()
+					}
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+feed:
+	for _, it := range items {
+		select {
+		case work <- it:
+		case <-ctx.Done():
+			break feed
+		}
+	}
+	close(work)
+	wg.Wait()
+	u.took = time.Since(began)
+	if first == nil && u.files < len(items) {
+		// Stopped before every file was handed out: the job's own deadline.
+		first = fmt.Errorf("upload stopped with %d of %d files sent: %w",
+			u.files, len(items), context.Cause(ctx))
+	}
+	// How long the upload took and how fast it went. The run that timed out
+	// on challenge 9 could not say whether encoding or uploading ate its
+	// sixteen minutes; this line and the per-file encode times answer that.
+	if u.files > 0 {
+		log.Printf("upload: %d files, %.1f MB in %s (%.1f MB/s)", u.files,
+			float64(u.bytes)/(1<<20), u.took.Round(time.Second), u.bytesPerSec()/(1<<20))
+	}
+	return u, first
 }
 
 // downloadClient bounds source fetches — a stalled external host must
@@ -770,7 +903,7 @@ func uploadFile(ctx context.Context, cfg *workerConfig, localPath, objectKey str
 	// random prefix per challenge) so they're immutable forever.
 	req.Header.Set("Cache-Control", "public, max-age=31536000, immutable")
 
-	res, err := http.DefaultClient.Do(req)
+	res, err := uploadClient.Do(req)
 	if err != nil {
 		return err
 	}
