@@ -160,6 +160,9 @@ type hlsCompleteRequest struct {
 	// upload. Absent from older workers, which is why nothing here requires
 	// it. See cmd/hls-worker/progressive.go.
 	VideoVariants map[string]string `json:"videoVariants,omitempty"`
+	// Every rendition the worker settled for this video: made, or decided it
+	// should not have. Absent from older workers. See storeLadder.
+	Ladder []string `json:"ladder,omitempty"`
 }
 
 // hlsTableForKind maps the wire kind to the table whose
@@ -350,6 +353,7 @@ func HLSCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	// a bonus. Losing one reading is much cheaper than that.
 	storeVideoAnalysis(table, cid, req.Analysis)
 	storeVideoVariants(table, cid, req.VideoVariants)
+	storeLadder(table, cid, req.Ladder)
 	storeVideoThumbnail(table, cid, req.ThumbnailURL)
 
 	w.WriteHeader(http.StatusNoContent)
@@ -419,6 +423,47 @@ func storeVideoVariants(table string, id int, variants map[string]string) {
 		    SET video_variants = COALESCE(video_variants, '{}'::jsonb) || $2::jsonb
 		  WHERE id = $1`, id, string(blob)); err != nil {
 		log.Printf("storeVideoVariants: could not save for %s=%d: %v", table, id, err)
+	}
+}
+
+// storeLadder records which renditions the worker settled for this video.
+//
+// The "missing" backfill picks videos without a given rendition. Some videos
+// rightly never get one — no 720p copy of a 480p video, no H.265 copy that
+// would be no smaller than the H.264 one — and without this they would be
+// picked every round forever. With it, a video is only offered a rendition
+// its last conversion did not already consider.
+//
+// Replaced, not merged: it describes the LAST conversion, and a label a
+// newer worker dropped should stop counting as considered.
+//
+// Nothing is written for an empty list, so an older worker that does not
+// send one leaves the row saying "not recorded", which is the truth. Failure
+// is logged, never returned, for the same reason as storeVideoVariants.
+func storeLadder(table string, id int, ladder []string) {
+	if db == nil || len(ladder) == 0 {
+		return
+	}
+	clean := make([]string, 0, len(ladder))
+	for _, label := range ladder {
+		if videoVariantLabels[label] {
+			clean = append(clean, label)
+		} else {
+			log.Printf("storeLadder: ignoring unknown label %q for %s=%d", label, table, id)
+		}
+	}
+	if len(clean) == 0 {
+		return
+	}
+	blob, err := json.Marshal(clean)
+	if err != nil {
+		log.Printf("storeLadder: could not encode for %s=%d: %v", table, id, err)
+		return
+	}
+	if _, err := db.Exec(
+		`UPDATE `+table+` SET hls_ladder = $2::jsonb WHERE id = $1`,
+		id, string(blob)); err != nil {
+		log.Printf("storeLadder: could not save for %s=%d: %v", table, id, err)
 	}
 }
 

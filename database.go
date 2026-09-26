@@ -108,6 +108,14 @@ const alterStmts = `
 	-- working; video_variants is the new path for adaptive playback.
 	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN video_variants JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN video_variants JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	-- Every rendition the worker settled the last time it converted this
+	-- video: made, or deliberately not made for it (no 720p copy of a 480p
+	-- video, no H.265 copy that would be no smaller). NULL means converted
+	-- before this was recorded. The "missing" backfill reads it so it can
+	-- stop offering a video a rendition it has already been considered for;
+	-- see storeLadder and media_requeue.go.
+	DO $$ BEGIN ALTER TABLE challenges          ADD COLUMN hls_ladder JSONB; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	DO $$ BEGIN ALTER TABLE challenge_responses ADD COLUMN hls_ladder JSONB; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 
 	-- HLS master manifest URL produced by the background transcode worker.
 	-- State machine: '' = untranscoded, 'PENDING' = claimed by a worker,

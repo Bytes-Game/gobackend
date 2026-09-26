@@ -646,11 +646,65 @@ func planProgressive(longSide, bitrate int) []plannedRendition {
 // rendition that fails is left out of the map, and the caller serves whatever
 // did work — down to nothing at all, which is exactly today's behaviour.
 func buildProgressiveMP4s(ctx context.Context, src, outDir string, maxSeconds int) map[string]string {
+	return buildProgressive(ctx, src, outDir, maxSeconds).made
+}
+
+// progressiveOutcome is what one encode produced, and what it settled.
+type progressiveOutcome struct {
+	// label → local path of every rendition that came out right.
+	made map[string]string
+	// Every ladder label this encode has a final answer for. See
+	// settledLabels.
+	settled []string
+}
+
+// settledLabels is every label on the ladder that this encode has a final
+// answer for: either it was made, or the plan decided this video should not
+// have it — a 720p copy of a 480p video, or an H.265 copy that would have
+// been no smaller than the H.264 one.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// WHY THE BACKEND NEEDS TO KNOW THIS
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The backfill picks "videos that do not have rendition X" and queues them
+// until none are left. For 360p that finishes, because every video gets one.
+// For the H.265 rungs it never would: a video the plan rightly gives no H.265
+// copy still has none after it is re-encoded, so it is picked again, and
+// again — the same oldest videos re-encoded every round, forty rounds in a
+// row, while the ones behind them wait.
+//
+// With this list the backend can tell "never had the chance" from "had the
+// chance and did not need it", and only queue the first.
+//
+// A rung that was planned and FAILED is left off on purpose. That is not an
+// answer, it is an accident, and leaving it off means the next backfill tries
+// it again.
+func settledLabels(plan []plannedRendition, made map[string]string) []string {
+	failed := map[string]bool{}
+	for _, p := range plan {
+		if _, ok := made[p.rung.label]; !ok {
+			failed[p.rung.label] = true
+		}
+	}
+	var out []string
+	for _, r := range progressiveLadder {
+		if !failed[r.label] {
+			out = append(out, r.label)
+		}
+	}
+	return out
+}
+
+// buildProgressive is buildProgressiveMP4s plus the list of labels it
+// settled. A source it could not even measure settles nothing, so the next
+// backfill offers it again.
+func buildProgressive(ctx context.Context, src, outDir string, maxSeconds int) progressiveOutcome {
 	made := map[string]string{}
 	longSide, bitrate, ok := sourceShape(ctx, src)
 	if !ok {
 		log.Printf("progressive: could not measure %s, skipping our own encode", src)
-		return made
+		return progressiveOutcome{made: made}
 	}
 	hasAudio := probeHasAudio(src)
 
@@ -673,7 +727,8 @@ func buildProgressiveMP4s(ctx context.Context, src, outDir string, maxSeconds in
 			r.label, float64(r.maxBps)/1e6)
 	}
 
-	for _, p := range planProgressive(longSide, bitrate) {
+	plan := planProgressive(longSide, bitrate)
+	for _, p := range plan {
 		r := p.rung
 		out := filepath.Join(outDir, r.label+".mp4")
 		if err := encodeProgressive(ctx, src, out, r, p.box, hasAudio, maxSeconds); err != nil {
@@ -688,7 +743,7 @@ func buildProgressiveMP4s(ctx context.Context, src, outDir string, maxSeconds in
 		}
 		made[r.label] = out
 	}
-	return made
+	return progressiveOutcome{made: made, settled: settledLabels(plan, made)}
 }
 
 // encodeProgressive writes one rendition.

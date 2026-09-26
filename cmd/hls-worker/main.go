@@ -287,6 +287,10 @@ type reportPayload struct {
 	// Omitted when the encode produced nothing, so an older backend and a
 	// worker that could not encode both behave exactly as before.
 	VideoVariants map[string]string `json:"videoVariants,omitempty"`
+	// Every rendition this encode settled: made, or deliberately not made
+	// for this video. The backfill uses it to stop offering a video a rung
+	// it has already been considered for — see settledLabels.
+	Ladder []string `json:"ladder,omitempty"`
 }
 
 // ─── HTTP calls to the backend ───────────────────────────────────────
@@ -330,6 +334,7 @@ func reportComplete(cfg *workerConfig, job pendingJob, done jobResult) error {
 		Kind:          jobKind(job),
 		Analysis:      done.Analysis,
 		VideoVariants: done.VideoVariants,
+		Ladder:        done.Ladder,
 	})
 	req, _ := http.NewRequest("POST", cfg.BackendURL+"/api/v1/internal/hls/complete", bytes.NewReader(body))
 	req.Header.Set("X-Worker-Token", cfg.WorkerToken)
@@ -372,6 +377,7 @@ type jobResult struct {
 	ThumbnailURL  string
 	Analysis      json.RawMessage
 	VideoVariants map[string]string
+	Ladder        []string
 }
 
 func runJob(cfg *workerConfig, job pendingJob, timeout time.Duration) (jobResult, error) {
@@ -427,7 +433,8 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (jobResu
 	// This is what the app actually plays — see progressive.go. Never fatal:
 	// an empty map means the app keeps playing the uploaded file, exactly as
 	// it did before this existed.
-	localMP4s := buildProgressiveMP4s(ctx, srcPath, outDir, job.MaxSeconds)
+	progressive := buildProgressive(ctx, srcPath, outDir, job.MaxSeconds)
+	localMP4s := progressive.made
 
 	// 3. Upload everything in outDir to R2 under hls/<id>/ for
 	// challenges, hls/resp/<id>/ for battle responses — the two tables
@@ -511,6 +518,7 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (jobResu
 		ThumbnailURL:  thumbURL,
 		Analysis:      analysis,
 		VideoVariants: variants,
+		Ladder:        progressive.settled,
 	}, nil
 }
 

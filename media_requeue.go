@@ -76,9 +76,18 @@ package main
 // run over and over: a video that has been done drops out of the selection,
 // so repeated calls walk through what is left and then stop finding anything.
 //
+// "Done" is not the same as "has it". Some videos rightly never get a given
+// rendition: no 720p copy of a 480p video, no H.265 copy that would be no
+// smaller than the H.264 one. Picking on "does not have it" alone sends those
+// round again every time, and because the pick is oldest-first it is the SAME
+// videos every round — the job never finishes and the ones behind them never
+// get a turn. So a video also drops out once a conversion has considered the
+// rendition (hls_ladder, written by storeLadder), whether or not it made one.
+//
 // Nothing decides quality here. Whether a video is worth re-encoding is a
 // question about the file, and only the worker has the file — see
-// progressiveSkipBps, which leaves an already-lean source alone.
+// planProgressive in cmd/hls-worker, which never aims a rung above what an
+// already-lean source spent.
 
 import (
 	"context"
@@ -359,6 +368,7 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 				      AND hls_manifest_url <> 'PENDING'
 				      AND COALESCE(video_url, '') <> ''
 				      AND COALESCE(video_variants, '{}'::jsonb)->>$2::text IS NULL
+				      AND NOT COALESCE(hls_ladder, '[]'::jsonb) @> jsonb_build_array($2::text)
 				    ORDER BY created_at ASC
 				    LIMIT $1
 				 )`, limit, req.Missing)
@@ -407,6 +417,7 @@ func AdminRequeueMediaHandler(w http.ResponseWriter, r *http.Request) {
 			   AND hls_manifest_url <> 'PENDING'
 			   AND COALESCE(video_url, '') <> ''
 			   AND COALESCE(video_variants, '{}'::jsonb)->>$1::text IS NULL
+			   AND NOT COALESCE(hls_ladder, '[]'::jsonb) @> jsonb_build_array($1::text)
 			`, req.Missing).Scan(&left); cErr != nil {
 			// Not fatal — the rows really were queued. But it must not read
 			// as "nothing left", which is exactly what a swallowed error here

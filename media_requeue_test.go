@@ -265,8 +265,8 @@ func TestRequeue_IsAdminOnly(t *testing.T) {
 
 func TestRequeue_DecidesNothingAboutQuality(t *testing.T) {
 	// Whether a video is worth re-encoding is a question about the FILE, and
-	// only the worker has the file — see progressiveSkipBps, which leaves an
-	// already-lean source alone. A second opinion here, guessing from a
+	// only the worker has the file — see planProgressive, which never aims a
+	// rung above what an already-lean source spent. A second opinion here, guessing from a
 	// database row, would be a rule nobody could keep in step with the first.
 	src := readSourceFile(t, "media_requeue.go")
 	for _, leak := range []string{"bit_rate", "bitrate", "Mbps"} {
