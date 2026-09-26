@@ -736,7 +736,7 @@ func buildProgressive(ctx context.Context, src, outDir string, maxSeconds int) p
 			_ = os.Remove(out)
 			continue
 		}
-		if err := progressiveLooksRight(ctx, out); err != nil {
+		if err := progressiveLooksRight(ctx, out, r); err != nil {
 			log.Printf("progressive: %s came out wrong, dropping it: %v", r.label, err)
 			_ = os.Remove(out)
 			continue
@@ -967,7 +967,7 @@ func encodeProgressive(ctx context.Context, src, out string, r progressiveRendit
 // before: a file with no duration plays as a black screen; an index at the
 // back is the bug this whole change exists to stop; a missing video stream is
 // a silent audio-only "video".
-func progressiveLooksRight(ctx context.Context, path string) error {
+func progressiveLooksRight(ctx context.Context, path string, r progressiveRendition) error {
 	st, err := os.Stat(path)
 	if err != nil {
 		return err
@@ -982,17 +982,8 @@ func progressiveLooksRight(ctx context.Context, path string) error {
 	if shape.duration <= 0 {
 		return fmt.Errorf("no duration")
 	}
-	if len(shape.codecs) == 0 {
-		return fmt.Errorf("no streams")
-	}
-	hasVideo := false
-	for _, c := range shape.codecs {
-		if c == "h264" {
-			hasVideo = true
-		}
-	}
-	if !hasVideo {
-		return fmt.Errorf("no h264 video stream, got %v", shape.codecs)
+	if err := checkVideoStream(shape, r); err != nil {
+		return err
 	}
 	switch layout, err := mp4layout.OfFile(path); {
 	case err != nil:
@@ -1001,6 +992,51 @@ func progressiveLooksRight(ctx context.Context, path string) error {
 		return fmt.Errorf("came out %s despite +faststart", layout)
 	}
 	return nil
+}
+
+// checkVideoStream says whether a finished file holds the video [r] was
+// meant to produce.
+//
+// ════════════════════════════════════════════════════════════════════════════
+// THIS USED TO THROW AWAY EVERY H.265 FILE
+// ════════════════════════════════════════════════════════════════════════════
+//
+// It was written when every rung was H.264, and it asked for an h264 stream.
+// When the H.265 rungs arrived it went on asking for h264 — so every H.265
+// file was encoded, uploaded to nowhere, and dropped here as "came out
+// wrong: no h264 video stream, got [hevc]". Not one was ever served.
+//
+// Nothing noticed, because every test that runs a real encode skips when
+// ffmpeg is not installed, and CI did not install it. The worker's own log
+// said so on every video; that is where it was found.
+//
+// For H.265 it also checks the label, not just the codec. Apple plays H.265
+// only when it is labelled hvc1, and an hev1 file opens on an iPhone to a
+// black screen with the sound playing. hevcVideoArgs asks ffmpeg for hvc1;
+// this checks the file actually came out that way.
+func checkVideoStream(shape mediaShape, r progressiveRendition) error {
+	if len(shape.codecs) == 0 {
+		return fmt.Errorf("no streams")
+	}
+	wantCodec, wantTag := "h264", ""
+	if r.hevc {
+		wantCodec, wantTag = "hevc", "hvc1"
+	}
+	for i, c := range shape.codecs {
+		if c != wantCodec {
+			continue
+		}
+		tag := ""
+		if i < len(shape.tags) {
+			tag = shape.tags[i]
+		}
+		if wantTag != "" && tag != wantTag {
+			return fmt.Errorf("its %s video is labelled %q, and Apple devices "+
+				"play it only as %q", c, tag, wantTag)
+		}
+		return nil
+	}
+	return fmt.Errorf("no %s video stream, got %v", wantCodec, shape.codecs)
 }
 
 // sourceShape measures the two things the ladder decides from: how big the

@@ -73,10 +73,21 @@ func TestBucketKey_RefusesAnythingItDoesNotRecognise(t *testing.T) {
 // whether ffmpeg did what was asked — a hand-written byte fixture would only
 // test the parser, which internal/mp4layout already covers.
 
+// needFFmpeg skips a test that needs a real encoder when there is none —
+// and FAILS it when REQUIRE_FFMPEG is set, which CI does.
+//
+// When both were a skip, CI never had ffmpeg, every test that runs a real
+// encode skipped there, and the run was green. That is how a check that threw
+// away every H.265 file the worker made shipped with all of these passing.
+// Same rule as withDB for the database: unset means "not here, fine"; set
+// means "promised", and a promise that is not kept is a failure.
 func needFFmpeg(t *testing.T) {
 	t.Helper()
 	for _, bin := range []string{"ffmpeg", "ffprobe"} {
 		if _, err := exec.LookPath(bin); err != nil {
+			if os.Getenv("REQUIRE_FFMPEG") != "" {
+				t.Fatalf("REQUIRE_FFMPEG is set but there is no %s", bin)
+			}
 			t.Skipf("no %s here", bin)
 		}
 	}

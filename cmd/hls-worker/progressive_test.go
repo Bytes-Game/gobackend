@@ -318,17 +318,44 @@ func TestProgressive_DoesNotEnlargeASourceBetweenTheRungs(t *testing.T) {
 }
 
 func TestProgressive_NoTwoRenditionsAreTheSameFile(t *testing.T) {
-	// A small source clamps both rungs to its own size, which would otherwise
-	// produce identical bytes under two names: twice the CPU, twice the
+	// A small source clamps the bigger rungs to its own size, which would
+	// otherwise produce identical bytes under several names: more CPU, more
 	// storage, and a chooser picking between things that do not differ.
+	//
+	// Since 360p was added, a 640-wide source gets TWO renditions on purpose:
+	// the good one at 480p's ceiling, and 360p underneath it for a link that
+	// cannot carry that (see TestProgressive_ASmallSourceGetsBothItsRungs).
+	// So the rule is not "one file" — it is "no two files that are the same
+	// video": exactly those two, and the 360p really the cheaper of them.
 	needFFmpeg(t)
 	dir := t.TempDir()
 	src := makeSource(t, dir, "tiny.mp4", 640, 360)
 
 	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
-	if len(made) != 1 {
-		t.Errorf("a 640x360 source produced %d renditions (%v); both rungs "+
-			"clamp to 640 so only one is worth making", len(made), made)
+	assertSmallSourceRenditions(t, "a 640x360 source", made)
+}
+
+// assertSmallSourceRenditions checks what a source no bigger than 360p's box
+// gets: its full-quality 480p and a cheaper 360p, and nothing else — every
+// bigger rung clamps down onto the 480p and would be the same video again.
+func assertSmallSourceRenditions(t *testing.T, what string, made map[string]string) {
+	t.Helper()
+	if len(made) != 2 || made["480p"] == "" || made["360p"] == "" {
+		t.Fatalf("%s produced %v; want exactly 480p and 360p — the good file "+
+			"and the one a slow link can carry", what, made)
+	}
+	hi, err := os.Stat(made["480p"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	lo, err := os.Stat(made["360p"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lo.Size() >= hi.Size() {
+		t.Errorf("%s: 360p is %d bytes against 480p's %d. The floor exists to "+
+			"be cheaper; at the same size it is a second copy of one video.",
+			what, lo.Size(), hi.Size())
 	}
 }
 
@@ -403,12 +430,14 @@ func TestProgressive_EncodesALeanFileInsteadOfServingItUntouched(t *testing.T) {
 			"viewer a file in whatever format the camera happened to choose.",
 			float64(bitrate)/1e6)
 	}
-	// Every rung clamps to the source's 854 box, and to its rate underneath
-	// every ceiling, so they would all be the same file. One is correct.
-	if len(made) != 1 {
-		t.Errorf("a lean 854-wide source produced %d renditions (%v); every "+
-			"rung clamps to the same size AND the same rate there, so they "+
-			"would be one video stored repeatedly", len(made), made)
+	// Every rung at or above 480p clamps to the source's 854 box and to its
+	// rate, so they would all be one file: that collapses to the 480p. 360p
+	// is a genuinely smaller picture, so it stays as the slow-link floor. And
+	// no H.265 copy: at the source's own rate it would be no smaller.
+	if len(made) != 2 || made["480p"] == "" || made["360p"] == "" {
+		t.Errorf("a lean 854-wide source produced %v; want exactly 480p and "+
+			"360p. Anything more is the same video stored under another name.",
+			made)
 	}
 }
 
@@ -656,23 +685,20 @@ func TestProgressive_TwoRungsShareASizeAtDifferentRates(t *testing.T) {
 	}
 }
 
-// TestProgressive_ASmallSourceStillGetsOneRendition guards the other side of
+// TestProgressive_ASmallSourceIsNotStoredThreeTimes guards the other side of
 // that de-duplication change.
 //
 // When a source is smaller than a rung, that rung clamps down to the source
-// size — and then several rungs land on the same picture with nothing to tell
-// them apart, because a source with few bits to begin with cannot spend the
-// higher ceiling. Keying on size AND ceiling would make three copies of one
-// video.
-func TestProgressive_ASmallSourceStillGetsOneRendition(t *testing.T) {
+// size — and then 480p, 720p and 720p_hq all land on the same picture with
+// nothing to tell them apart, because a source with few bits to begin with
+// cannot spend the higher ceilings. Keying on size AND ceiling would make
+// three copies of one video. What it should get is the one good file, plus
+// the 360p floor.
+func TestProgressive_ASmallSourceIsNotStoredThreeTimes(t *testing.T) {
 	needFFmpeg(t)
 	dir := t.TempDir()
 	src := makeSource(t, dir, "small.mp4", 640, 360)
 
 	made := buildProgressiveMP4s(context.Background(), src, dir, 0)
-	if len(made) != 1 {
-		t.Errorf("a 640-wide source produced %d renditions (%v); every rung "+
-			"clamps to 640 there, so they would be the same video stored "+
-			"repeatedly", len(made), made)
-	}
+	assertSmallSourceRenditions(t, "a 640-wide source", made)
 }

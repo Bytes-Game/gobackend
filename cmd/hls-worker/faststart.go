@@ -197,12 +197,16 @@ func sameVideoInside(ctx context.Context, original, remuxed string) error {
 type mediaShape struct {
 	duration float64
 	codecs   []string // one per stream, in file order
+	// The four-letter label each stream is stored under, same order. For
+	// H.265 it is "hvc1" or "hev1", and only hvc1 plays on Apple devices —
+	// see hevcVideoArgs.
+	tags []string
 }
 
 func describeMedia(ctx context.Context, path string) (mediaShape, error) {
 	out, err := exec.CommandContext(ctx, "ffprobe",
 		"-v", "error",
-		"-show_entries", "format=duration:stream=codec_name",
+		"-show_entries", "format=duration:stream=codec_name,codec_tag_string",
 		"-of", "json", path,
 	).Output()
 	if err != nil {
@@ -214,6 +218,7 @@ func describeMedia(ctx context.Context, path string) (mediaShape, error) {
 		} `json:"format"`
 		Streams []struct {
 			CodecName string `json:"codec_name"`
+			CodecTag  string `json:"codec_tag_string"`
 		} `json:"streams"`
 	}
 	if err := json.Unmarshal(out, &probed); err != nil {
@@ -223,6 +228,7 @@ func describeMedia(ctx context.Context, path string) (mediaShape, error) {
 	shape.duration, _ = strconv.ParseFloat(strings.TrimSpace(probed.Format.Duration), 64)
 	for _, s := range probed.Streams {
 		shape.codecs = append(shape.codecs, s.CodecName)
+		shape.tags = append(shape.tags, s.CodecTag)
 	}
 	return shape, nil
 }
