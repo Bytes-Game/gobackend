@@ -834,17 +834,21 @@ type extrasBudget struct {
 }
 
 // hevcCostFactor is how many times longer an H.265 file takes to make than
-// the H.264 file of the same picture size. Measured on the three-minute
-// trailer from challenge 9, on two cores:
+// the H.264 file of the same picture size.
 //
-//	480p   H.264 1m28s   H.265 1m53s   1.28x
-//	720p   H.264 2m30s   H.265 2m42s   1.08x
+// First measured on a two-core test machine, where H.265 came out at only
+// 1.1 to 1.3 times H.264. The real runner disagreed. Its own log, run 1360
+// on 2026-09-26, the first with these times in it:
 //
-// Rounded up, because guessing short is the expensive direction: a guess
-// that is too long costs one smaller file; a guess that is too short costs
-// the file, the time spent on it, and — without the stop in finishExtras —
-// the job.
-var hevcCostFactor = 1.5
+//	challenge 7    480p   3s → 5s     1.7x     720p  5s → 10s   2.0x
+//	challenge 15   480p   5s → 12s    2.4x
+//	challenge 8    480p  52s → 1m37s  1.9x
+//
+// So it is 2.5: the runner's worst, rounded up. Guessing short is the
+// expensive direction — a guess that is too long costs one smaller file; a
+// guess that is too short spends minutes on an encode the stop in
+// finishExtras then throws away.
+var hevcCostFactor = 2.5
 
 // extrasMargin is held back after the last H.265 file for what still follows
 // it: reporting the job, and slack for a slow moment on a shared machine.
