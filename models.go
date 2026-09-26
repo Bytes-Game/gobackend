@@ -13,6 +13,11 @@ type User struct {
 	Wins          int      `json:"wins"`
 	Losses        int      `json:"losses"`
 	League        string   `json:"league"`
+	// Draws and Rating come from decided battles — see battles.go. Rating
+	// starts at 1000 and moves by Elo, so a loss costs and nobody keeps the
+	// top without battling.
+	Draws  int `json:"draws"`
+	Rating int `json:"rating"`
 	// Bio is shown on the profile page. Empty string means "user
 	// hasn't set one" — render an "Add a bio" CTA on own profile,
 	// nothing on others. omitempty keeps the wire format tight for
@@ -239,6 +244,10 @@ type Challenge struct {
 	TopResponseThumbnailUrl string `json:"topResponseThumbnailUrl,omitempty"`
 	TopResponseUsername     string `json:"topResponseUsername,omitempty"`
 	TopResponseLeague       string `json:"topResponseLeague,omitempty"`
+	// The answer's own likes. A like on a battle reel goes to whichever
+	// side is on screen, so the heart shows this count while the answer
+	// is showing.
+	TopResponseLikes int `json:"topResponseLikes,omitempty"`
 	// Adaptive-bitrate variants for the top response, mirroring the
 	// primary VideoVariants map. Empty when the response was uploaded
 	// before the multi-bitrate feature shipped — the client should
@@ -344,6 +353,9 @@ type ChallengeResponse struct {
 type CreateChallengePayload struct {
 	CreatorID string `json:"creatorId"`
 	VideoURL  string `json:"videoUrl"`
+	// How many days voting runs once somebody accepts. At least seven, at
+	// most thirty; zero means seven. See clampBattleDays.
+	BattleDays int `json:"battleDays,omitempty"`
 	// DurationMs is how long the app says the video runs. A cheap first
 	// look, refused before the server goes anywhere near storage. It is
 	// what the phone claims, so it is not the last word — the upload gate
@@ -488,8 +500,11 @@ type FlagResponsePayload struct {
 // ChallengeVotePayload is the request body for voting on a challenge response.
 type ChallengeVotePayload struct {
 	ChallengeID string `json:"challengeId"`
-	ResponseID  string `json:"responseId"` // the response being voted for
+	ResponseID  string `json:"responseId"` // the answer being voted for
 	VoterID     string `json:"voterId"`
+	// "creator" votes for the person who posted the challenge. Empty means
+	// ResponseID names the side. See CastVote.
+	Side string `json:"side,omitempty"`
 }
 
 // ChallengeVote represents a user's vote on a challenge matchup.
