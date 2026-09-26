@@ -6651,7 +6651,8 @@ func populateTopResponses(items []HomeFeedItem) {
 			CASE WHEN COALESCE(cr.hls_manifest_url, '') IN ('', 'PENDING') THEN ''
 			     ELSE cr.hls_manifest_url END,
 			ru.username, ru.league,
-			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = cr.challenge_id)
+			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = cr.challenge_id),
+			(SELECT COUNT(*) FROM challenge_response_likes WHERE response_id = cr.id)
 		FROM challenge_responses cr
 		JOIN users ru ON cr.responder_id = ru.id
 		WHERE cr.challenge_id IN (` + strings.Join(placeholders, ",") + `)
@@ -6662,11 +6663,14 @@ func populateTopResponses(items []HomeFeedItem) {
 		return
 	}
 	defer rows.Close()
+	seen := 0
 	for rows.Next() {
-		var cid, rid, totalCount int
+		var cid, rid, totalCount, answerLikes int
 		var videoURL, thumbURL, hlsURL, username, league string
 		var variantsRaw []byte
-		if err := rows.Scan(&cid, &rid, &videoURL, &thumbURL, &variantsRaw, &hlsURL, &username, &league, &totalCount); err != nil {
+		if scanFailed("populateTopResponses: a battle's answer",
+			rows.Scan(&cid, &rid, &videoURL, &thumbURL, &variantsRaw, &hlsURL,
+				&username, &league, &totalCount, &answerLikes), &seen) {
 			continue
 		}
 		// Decode variants leniently — a malformed payload should NOT
@@ -6691,6 +6695,7 @@ func populateTopResponses(items []HomeFeedItem) {
 			ch.TopResponseHLSManifestURL = hlsURL
 			ch.TopResponseUsername = username
 			ch.TopResponseLeague = league
+			ch.TopResponseLikes = answerLikes
 			ch.TopResponseVideoVariants = variants
 			// Self-heal ResponseCount: if the candidate source didn't fetch
 			// it but the JOIN proves there's a response, surface the truth

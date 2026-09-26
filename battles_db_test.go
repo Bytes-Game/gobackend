@@ -507,6 +507,26 @@ func TestLikeAnswer_CountsForTheAnswerNotTheCreator(t *testing.T) {
 	}
 }
 
+func TestFeed_ABattleCarriesItsAnswersOwnLikes(t *testing.T) {
+	// The reel's heart shows the answer's likes while the answer is on
+	// screen, so the feed has to send them.
+	defer withDB(t)()
+	cid, rid := liveBattle(t)
+	ridN, _ := strconv.Atoi(rid)
+	for _, v := range []int{5951, 5952} {
+		voter(t, v, 3)
+		if _, _, err := toggleResponseLike(context.Background(), ridN, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items := []HomeFeedItem{{Type: "challenge", Challenge: &Challenge{ID: cid}}}
+	populateTopResponses(items)
+	if got := items[0].Challenge; got.TopResponseID != rid || got.TopResponseLikes != 2 {
+		t.Errorf("feed item for the battle: answer %q with %d likes, want %s with 2",
+			got.TopResponseID, got.TopResponseLikes, rid)
+	}
+}
+
 // ── deciding ──────────────────────────────────────────────────────────────
 
 func TestResolve_DecidesOnceAndUpdatesTheRecords(t *testing.T) {

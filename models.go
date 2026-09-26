@@ -244,6 +244,10 @@ type Challenge struct {
 	TopResponseThumbnailUrl string `json:"topResponseThumbnailUrl,omitempty"`
 	TopResponseUsername     string `json:"topResponseUsername,omitempty"`
 	TopResponseLeague       string `json:"topResponseLeague,omitempty"`
+	// The answer's own likes. A like on a battle reel goes to whichever
+	// side is on screen, so the heart shows this count while the answer
+	// is showing.
+	TopResponseLikes int `json:"topResponseLikes,omitempty"`
 	// Adaptive-bitrate variants for the top response, mirroring the
 	// primary VideoVariants map. Empty when the response was uploaded
 	// before the multi-bitrate feature shipped — the client should
