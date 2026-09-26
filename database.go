@@ -806,8 +806,10 @@ func runMigrations() error {
 // trip per call site. TOTP enabled state is checked in a separate
 // (indexed PK lookup) query because user_totp is a sensitive table
 // and we want the access to be auditable from a single chokepoint.
-func readUser(id int, username, pw, fullName, bio, visibility, settingsJSON string, wins, losses int, league string) User {
+func readUser(id int, username, pw, fullName, bio, visibility, settingsJSON string, wins, losses int, league string, rating, draws int) User {
 	u := User{
+		Rating:     rating,
+		Draws:      draws,
 		ID:         strconv.Itoa(id),
 		Username:   username,
 		password:   pw,
@@ -955,20 +957,20 @@ func applyFollows(users []User, rows *sql.Rows) {
 // in readUser simple even if a freshly-inserted user pre-dates the
 // migration that added the column default.
 func GetUserByUsername(username string) (User, bool) {
-	var id, wins, losses int
+	var id, wins, losses, rating, draws int
 	var uname, pw, fullName, bio, visibility, settings, league string
 	err := db.QueryRow(
 		`SELECT id, username, password, full_name,
 		        COALESCE(bio,''), COALESCE(visibility,'public'),
 		        COALESCE(settings::text,'{}'),
-		        wins, losses, league
+		        wins, losses, league, rating, draws
 		   FROM users WHERE username = $1`,
 		username,
-	).Scan(&id, &uname, &pw, &fullName, &bio, &visibility, &settings, &wins, &losses, &league)
+	).Scan(&id, &uname, &pw, &fullName, &bio, &visibility, &settings, &wins, &losses, &league, &rating, &draws)
 	if err != nil {
 		return User{}, false
 	}
-	return readUser(id, uname, pw, fullName, bio, visibility, settings, wins, losses, league), true
+	return readUser(id, uname, pw, fullName, bio, visibility, settings, wins, losses, league, rating, draws), true
 }
 
 // GetUserByID returns a fully enriched user, looked up by string ID.
@@ -977,20 +979,20 @@ func GetUserByID(idStr string) (User, bool) {
 	if err != nil {
 		return User{}, false
 	}
-	var wins, losses int
+	var wins, losses, rating, draws int
 	var uname, pw, fullName, bio, visibility, settings, league string
 	err = db.QueryRow(
 		`SELECT id, username, password, full_name,
 		        COALESCE(bio,''), COALESCE(visibility,'public'),
 		        COALESCE(settings::text,'{}'),
-		        wins, losses, league
+		        wins, losses, league, rating, draws
 		   FROM users WHERE id = $1`,
 		idInt,
-	).Scan(&idInt, &uname, &pw, &fullName, &bio, &visibility, &settings, &wins, &losses, &league)
+	).Scan(&idInt, &uname, &pw, &fullName, &bio, &visibility, &settings, &wins, &losses, &league, &rating, &draws)
 	if err != nil {
 		return User{}, false
 	}
-	return readUser(idInt, uname, pw, fullName, bio, visibility, settings, wins, losses, league), true
+	return readUser(idInt, uname, pw, fullName, bio, visibility, settings, wins, losses, league, rating, draws), true
 }
 
 // UserExists checks whether a username is already taken.
@@ -1733,10 +1735,11 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 	// though somebody had made a claim. See migrations/010.
 	creatorCategory := usableCategory(strings.ToLower(strings.TrimSpace(payload.Category)))
 	err = db.QueryRow(
-		`INSERT INTO challenges (creator_id, video_url, video_variants, thumbnail_url, prefix, subject, visibility, category, creator_category, category_source, emotion_tags, custom_tags, energy_level)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id, created_at`,
+		`INSERT INTO challenges (creator_id, video_url, video_variants, thumbnail_url, prefix, subject, visibility, category, creator_category, category_source, emotion_tags, custom_tags, energy_level, battle_days)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id, created_at`,
 		creatorID, payload.VideoURL, variantsJSON, payload.ThumbnailURL, payload.Prefix, payload.Subject, payload.Visibility,
 		category, creatorCategory, categorySourceAtUpload(creatorCategory, category), emotionJSON, tagsJSON, energyLevel,
+		clampBattleDays(payload.BattleDays),
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return Challenge{}, err
@@ -2204,8 +2207,19 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 		wakeTranscodeWorker()
 	}
 
-	// Update challenge status to "active".
-	db.Exec(`UPDATE challenges SET status = 'active' WHERE id = $1 AND status = 'open'`, cid)
+	// The battle is on: its clock starts now and runs battle_days. Only the
+	// first answer starts it; a later one joins the battle already running.
+	// If this fails the answer is saved but the battle never starts, so it
+	// has to say so.
+	if _, err := db.Exec(`
+		UPDATE challenges
+		   SET status = 'active',
+		       accepted_at = NOW(),
+		       voting_ends_at = NOW() + battle_days * INTERVAL '1 day'
+		 WHERE id = $1 AND status = 'open'`, cid); err != nil {
+		log.Printf("battle %d: answered, but could not be started: %v — it stays "+
+			"open with no end until this is fixed", cid, err)
+	}
 
 	responder, _ := GetUserByID(payload.ResponderID)
 
@@ -2386,36 +2400,107 @@ func RecordWatchEvent(payload WatchEventPayload) error {
 // Challenge Votes CRUD
 // ---------------------------------------------------------------------------
 
-// CastVote records a user's vote on a challenge response. One vote per user per challenge.
+// voteRefusal is a vote the rules do not allow. Status is the HTTP status to
+// answer with; the message is shown to the voter as it stands.
+type voteRefusal struct {
+	status int
+	msg    string
+}
+
+func (e voteRefusal) Error() string { return e.msg }
+
+// CastVote records a vote in a battle. One vote per person per battle; voting
+// again changes it.
+//
+// A vote names a side: an answer (ResponseID), or the person who posted the
+// challenge (Side "creator"). Until migration 011 there was no way to name the
+// creator, so the app sent the CHALLENGE's id as the "response". That failed
+// the foreign key, or — when some answer elsewhere had that number — counted
+// the vote for a stranger in another battle. The old form is still understood
+// so the app already on phones keeps working: a response id that is not an
+// answer in this battle but equals the battle's own id means the creator.
+//
+// Refused: votes in your own battle, votes before anyone has accepted, votes
+// after the battle has ended, and votes for an answer from another battle.
 func CastVote(payload ChallengeVotePayload) (bool, error) {
 	cid, err := strconv.Atoi(payload.ChallengeID)
 	if err != nil {
-		return false, fmt.Errorf("invalid challenge ID")
-	}
-	rid, err := strconv.Atoi(payload.ResponseID)
-	if err != nil {
-		return false, fmt.Errorf("invalid response ID")
+		return false, voteRefusal{400, "invalid challenge id"}
 	}
 	vid, err := strconv.Atoi(payload.VoterID)
 	if err != nil {
-		return false, fmt.Errorf("invalid voter ID")
+		return false, voteRefusal{400, "invalid voter id"}
 	}
 
-	// Upsert: if user already voted, update their vote
-	_, err = db.Exec(
+	var creatorID int
+	var status string
+	var endsAt, resolvedAt sql.NullTime
+	err = db.QueryRow(`
+		SELECT creator_id, status, voting_ends_at, resolved_at
+		  FROM challenges WHERE id = $1`, cid).Scan(&creatorID, &status, &endsAt, &resolvedAt)
+	if err == sql.ErrNoRows {
+		return false, voteRefusal{404, "no such battle"}
+	}
+	if err != nil {
+		return false, err
+	}
+	if resolvedAt.Valid || (endsAt.Valid && !endsAt.Time.After(time.Now())) {
+		return false, voteRefusal{409, "This battle has ended."}
+	}
+	if status != "active" {
+		return false, voteRefusal{409, "Nobody has accepted this challenge yet, so there is nothing to vote on."}
+	}
+
+	var answered bool
+	if err := db.QueryRow(`
+		SELECT EXISTS (SELECT 1 FROM challenge_responses
+		                WHERE challenge_id = $1 AND responder_id = $2)`,
+		cid, vid).Scan(&answered); err != nil {
+		return false, err
+	}
+	if vid == creatorID || answered {
+		return false, voteRefusal{403, "You can't vote in your own battle."}
+	}
+
+	var side any // nil = the creator
+	if payload.Side != "creator" {
+		rid, err := strconv.Atoi(payload.ResponseID)
+		if err != nil {
+			return false, voteRefusal{400, "invalid response id"}
+		}
+		var inThisBattle bool
+		if err := db.QueryRow(`
+			SELECT EXISTS (SELECT 1 FROM challenge_responses
+			                WHERE id = $1 AND challenge_id = $2)`,
+			rid, cid).Scan(&inThisBattle); err != nil {
+			return false, err
+		}
+		switch {
+		case inThisBattle:
+			side = rid
+		case rid == cid:
+			// The app's old way of saying "the creator".
+		default:
+			return false, voteRefusal{400, "That answer is not part of this battle."}
+		}
+	}
+
+	if _, err = db.Exec(
 		`INSERT INTO challenge_votes (challenge_id, response_id, voter_id)
 		 VALUES ($1,$2,$3)
 		 ON CONFLICT (challenge_id, voter_id)
-		 DO UPDATE SET response_id = $2`,
-		cid, rid, vid,
-	)
-	if err != nil {
+		 DO UPDATE SET response_id = EXCLUDED.response_id`,
+		cid, side, vid,
+	); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-// GetVoteSummary returns vote counts per response for a challenge.
+// GetVoteSummary returns vote counts per side for a challenge, as cast. The
+// creator's side is reported under the challenge's own id, which is how the
+// app has always named it. These are raw counts; which of them are genuine is
+// the standings' job — see loadBattleStandings.
 func GetVoteSummary(challengeID string) []VoteSummary {
 	cid, err := strconv.Atoi(challengeID)
 	if err != nil {
@@ -2423,30 +2508,32 @@ func GetVoteSummary(challengeID string) []VoteSummary {
 	}
 
 	rows, err := db.Query(
-		`SELECT cv.response_id, u.username, COUNT(*) AS votes
-		 FROM challenge_votes cv
-		 JOIN challenge_responses cr ON cv.response_id = cr.id
-		 JOIN users u ON cr.responder_id = u.id
-		 WHERE cv.challenge_id = $1
-		 GROUP BY cv.response_id, u.username
-		 ORDER BY votes DESC`, cid,
+		`SELECT COALESCE(cv.response_id::text, $2) AS side,
+		        COALESCE(ru.username, cu.username) AS username,
+		        COUNT(*) AS votes
+		   FROM challenge_votes cv
+		   JOIN challenges c  ON c.id = cv.challenge_id
+		   JOIN users cu      ON cu.id = c.creator_id
+		   LEFT JOIN challenge_responses cr ON cr.id = cv.response_id
+		   LEFT JOIN users ru ON ru.id = cr.responder_id
+		  WHERE cv.challenge_id = $1
+		  GROUP BY 1, 2
+		  ORDER BY votes DESC`, cid, challengeID,
 	)
-	if err != nil {
+	if queryFailed("vote summary for "+challengeID, "shown as no votes yet", err) {
 		return nil
 	}
 	defer rows.Close()
 
 	var result []VoteSummary
+	seen := 0
 	for rows.Next() {
-		var respID, votes int
-		var username string
-		if rows.Scan(&respID, &username, &votes) == nil {
-			result = append(result, VoteSummary{
-				ResponseID: strconv.Itoa(respID),
-				Username:   username,
-				Votes:      votes,
-			})
+		var side, username string
+		var votes int
+		if scanFailed("vote summary for "+challengeID, rows.Scan(&side, &username, &votes), &seen) {
+			continue
 		}
+		result = append(result, VoteSummary{ResponseID: side, Username: username, Votes: votes})
 	}
 	return result
 }

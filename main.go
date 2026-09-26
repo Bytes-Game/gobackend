@@ -488,6 +488,8 @@ func main() {
 	initPushSender()
 	startNotificationDispatcher()
 	startNotificationTriggers()
+	// Decide battles whose voting has closed, and drain idle top ratings.
+	startBattleResolver()
 	// Reset HLS transcode jobs orphaned at 'PENDING' by crashed workers.
 	startHLSReaper()
 	// Start the video worker when videos are waiting. An upload already does
@@ -559,6 +561,9 @@ func main() {
 	api.HandleFunc("/challenges/friends", authed(GetFriendsChallengesHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/accept", authed(AcceptChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/like", authed(LikeChallengeHandler)).Methods("POST", "OPTIONS")
+	// Liking the ANSWER in a battle, rather than the challenge. See
+	// LikeResponseHandler for why a battle needs both.
+	api.HandleFunc("/challenges/responses/like", authed(LikeResponseHandler)).Methods("POST", "OPTIONS")
 	// Explicit negative engagement. Persists to challenge_dislikes AND
 	// emits a not_interested feed event so the ranker learns from it —
 	// the client had been calling this path since before it existed.
@@ -573,6 +578,8 @@ func main() {
 	api.HandleFunc("/challenges/responses/{id}/tag-suggestions", authed(GetResponseTagSuggestionsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/responses/{id}/tag-suggestions", authed(DecideResponseTagSuggestionsHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/votes", GetVoteResultsHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/challenges/{id}/standings", BattleStandingsHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/challenges/{id}/battle-length", authed(ExtendBattleHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/comments", GetChallengeCommentsHandler).Methods("GET", "OPTIONS")
 	// Before the bare {id} route, or mux matches "tag-suggestions" as an id.
 	api.HandleFunc("/challenges/{id}/tag-suggestions", authed(GetTagSuggestionsHandler)).Methods("GET", "OPTIONS")
@@ -611,6 +618,7 @@ func main() {
 	// arena list filtered by hand — that hid unanswered posts after a day.
 	// See user_challenges.go.
 	api.HandleFunc("/users/{id}/challenges", authed(GetUserChallengesHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/users/{id}/battles", authed(UserBattlesHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/users/{id}/likes", authed(GetLikedChallengesHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/users/{id}/history", authed(GetWatchHistoryHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/users/{id}/history", authed(DeleteWatchHistoryHandler)).Methods("DELETE", "OPTIONS")

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -309,8 +310,10 @@ func VoteChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	// The voter is the authenticated user.
 	payload.VoterID = authUserID(r)
 
-	if payload.ChallengeID == "" || payload.ResponseID == "" || payload.VoterID == "" {
-		http.Error(w, "challengeId, responseId, and voterId are required", http.StatusBadRequest)
+	// A vote for the creator names the side instead of an answer.
+	if payload.ChallengeID == "" || payload.VoterID == "" ||
+		(payload.ResponseID == "" && payload.Side != "creator") {
+		http.Error(w, "challengeId and a side (responseId, or side: creator) are required", http.StatusBadRequest)
 		return
 	}
 
@@ -322,6 +325,11 @@ func VoteChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	voted, err := CastVote(payload)
+	var refused voteRefusal
+	if errors.As(err, &refused) {
+		http.Error(w, refused.msg, refused.status)
+		return
+	}
 	if err != nil {
 		http.Error(w, "Failed to cast vote: "+err.Error(), http.StatusInternalServerError)
 		return
