@@ -136,7 +136,7 @@ func fixSourceFastStart(ctx context.Context, cfg *workerConfig, job pendingJob, 
 		return
 	}
 
-	if err := uploadFile(ctx, cfg, fixed, key); err != nil {
+	if err := putFile(ctx, cfg, fixed, key); err != nil {
 		log.Printf("faststart: could not upload the fixed %s: %v", key, err)
 		return
 	}

@@ -250,7 +250,7 @@ func TestBothEncodersAreGivenTheLimit(t *testing.T) {
 	}
 	for _, want := range []string{
 		"transcodeHLS(ctx, srcPath, outDir, job.MaxSeconds)",
-		"buildProgressive(ctx, srcPath, outDir, job.MaxSeconds)",
+		"startProgressive(ctx, srcPath, outDir, job.MaxSeconds)",
 	} {
 		if !strings.Contains(string(src), want) {
 			t.Errorf("missing %q — that encoder runs without a limit", want)
