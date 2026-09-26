@@ -352,7 +352,7 @@ func TestRuntimeQueries_AccountDeletionRunsEveryStatement(t *testing.T) {
 	}
 }
 
-// The worker's two writers, both tables. These take the table name as a
+// The worker's writers, both tables. These take the table name as a
 // parameter, and the two tables do not have the same columns.
 func TestRuntimeQueries_WorkerWritesToBothTables(t *testing.T) {
 	defer withDB(t)()
@@ -365,12 +365,19 @@ func TestRuntimeQueries_WorkerWritesToBothTables(t *testing.T) {
 		t.Run(tc.table, func(t *testing.T) {
 			storeVideoVariants(tc.table, tc.id, map[string]string{"720p": "https://v/720.mp4"})
 			storeVideoThumbnail(tc.table, tc.id, "https://t/thumb.jpg")
+			storeLadder(tc.table, tc.id, []string{"720p", "720p_hevc"})
 
-			var variants, thumb string
+			var variants, thumb, ladder string
 			if err := db.QueryRow(
-				`SELECT COALESCE(video_variants::text,'{}'), COALESCE(thumbnail_url,'')
-				   FROM `+tc.table+` WHERE id = $1`, tc.id).Scan(&variants, &thumb); err != nil {
+				`SELECT COALESCE(video_variants::text,'{}'), COALESCE(thumbnail_url,''),
+				        COALESCE(hls_ladder::text,'')
+				   FROM `+tc.table+` WHERE id = $1`, tc.id).Scan(&variants, &thumb, &ladder); err != nil {
 				t.Fatalf("read back: %v", err)
+			}
+			if ladder == "" {
+				t.Errorf("no ladder stored on %s, so the backfill would keep "+
+					"offering its videos renditions they were already "+
+					"considered for", tc.table)
 			}
 			if variants == "{}" {
 				t.Errorf("no variants stored on %s — both writers swallow their "+

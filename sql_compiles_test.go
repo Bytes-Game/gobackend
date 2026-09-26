@@ -270,6 +270,7 @@ var runByATest = map[string]string{
 	"backfill_category_provenance.go:backfillOneTable": "TestBackfill_SettlesVideosTheModelAlreadyWatched",
 	"hls_worker_api.go:storeVideoVariants":             "TestRuntimeQueries_WorkerWritesToBothTables",
 	"hls_worker_api.go:storeVideoThumbnail":            "TestRuntimeQueries_WorkerWritesToBothTables",
+	"hls_worker_api.go:storeLadder":                    "TestRuntimeQueries_WorkerWritesToBothTables",
 	"media_analysis_read.go:readAnalysisRows":          "TestAdminAnalysisRead_RunsAgainstARealResponsesTable",
 
 	// A placeholder list built in a loop.

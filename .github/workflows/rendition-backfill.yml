@@ -28,6 +28,15 @@ name: rendition-backfill
 #   - the selection SHRINKS as the job progresses, so this can be run over and
 #     over and it finishes rather than going round in circles
 #
+# That second one used to hold only for rungs EVERY video gets, like 360p. A
+# 480p video gets no 720p_hevc, and a lean one gets no H.265 copy when it
+# would be no smaller — so after re-encoding they still "lack" it, and were
+# picked again every round, forever. The worker now reports which renditions
+# it considered for each video (hls_ladder), and a video whose last
+# conversion already considered this one drops out whether or not it got it.
+# So for the H.265 rungs, "0 left" at the end is right even though some
+# videos will never have one.
+#
 # The answer carries stillMissing — how many are left TO QUEUE after the call.
 # That is the number this loop stops on, and it is why "how many did it move"
 # is not enough on its own: fifty moved looks identical on the first round and
