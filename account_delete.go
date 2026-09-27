@@ -110,6 +110,7 @@ func DeleteAccountHandler(w http.ResponseWriter, r *http.Request) {
 			"embed:user:" + userID, "seen:" + userID,
 			"blocked_creators:" + userID, "unfollowed:" + userID,
 			"recent_bounces:" + userID, "recent_searches:" + userID,
+			recentSearchAccountsKey(userID),
 			"creator_affinity:" + userID, "tie:" + userID,
 			"lasteng:" + userID, "ltrneg:" + userID,
 		} {

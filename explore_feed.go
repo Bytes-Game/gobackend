@@ -182,7 +182,7 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// every time. ±0.10 jitter rotates near-ties; previous refresh's
 	// top-3 get -0.30/-0.20/-0.10 demotion so the head reliably changes.
 	if refresh && page == 1 {
-		prevTops := loadPrevRefreshTops(userID)
+		prevTops := loadPrevRefreshTops(userID, refreshSurfaceExplore)
 		for i := range scored {
 			// Don't jitter a hard-blocked/bounced item (negMult==0, floored to 0):
 			// +jitter would re-float it into the explore feed (which serves the
@@ -306,7 +306,7 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 		// what stops a pull-to-refresh returning the same head twice, and it
 		// is a claim about the last response, not about what was watched.
 		if refresh && page == 1 {
-			go savePrevRefreshTops(userID, items)
+			go savePrevRefreshTops(userID, refreshSurfaceExplore, items)
 		}
 	}
 

@@ -107,12 +107,11 @@ func MarkBounce(userID, contentID string) {
 // RecordSearchQuery pushes a normalized query onto the user's recent-search
 // list. The ranker biases feed categories toward these queries for 24h.
 func RecordSearchQuery(userID, query string) {
-	q := strings.ToLower(strings.TrimSpace(query))
+	// One definition of the stored form, shared with deleting it
+	// (search_history.go), so a delete always finds what was stored.
+	q := storedSearchForm(query)
 	if userID == "" || q == "" {
 		return
-	}
-	if len(q) > 64 {
-		q = q[:64]
 	}
 	key := "recent_searches:" + userID
 	_ = rdb.LPush(rctx, key, q).Err()

@@ -734,22 +734,56 @@ func applyRefreshSignal(userID, sessionID string) {
 // be different — the missing piece between "scores rotate within near-ties"
 // and "the visible video on screen actually changes when I pull-to-refresh."
 const recentRefreshTopKeyPrefix = "refresh_top:"
-const recentRefreshTopTTL = 10 * time.Minute
+
+// recentRefreshTopTTL is how long the head of a refresh is remembered.
+//
+// It was ten minutes, which only covered a pull followed by another pull.
+// The app now asks for a refreshed page every time it is OPENED, and people
+// open it again hours later, not minutes. With a ten-minute memory the
+// server had forgotten what led last time by then, so a small catalog that
+// the person had already watched came back in the same order, same first
+// video, every open. A day covers "I opened it this morning and again
+// tonight".
+const recentRefreshTopTTL = 24 * time.Hour
 const recentRefreshTopCount = 3 // remember top 3 so #1 AND #2 are demoted
 
-func recentRefreshTopKey(userID string) string {
-	return recentRefreshTopKeyPrefix + userID
+// Which feed a remembered head belongs to. Each keeps its own.
+//
+// They used to share one key per person. So pulling to refresh Search
+// overwrote what had led the home feed, and the next home refresh demoted
+// Search's videos instead of its own — the one it was meant to move past
+// came straight back to the top.
+const (
+	refreshSurfaceExplore = "explore"
+)
+
+// refreshSurfaceFeed names the For You feed and its Shorts / Battles tabs,
+// which share a ranker but show different videos at the top.
+func refreshSurfaceFeed(kind string) string {
+	if kind == feedKindAll {
+		return "feed"
+	}
+	return "feed:" + kind
+}
+
+func recentRefreshTopKey(userID, surface string) string {
+	return recentRefreshTopKeyPrefix + surface + ":" + userID
 }
 
 // loadPrevRefreshTops returns the keys (contentType:contentID) that were at
-// the head of the previous refresh. Returns empty when nothing recorded.
-func loadPrevRefreshTops(userID string) map[string]int {
+// the head of the previous refresh of [surface]. Returns empty when nothing
+// recorded.
+func loadPrevRefreshTops(userID, surface string) map[string]int {
 	out := make(map[string]int)
 	if rdb == nil || userID == "" {
 		return out
 	}
-	vals, err := rdb.LRange(rctx, recentRefreshTopKey(userID), 0, -1).Result()
+	vals, err := rdb.LRange(rctx, recentRefreshTopKey(userID, surface), 0, -1).Result()
 	if err != nil {
+		// A key that was never written reads as an empty list, not an
+		// error, so this is Redis itself failing.
+		log.Printf("refresh: could not read what led %s's last %s "+
+			"refresh, so it may lead again: %v", userID, surface, err)
 		return out
 	}
 	for i, v := range vals {
@@ -761,12 +795,13 @@ func loadPrevRefreshTops(userID string) map[string]int {
 }
 
 // savePrevRefreshTops records the head of the just-served feed so the NEXT
-// refresh can demote them. Only call when the request was a refresh.
-func savePrevRefreshTops(userID string, items []HomeFeedItem) {
+// refresh of the same [surface] can demote them. Only call when the request
+// was a refresh.
+func savePrevRefreshTops(userID, surface string, items []HomeFeedItem) {
 	if rdb == nil || userID == "" || len(items) == 0 {
 		return
 	}
-	key := recentRefreshTopKey(userID)
+	key := recentRefreshTopKey(userID, surface)
 	pipe := rdb.Pipeline()
 	pipe.Del(rctx, key)
 	limit := recentRefreshTopCount
@@ -782,7 +817,33 @@ func savePrevRefreshTops(userID string, items []HomeFeedItem) {
 		pipe.RPush(rctx, key, member)
 	}
 	pipe.Expire(rctx, key, recentRefreshTopTTL)
-	_, _ = pipe.Exec(rctx)
+	if _, err := pipe.Exec(rctx); err != nil {
+		log.Printf("refresh: could not remember what led %s's %s refresh, "+
+			"so it may lead the next one too: %v", userID, surface, err)
+	}
+}
+
+// demotePreviousHead moves the videos that led the last refresh to the back
+// of an unscored page, keeping everything else in its order. For feeds with
+// no scores to demote, this is what makes the first video change.
+func demotePreviousHead(items []HomeFeedItem, prevTops map[string]int) []HomeFeedItem {
+	if len(prevTops) == 0 || len(items) < 2 {
+		return items
+	}
+	front := make([]HomeFeedItem, 0, len(items))
+	back := make([]HomeFeedItem, 0, len(prevTops))
+	for _, it := range items {
+		id := getItemID(it)
+		if _, led := prevTops[it.Type+":"+id]; id != "" && led {
+			back = append(back, it)
+			continue
+		}
+		front = append(front, it)
+	}
+	if len(front) == 0 {
+		return items
+	}
+	return append(front, back...)
 }
 
 // updateSessionFromEvent processes a single event and updates the session state.
@@ -5682,6 +5743,18 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		// are new.
 		items = sinkSeenItems(items, loadSeenSet(userID))
 
+		// A refresh here used to change nothing at all. This path has no
+		// scores to nudge, so the jitter and demotion the warm path applies
+		// had nothing to act on, and page 1 is the same top videos every
+		// time it is asked for. The app now refreshes on every open, so a
+		// new account would have opened on the same first video every time.
+		// Move last refresh's head to the back of the page instead.
+		if refresh && page == 1 {
+			surface := refreshSurfaceFeed(kindFilter)
+			items = demotePreviousHead(items, loadPrevRefreshTops(userID, surface))
+			go savePrevRefreshTops(userID, surface, items)
+		}
+
 		// Last step before encoding: make every item playable on the phone
 		// that asked. AFTER finalizeFeedItems so the adaptive-streaming check
 		// sees the manifest URLs it just filled in.
@@ -5849,7 +5922,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	//     item that's dramatically better than every other candidate can
 	//     still keep its top spot if it actually deserves it.
 	if refresh && page == 1 {
-		prevTops := loadPrevRefreshTops(userID)
+		prevTops := loadPrevRefreshTops(userID, refreshSurfaceFeed(kindFilter))
 		for i := range scored {
 			// Do NOT jitter/demote a hard-blocked or just-bounced item (negMult==0,
 			// score floored to 0 in scoreForUser). A +jitter would re-float it into
@@ -6040,7 +6113,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		// the next refresh can demote them and surface different content
 		// at the top. Only saved on actual refresh requests.
 		if refresh && page == 1 {
-			go savePrevRefreshTops(userID, items)
+			go savePrevRefreshTops(userID, refreshSurfaceFeed(kindFilter), items)
 		}
 		// LTR stash with 1-based position so IPW can down-weight top-slot bias.
 		// Also stash the creator ID + source for per-creator residual
