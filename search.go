@@ -137,7 +137,8 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Fetch + rerank ACCOUNTS.
 	if searchType == "all" || searchType == "accounts" || searchType == "users" {
-		resp.Accounts = rankSearchAccounts(query, userID, followingSet, fofSet, viewerLeague)
+		resp.Accounts = freshenAccounts(
+			rankSearchAccounts(query, userID, followingSet, fofSet, viewerLeague))
 	}
 
 	// Fetch + rerank CHALLENGES, then split into battles + shorts. We fetch
