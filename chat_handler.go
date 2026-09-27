@@ -333,6 +333,8 @@ func GetSavedChallengesHandler(w http.ResponseWriter, r *http.Request) {
 	if challenges == nil {
 		challenges = []Challenge{}
 	}
+	populateTopResponsesChallenges(challenges)
+	markViewerStateChallenges(userID, challenges)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(challenges)

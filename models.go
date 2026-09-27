@@ -229,6 +229,17 @@ type Challenge struct {
 	Tags        []string `json:"tags,omitempty"`        // Creator's own words — see content_tags.go
 	EnergyLevel string   `json:"energyLevel"`           // "low","medium","high"
 
+	// What the person ASKING has done to this video. Filled per request by
+	// markViewerState (viewer_state.go) at every handler that sends videos
+	// to the app, so a video you liked comes back with its heart filled.
+	// All omitempty: false and empty are the common case.
+	ViewerLiked    bool   `json:"isLiked,omitempty"`
+	ViewerSaved    bool   `json:"isSaved,omitempty"`
+	ViewerVoted    bool   `json:"hasVoted,omitempty"`
+	ViewerVotedFor string `json:"votedFor,omitempty"`
+	// Whether they liked the answer on a battle (the top response).
+	ViewerLikedAnswer bool `json:"topResponseLiked,omitempty"`
+
 	// Top response fields — populated by populateTopResponses() at the
 	// feed-handler boundary for any challenge with responseCount > 0. Lets
 	// the client render the opponent's video on a left-swipe without an

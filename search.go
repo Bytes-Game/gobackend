@@ -166,6 +166,13 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 		if len(resp.Battles) > 0 {
 			populateTopResponsesChallenges(resp.Battles)
 		}
+		// Hearts, saves and votes — only for whoever is actually signed in.
+		// This route takes a userId in the address from anyone, and using
+		// that here would let a stranger read what someone else liked.
+		if viewer := signedInUserID(r); viewer != "" {
+			markViewerStateChallenges(viewer, resp.Battles)
+			markViewerStateChallenges(viewer, resp.Shorts)
+		}
 		// Also surface the merged list under the legacy "challenges" key so
 		// old clients keep working without a server-side breaking change.
 		// Built AFTER enrichment so the legacy slice carries opponent fields

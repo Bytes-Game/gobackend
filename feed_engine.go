@@ -5687,6 +5687,9 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		// and the client rendered them as plain shorts — every
 		// brand-new user saw a battle-less "shorts only" feed.
 		finalizeFeedItems(items)
+		// And what this person has liked, saved and voted for, after the
+		// answers are filled in (liking the answer needs its id).
+		markViewerStateItems(userID, items)
 
 		// Positional spacing, after enrichment so battle/short is read
 		// off the same field the client renders from. See
@@ -6083,6 +6086,7 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// TopResponseVideoUrl, which finalizeFeedItems is what fills in.
 	rawCount := len(composed)
 	finalizeFeedItemsScored(composed)
+	markViewerStateScored(userID, composed)
 	composed = spaceOutFeedKindsScored(composed)
 
 	// Single-kind tab, if that is the tab asking. After spacing so the page it
@@ -6542,6 +6546,7 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 
 	// Shared enrichment choke point — same as For You / Explore.
 	finalizeFeedItems(items)
+	markViewerStateItems(userID, items)
 
 	// Chronological stays the contract: this only stops a run of one
 	// kind, and both kinds keep their own newest-first order inside the

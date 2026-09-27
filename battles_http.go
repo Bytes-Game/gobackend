@@ -139,6 +139,9 @@ type BattleCard struct {
 	Opponent     string     `json:"opponent,omitempty"`
 	RatingChange int        `json:"ratingChange"`
 	Leading      bool       `json:"leading"`
+	// The whole video, as a feed would send it, so the tab can show and
+	// play it. See profile_videos.go.
+	Video *Challenge `json:"video,omitempty"`
 }
 
 // BattleSummary is the record at the top of a profile.
@@ -204,6 +207,7 @@ func UserBattlesHandler(w http.ResponseWriter, r *http.Request) {
 	if cards == nil {
 		cards = []BattleCard{}
 	}
+	attachBattleVideos(cards, authUserID(r))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"summary": summary, "tab": tab, "battles": cards})
 }

@@ -212,6 +212,14 @@ func GetChallengeDetailHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The top answer and the viewer's own like, save and vote, as every feed
+	// sends them, so the page's heart starts right. Only for a signed-in
+	// viewer: this route is public and a userId in the address is anyone's.
+	one := []Challenge{challenge}
+	populateTopResponsesChallenges(one)
+	markViewerStateChallenges(signedInUserID(r), one)
+	challenge = one[0]
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"challenge":     challenge,

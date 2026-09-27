@@ -231,26 +231,25 @@ func GetLikedChallengesHandler(w http.ResponseWriter, r *http.Request) {
 	limit := parseIntOrDefault(r.URL.Query().Get("limit"), 24, 100)
 	beforeRaw := r.URL.Query().Get("before") // unix seconds, optional cursor
 
-	// SELECT joins so we return ChallengeModel-shaped rows the
-	// existing /feed/smart parser already handles.
+	// Which videos, newest like first. The videos themselves are loaded
+	// below, whole, the way every feed loads them.
 	q := `
-		SELECT c.id, c.creator_id, COALESCE(u.username,'') AS creator_username,
-		       COALESCE(u.league,'Bronze') AS creator_league,
-		       c.video_url, COALESCE(c.thumbnail_url,''),
-		       c.prefix, c.subject, c.visibility, c.status,
-		       (SELECT COUNT(*) FROM challenge_likes WHERE challenge_id = c.id) AS likes,
-		       c.views,
-		       c.created_at,
-		       cl.created_at AS liked_at
+		SELECT cl.challenge_id, cl.created_at AS liked_at
 		  FROM challenge_likes cl
 		  JOIN challenges c ON c.id = cl.challenge_id
-		  LEFT JOIN users u ON u.id = c.creator_id
 		 WHERE cl.user_id = $1`
 	args := []any{uidInt}
 	if beforeRaw != "" {
-		if beforeSec, err := strconv.ParseInt(beforeRaw, 10, 64); err == nil {
+		if before, err := strconv.ParseInt(beforeRaw, 10, 64); err == nil {
+			// Microseconds now; whole seconds from an app that kept an
+			// older cursor. Seconds lost every like after the first in
+			// the same second as the page's last one.
+			at := time.Unix(before, 0)
+			if before > 1e12 {
+				at = time.UnixMicro(before)
+			}
 			q += " AND cl.created_at < $2"
-			args = append(args, time.Unix(beforeSec, 0))
+			args = append(args, at)
 		}
 	}
 	q += " ORDER BY cl.created_at DESC LIMIT $" + strconv.Itoa(len(args)+1)
@@ -263,45 +262,45 @@ func GetLikedChallengesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	items := []map[string]any{}
-	var lastLikedAt time.Time
+	type likedRow struct {
+		id      int
+		likedAt time.Time
+	}
+	liked := []likedRow{}
+	bad := 0
 	for rows.Next() {
-		var id, creatorID int
-		var creatorUsername, creatorLeague, videoURL, thumbURL, prefix, subject, visibility, status string
-		var likes, views int
-		var createdAt, likedAt time.Time
-		if err := rows.Scan(&id, &creatorID, &creatorUsername, &creatorLeague,
-			&videoURL, &thumbURL, &prefix, &subject, &visibility, &status,
-			&likes, &views, &createdAt, &likedAt); err != nil {
+		var id int
+		var likedAt time.Time
+		if scanFailed("a video this person liked",
+			rows.Scan(&id, &likedAt), &bad) {
 			continue
 		}
-		lastLikedAt = likedAt
-		items = append(items, map[string]any{
-			"id":              strconv.Itoa(id),
-			"creatorId":       strconv.Itoa(creatorID),
-			"creatorUsername": creatorUsername,
-			"creatorLeague":   creatorLeague,
-			"videoUrl":        videoURL,
-			"thumbnailUrl":    thumbURL,
-			"prefix":          prefix,
-			"subject":         subject,
-			"visibility":      visibility,
-			"status":          status,
-			"likes":           likes,
-			"views":           views,
-			"createdAt":       createdAt.Format(time.RFC3339),
-			"likedAt":         likedAt.Format(time.RFC3339),
-		})
+		liked = append(liked, likedRow{id, likedAt})
 	}
 
-	hasMore := len(items) > limit
+	hasMore := len(liked) > limit
 	if hasMore {
-		items = items[:limit] // drop the lookahead row
+		liked = liked[:limit] // drop the lookahead row
 	}
 	next := ""
-	if hasMore && !lastLikedAt.IsZero() {
-		next = strconv.FormatInt(lastLikedAt.Unix(), 10)
+	if hasMore && len(liked) > 0 {
+		next = strconv.FormatInt(liked[len(liked)-1].likedAt.UnixMicro(), 10)
 	}
+
+	// The whole video for each, the same record every feed sends — its
+	// encoded versions, its answer if it is a battle, and what this person
+	// has done to it — so the Liked tab plays like every other grid instead
+	// of opening a bare player on the raw upload.
+	ids := make([]int, len(liked))
+	for i, l := range liked {
+		ids[i] = l.id
+	}
+	items := challengesByIDs(ids)
+	if items == nil {
+		items = []Challenge{}
+	}
+	populateTopResponsesChallenges(items)
+	markViewerStateChallenges(userID, items)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":      items,
 		"hasMore":    hasMore,

@@ -258,6 +258,7 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// BEFORE the filter because battle-ness is read from TopResponseVideoUrl,
 	// which is what this fills in.
 	finalizeFeedItemsScored(composed)
+	markViewerStateScored(userID, composed)
 	composed = spaceOutFeedKindsScored(composed)
 
 	// Single-kind tab, if that is the tab asking. Before the impression
