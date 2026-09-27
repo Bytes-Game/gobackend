@@ -83,6 +83,11 @@ func GetUserChallengesHandler(w http.ResponseWriter, r *http.Request) {
 	if challenges == nil {
 		challenges = []Challenge{}
 	}
+	// Finished like any feed's videos: the answer on a battle, and whether
+	// the person looking has liked, saved or voted. Without these a battle
+	// opened from a profile played as a plain video with an empty heart.
+	populateTopResponsesChallenges(challenges)
+	markViewerStateChallenges(authUserID(r), challenges)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(challenges)
 }
