@@ -25,6 +25,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -277,16 +278,27 @@ func fetchTrendingSearches(limit int) []string {
 // GET /api/v1/search/recent — reads the same recent_searches:{user}
 // LIST the For You ranker's searchBoost consumes (signals_negative.go),
 // so the UI and the algorithm share one source of truth.
+//
+// Also sends the accounts opened from search (search_history.go), so the
+// bar can show both. The same search made twice is stored twice — the
+// ranker counts repetition — but is listed once.
 func RecentSearchesHandler(w http.ResponseWriter, r *http.Request) {
 	userID := authUserID(r)
 	queries := []string{}
 	if rdb != nil && userID != "" {
-		if qs, err := rdb.LRange(rctx, "recent_searches:"+userID, 0, 9).Result(); err == nil && qs != nil {
-			queries = qs
+		qs, err := rdb.LRange(rctx, "recent_searches:"+userID, 0, 9).Result()
+		if err != nil {
+			log.Printf("search history: could not read %s's recent searches; "+
+				"the bar shows none: %v", userID, err)
+		} else if qs != nil {
+			queries = dedupeKeepOrder(qs)
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"recent": queries})
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"recent":   queries,
+		"accounts": recentSearchAccounts(userID),
+	})
 }
 
 // TrendingSearchesHandler returns the platform's current top queries.

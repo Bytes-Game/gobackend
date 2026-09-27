@@ -674,6 +674,9 @@ func main() {
 	// Search-page empty state: the caller's recent queries (authed —
 	// personal data) and the platform's trending queries (public).
 	api.HandleFunc("/search/recent", authed(RecentSearchesHandler)).Methods("GET", "OPTIONS")
+	// Deleting from the search history: one search, one account, or all.
+	api.HandleFunc("/search/recent", authed(DeleteRecentSearchHandler)).Methods("DELETE")
+	api.HandleFunc("/search/recent/account", authed(RecordSearchedAccountHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/search/trending", TrendingSearchesHandler).Methods("GET", "OPTIONS")
 
 	// Push notifications: token registration, prefs, click tracking.
