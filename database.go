@@ -2415,15 +2415,26 @@ func RecordWatchEvent(payload WatchEventPayload) error {
 
 // voteRefusal is a vote the rules do not allow. Status is the HTTP status to
 // answer with; the message is shown to the voter as it stands.
+//
+// yourVote is set only when the refusal is "you already voted": the side
+// that person's one vote is on ("creator", or the answer's id), so the app
+// can show it instead of guessing.
 type voteRefusal struct {
-	status int
-	msg    string
+	status   int
+	msg      string
+	yourVote string
 }
+
+// alreadyVotedMsg is what someone sees when they try to vote a second time.
+// Said as a fact, not as an error: nothing went wrong.
+const alreadyVotedMsg = "You already voted in this battle. Everyone gets one vote."
 
 func (e voteRefusal) Error() string { return e.msg }
 
-// CastVote records a vote in a battle. One vote per person per battle; voting
-// again changes it.
+// CastVote records a vote in a battle. One vote per person per battle, and
+// it stays where it was cast: a second vote is refused with alreadyVotedMsg,
+// whichever side it names. (It used to move the vote. The owner asked for
+// one vote that sticks.)
 //
 // A vote names a side: an answer (ResponseID), or the person who posted the
 // challenge (Side "creator"). Until migration 011 there was no way to name the
@@ -2438,11 +2449,11 @@ func (e voteRefusal) Error() string { return e.msg }
 func CastVote(payload ChallengeVotePayload) (bool, error) {
 	cid, err := strconv.Atoi(payload.ChallengeID)
 	if err != nil {
-		return false, voteRefusal{400, "invalid challenge id"}
+		return false, voteRefusal{status: 400, msg: "invalid challenge id"}
 	}
 	vid, err := strconv.Atoi(payload.VoterID)
 	if err != nil {
-		return false, voteRefusal{400, "invalid voter id"}
+		return false, voteRefusal{status: 400, msg: "invalid voter id"}
 	}
 
 	var creatorID int
@@ -2452,16 +2463,16 @@ func CastVote(payload ChallengeVotePayload) (bool, error) {
 		SELECT creator_id, status, voting_ends_at, resolved_at
 		  FROM challenges WHERE id = $1`, cid).Scan(&creatorID, &status, &endsAt, &resolvedAt)
 	if err == sql.ErrNoRows {
-		return false, voteRefusal{404, "no such battle"}
+		return false, voteRefusal{status: 404, msg: "no such battle"}
 	}
 	if err != nil {
 		return false, err
 	}
 	if resolvedAt.Valid || (endsAt.Valid && !endsAt.Time.After(time.Now())) {
-		return false, voteRefusal{409, "This battle has ended."}
+		return false, voteRefusal{status: 409, msg: "This battle has ended."}
 	}
 	if status != "active" {
-		return false, voteRefusal{409, "Nobody has accepted this challenge yet, so there is nothing to vote on."}
+		return false, voteRefusal{status: 409, msg: "Nobody has accepted this challenge yet, so there is nothing to vote on."}
 	}
 
 	var answered bool
@@ -2472,14 +2483,14 @@ func CastVote(payload ChallengeVotePayload) (bool, error) {
 		return false, err
 	}
 	if vid == creatorID || answered {
-		return false, voteRefusal{403, "You can't vote in your own battle."}
+		return false, voteRefusal{status: 403, msg: "You can't vote in your own battle."}
 	}
 
 	var side any // nil = the creator
 	if payload.Side != "creator" {
 		rid, err := strconv.Atoi(payload.ResponseID)
 		if err != nil {
-			return false, voteRefusal{400, "invalid response id"}
+			return false, voteRefusal{status: 400, msg: "invalid response id"}
 		}
 		var inThisBattle bool
 		if err := db.QueryRow(`
@@ -2494,20 +2505,49 @@ func CastVote(payload ChallengeVotePayload) (bool, error) {
 		case rid == cid:
 			// The app's old way of saying "the creator".
 		default:
-			return false, voteRefusal{400, "That answer is not part of this battle."}
+			return false, voteRefusal{status: 400, msg: "That answer is not part of this battle."}
 		}
 	}
 
-	if _, err = db.Exec(
+	// DO NOTHING rather than a check first: two taps that arrive together
+	// cannot both get in, because the table allows one row per voter.
+	res, err := db.Exec(
 		`INSERT INTO challenge_votes (challenge_id, response_id, voter_id)
 		 VALUES ($1,$2,$3)
-		 ON CONFLICT (challenge_id, voter_id)
-		 DO UPDATE SET response_id = EXCLUDED.response_id`,
+		 ON CONFLICT (challenge_id, voter_id) DO NOTHING`,
 		cid, side, vid,
-	); err != nil {
+	)
+	if err != nil {
 		return false, err
 	}
+	added, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if added == 0 {
+		return false, voteRefusal{status: 409, msg: alreadyVotedMsg, yourVote: viewerVote(cid, vid)}
+	}
 	return true, nil
+}
+
+// viewerVote is the side [voterID] voted for in battle [challengeID]:
+// "creator", the answer's id, or "" if they have not voted (or it could not
+// be read — said in the log).
+func viewerVote(challengeID, voterID int) string {
+	var side string
+	err := db.QueryRow(`
+		SELECT COALESCE(response_id::text, 'creator')
+		  FROM challenge_votes
+		 WHERE challenge_id = $1 AND voter_id = $2`,
+		challengeID, voterID).Scan(&side)
+	if err == sql.ErrNoRows {
+		return ""
+	}
+	if queryFailed("reading which side someone voted for",
+		"showing them as not voted", err) {
+		return ""
+	}
+	return side
 }
 
 // GetVoteSummary returns vote counts per side for a challenge, as cast. The

@@ -29,6 +29,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -41,7 +42,12 @@ const (
 	noteFriendChallenge = "friend_challenge"
 	noteAccepted        = "challenge_accepted"
 	noteBattleStarted   = "battle_started"
+	noteBattleWon       = "battle_won"
 )
+
+// TriggerBattleWon is the phone push for "you won your battle". Sent under
+// the battle-updates setting, the same one as "your battle ends soon".
+const TriggerBattleWon TriggerKind = "battle_won"
 
 // InboxNote is one notification to one person.
 type InboxNote struct {
@@ -281,4 +287,92 @@ func SendBattleStartedNotification(c Challenge, responderID, responderName strin
 		Body: fmt.Sprintf("is battling you in “%s” — voting is open.",
 			challengeTitle(c.Prefix, c.Subject)),
 	})
+}
+
+// SendBattleWonNotification tells the winner of a battle that has just been
+// decided that they won, with the score: "You won “Who can juggle five?”
+// against leo, 14–9." In their list, and as a push to their phone.
+//
+// Nobody used to be told. A battle ran for a week and ended in silence; the
+// only way to find out was to go and look.
+//
+// A clear win only. A draw, or a battle nobody took part in, has no winner
+// to tell. The losing side is not told either — the owner asked for the
+// winner's note, and "you lost" is not a ping anybody wants.
+func SendBattleWonNotification(challengeID int, verdicts []battleVerdict) {
+	var winner *battleVerdict
+	for i := range verdicts {
+		if verdicts[i].Outcome == "won" {
+			winner = &verdicts[i]
+		}
+	}
+	if winner == nil || db == nil {
+		return
+	}
+	// Who they beat: the best of the rest, which in a two-sided battle is
+	// simply the other side.
+	var beaten *battleVerdict
+	for i := range verdicts {
+		v := &verdicts[i]
+		if v.userID == winner.userID {
+			continue
+		}
+		if beaten == nil || v.Rank < beaten.Rank {
+			beaten = v
+		}
+	}
+
+	var prefix, subject string
+	err := db.QueryRow(`
+		SELECT COALESCE(prefix, ''), COALESCE(subject, '')
+		  FROM challenges WHERE id = $1`, challengeID).Scan(&prefix, &subject)
+	queryFailed("reading the question of a battle to tell its winner",
+		"the note leaves the question out", err)
+	title := challengeTitle(prefix, subject)
+
+	body := "You won"
+	if title != "" {
+		body += fmt.Sprintf(" “%s”", title)
+	}
+	score := ""
+	if beaten != nil {
+		body += " against " + beaten.Username
+		// The score only when votes decided it. Level on votes means it
+		// went to likes, views or shares, and "3–3" would read like a draw.
+		if winner.Votes != beaten.Votes {
+			score = voteCount(winner.Votes) + "–" + voteCount(beaten.Votes)
+			body += ", " + score
+		}
+	}
+	body += "."
+
+	notifyUser(InboxNote{
+		UserID:      winner.userID,
+		Username:    winner.Username,
+		Kind:        noteBattleWon,
+		ChallengeID: challengeID,
+		Body:        body,
+	})
+
+	pushBody := title
+	if score != "" {
+		pushBody = fmt.Sprintf("%s — %s", title, score)
+	}
+	if _, _, err := enqueueNotification(EnqueueParams{
+		UserID:      strconv.Itoa(winner.userID),
+		TriggerKind: TriggerBattleWon,
+		DedupeKey:   "battle_won:" + strconv.Itoa(challengeID),
+		Title:       "You won your battle 🏆",
+		Body:        pushBody,
+		Deeplink:    fmt.Sprintf("devf://challenge/%d", challengeID),
+	}); err != nil {
+		log.Printf("battle %d: could not queue the winner's push for user %d: "+
+			"%v — they still have it in their list", challengeID, winner.userID, err)
+	}
+}
+
+// voteCount is a vote count as people read it: "14", "4.5". A vote from a
+// very new account counts half, so counts are not always whole.
+func voteCount(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
 }

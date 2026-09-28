@@ -146,12 +146,80 @@ func TestVote_TheCreatorCanBeVotedFor(t *testing.T) {
 		t.Errorf("the summary shows %d votes for the creator, want 2: %+v", creatorVotes, sum)
 	}
 
-	// Changing your mind moves the one vote.
-	if w := postVote(t, "5002", cid, rid, ""); w.Code != http.StatusOK {
-		t.Fatalf("change of vote got %d", w.Code)
+	// One vote, and it stays. A second one — for the other side or the same
+	// one — is turned down in plain words, with the side the vote is on.
+	for _, again := range []struct{ rid, side string }{{rid, ""}, {"", "creator"}} {
+		w := postVote(t, "5002", cid, again.rid, again.side)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("a second vote got %d, want 409: %s", w.Code, w.Body.String())
+		}
+		if got := strings.TrimSpace(w.Body.String()); got != alreadyVotedMsg {
+			t.Errorf("a second vote said %q, want %q", got, alreadyVotedMsg)
+		}
+		if got := w.Header().Get("X-Your-Vote"); got != "creator" {
+			t.Errorf("a second vote named the vote already cast as %q, want creator", got)
+		}
 	}
-	if got := storedVote(t, cid, 5002); got == nil || strconv.Itoa(*got) != rid {
-		t.Errorf("changed vote points at %v, want response %s", got, rid)
+	if got := storedVote(t, cid, 5002); got != nil {
+		t.Errorf("a refused second vote moved the first one to response %d", *got)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM challenge_votes
+		WHERE challenge_id = $1 AND voter_id = 5002`, cid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("voter 5002 has %d votes in the battle, want 1", n)
+	}
+
+	// Other refusals do not claim a vote that is not there.
+	if w := postVote(t, "1", cid, rid, ""); w.Header().Get("X-Your-Vote") != "" {
+		t.Errorf("the creator's refusal named a vote: %q", w.Header().Get("X-Your-Vote"))
+	}
+}
+
+// The live score tells the person asking which side their vote is on, so
+// the score page can show it from the start and never offer a second one.
+func TestStandings_SayWhichSideYouVotedFor(t *testing.T) {
+	defer withDB(t)()
+	cid, rid := liveBattle(t)
+	voter(t, 5021, 5)
+	voter(t, 5022, 5)
+	if w := postVote(t, "5021", cid, rid, ""); w.Code != http.StatusOK {
+		t.Fatalf("vote got %d: %s", w.Code, w.Body.String())
+	}
+	if w := postVote(t, "5022", cid, "", "creator"); w.Code != http.StatusOK {
+		t.Fatalf("vote got %d: %s", w.Code, w.Body.String())
+	}
+	ask := func(viewer string) string {
+		t.Helper()
+		r := httptest.NewRequest("GET", "/api/v1/challenges/"+cid+"/standings", nil)
+		r = mux.SetURLVars(r, map[string]string{"id": cid})
+		if viewer != "" {
+			r = withUser(r, viewer, "voter"+viewer)
+		}
+		w := httptest.NewRecorder()
+		BattleStandingsHandler(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("standings got %d: %s", w.Code, w.Body.String())
+		}
+		var st BattleStandings
+		if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+			t.Fatal(err)
+		}
+		return st.YourVote
+	}
+	if got := ask("5021"); got != rid {
+		t.Errorf("voter 5021 sees their vote on %q, want the answer %s", got, rid)
+	}
+	if got := ask("5022"); got != "creator" {
+		t.Errorf("voter 5022 sees their vote on %q, want creator", got)
+	}
+	if got := ask("5010"); got != "" {
+		t.Errorf("someone who never voted sees a vote on %q", got)
+	}
+	if got := ask(""); got != "" {
+		t.Errorf("nobody signed in sees a vote on %q", got)
 	}
 }
 
@@ -996,5 +1064,124 @@ func TestBattles_AreWiredIn(t *testing.T) {
 	if !strings.Contains(body, "battleResolverRound(") {
 		t.Error("startBattleResolver no longer runs battleResolverRound — " +
 			"battles would never be decided")
+	}
+}
+
+// ── telling the winner ────────────────────────────────────────────────────
+
+// winnerNotes reads what the resolver left in people's notification lists
+// and push queues for battle [cid].
+func winnerNotes(t *testing.T, cid string, userID int) (notes []string, pushes int) {
+	t.Helper()
+	rows, err := db.Query(`SELECT body FROM user_notifications
+		WHERE user_id = $1 AND kind = 'battle_won' AND challenge_id = $2`, userID, cid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var b string
+		if err := rows.Scan(&b); err != nil {
+			t.Fatal(err)
+		}
+		notes = append(notes, b)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM notification_outbox
+		WHERE user_id = $1 AND dedupe_key = $2`,
+		strconv.Itoa(userID), "battle_won:"+cid).Scan(&pushes); err != nil {
+		t.Fatal(err)
+	}
+	return notes, pushes
+}
+
+func TestResolve_TheWinnerIsToldTheyWon(t *testing.T) {
+	defer withDB(t)()
+	cid, rid := liveBattle(t)
+	ridN, _ := strconv.Atoi(rid)
+	// Two genuine votes for the answer, one for the creator.
+	for _, v := range []int{5901, 5902} {
+		voter(t, v, 5)
+		watched(t, v, "response", rid, 3000, "")
+		if _, err := db.Exec(`INSERT INTO challenge_votes (challenge_id, response_id, voter_id)
+			VALUES ($1, $2, $3)`, cid, ridN, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	voter(t, 5903, 5)
+	watched(t, 5903, "challenge", cid, 3000, `{"creatorMs":3000}`)
+	if _, err := db.Exec(`INSERT INTO challenge_votes (challenge_id, response_id, voter_id)
+		VALUES ($1, NULL, 5903)`, cid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE challenges SET voting_ends_at = NOW() - INTERVAL '1 minute' WHERE id = $1`, cid); err != nil {
+		t.Fatal(err)
+	}
+
+	// The way the running server decides it: a round of the resolver.
+	ctx := context.Background()
+	battleResolverRound(ctx, 1)
+
+	notes, pushes := winnerNotes(t, cid, 2)
+	if len(notes) != 1 {
+		t.Fatalf("the winner (user 2) has %d \"you won\" notes, want 1", len(notes))
+	}
+	if !strings.HasPrefix(notes[0], "You won “") ||
+		!strings.Contains(notes[0], " against creator, 2–1.") {
+		t.Errorf("the winner was told %q — want who they beat and the score", notes[0])
+	}
+	if pushes != 1 {
+		t.Errorf("the winner has %d pushes queued for it, want 1", pushes)
+	}
+	// The one who lost is not told.
+	if lost, lostPushes := winnerNotes(t, cid, 1); len(lost) != 0 || lostPushes != 0 {
+		t.Errorf("the losing side got %v and %d pushes", lost, lostPushes)
+	}
+	// And what the app reads back.
+	r := httptest.NewRequest("GET", "/api/v1/notifications", nil)
+	w := httptest.NewRecorder()
+	ListNotificationsHandler(w, withUser(r, "2", "liker2"))
+	if !strings.Contains(w.Body.String(), `"type":"battle_won"`) {
+		t.Errorf("the winner's list does not carry the note: %s", w.Body.String())
+	}
+
+	// Deciding again tells nobody again.
+	if ok, err := resolveBattle(ctx, mustAtoi(t, cid)); err != nil || ok {
+		t.Fatalf("decided twice: ok=%v err=%v", ok, err)
+	}
+	if again, _ := winnerNotes(t, cid, 2); len(again) != 1 {
+		t.Errorf("after a second pass the winner has %d notes", len(again))
+	}
+}
+
+func TestResolve_ADrawTellsNobody(t *testing.T) {
+	defer withDB(t)()
+	cid, rid := liveBattle(t)
+	ridN, _ := strconv.Atoi(rid)
+	voter(t, 5911, 5)
+	watched(t, 5911, "response", rid, 3000, "")
+	voter(t, 5912, 5)
+	watched(t, 5912, "challenge", cid, 3000, `{"creatorMs":3000}`)
+	if _, err := db.Exec(`INSERT INTO challenge_votes (challenge_id, response_id, voter_id)
+		VALUES ($1, $2, 5911), ($1, NULL, 5912)`, cid, ridN); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE challenges SET voting_ends_at = NOW() - INTERVAL '1 minute' WHERE id = $1`, cid); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := resolveBattle(context.Background(), mustAtoi(t, cid)); err != nil || !ok {
+		t.Fatalf("resolveBattle: ok=%v err=%v", ok, err)
+	}
+	var outcome string
+	if err := db.QueryRow(`SELECT outcome FROM battle_results
+		WHERE challenge_id = $1 AND user_id = 1`, cid).Scan(&outcome); err != nil {
+		t.Fatal(err)
+	}
+	if outcome != "draw" {
+		t.Fatalf("the battle ended %q; this test needs a draw", outcome)
+	}
+	for _, uid := range []int{1, 2} {
+		if notes, pushes := winnerNotes(t, cid, uid); len(notes) != 0 || pushes != 0 {
+			t.Errorf("user %d was told they won a battle that ended %q: %v", uid, outcome, notes)
+		}
 	}
 }

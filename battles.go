@@ -215,6 +215,11 @@ type BattleStandings struct {
 	Resolved     bool           `json:"resolved"`
 	Participants []Standing     `json:"participants"`
 	Removed      map[string]int `json:"removed"`
+
+	// YourVote is the side the signed-in person asking voted for: "creator",
+	// an answer's id, or empty. Filled by the handler, never by the count —
+	// the resolver's standings belong to nobody in particular.
+	YourVote string `json:"yourVote,omitempty"`
 }
 
 // querier is what the standings need from a database handle, so the same
@@ -733,7 +738,8 @@ func resolveBattle(ctx context.Context, challengeID int) (bool, error) {
 		return false, err
 	}
 
-	for _, v := range decideBattle(st.Participants, records) {
+	verdicts := decideBattle(st.Participants, records)
+	for _, v := range verdicts {
 		var rid any
 		if v.responseID != 0 {
 			rid = v.responseID
@@ -782,7 +788,13 @@ func resolveBattle(ctx context.Context, challengeID int) (bool, error) {
 		 WHERE id = $1`, challengeID); err != nil {
 		return false, fmt.Errorf("close battle %d: %w", challengeID, err)
 	}
-	return true, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	// Only once it is really decided, and only by the call that decided it
+	// — so a battle is never announced twice, or announced and then undone.
+	SendBattleWonNotification(challengeID, verdicts)
+	return true, nil
 }
 
 // resolveDueBattles decides every battle whose time is up, oldest first.
