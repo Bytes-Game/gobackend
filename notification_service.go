@@ -7,22 +7,6 @@ import (
 	"time"
 )
 
-// SendFollowNotification creates and sends a notification when a user follows another.
-// It checks if the recipient is online. If so, it sends the notification directly.
-// If the recipient is offline, it stores the notification in our mock Redis.
-func SendFollowNotification(payload FollowEventPayload) {
-	// The user being followed is the one who should receive the notification.
-	recipientUsername := payload.FollowingUsername
-
-	notification := Notification{
-		Type:      "follow",
-		Message:   fmt.Sprintf("%s started following you.", payload.FollowerUsername),
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	}
-
-	deliverNotification(recipientUsername, notification)
-}
-
 // SendLikeNotification sends a notification when someone likes a post.
 func SendLikeNotification(likerUsername, postAuthorUsername, caption string) {
 	// Truncate caption for display
@@ -55,107 +39,6 @@ func SendCommentNotification(commenterUsername, postAuthorUsername, commentText,
 	}
 
 	deliverNotification(postAuthorUsername, notification)
-}
-
-// SendChallengeNotification notifies friends about a new challenge.
-func SendChallengeNotification(creatorUsername, challengeTitle string, visibleTo []string) {
-	notification := Notification{
-		Type:      "challenge",
-		Message:   fmt.Sprintf("%s created a new challenge: \"%s\"", creatorUsername, challengeTitle),
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	}
-
-	if len(visibleTo) > 0 {
-		// Notify specific friends.
-		for _, uidStr := range visibleTo {
-			user, found := GetUserByID(uidStr)
-			if found {
-				deliverNotification(user.Username, notification)
-			}
-		}
-	} else {
-		// Notify all followers of the creator.
-		creator, found := GetUserByUsername(creatorUsername)
-		if !found {
-			return
-		}
-		// Get all users who follow the creator
-		allUsers := GetAllUsers()
-		for _, u := range allUsers {
-			for _, fid := range u.FollowingList {
-				if fid == creator.ID {
-					deliverNotification(u.Username, notification)
-					break
-				}
-			}
-		}
-	}
-}
-
-// SendChallengeAcceptedNotification notifies the challenger that someone accepted.
-func SendChallengeAcceptedNotification(responderUsername, challengerUsername, challengeTitle string) {
-	notification := Notification{
-		Type:      "challenge_accepted",
-		Message:   fmt.Sprintf("%s accepted your challenge: \"%s\"", responderUsername, challengeTitle),
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	}
-	deliverNotification(challengerUsername, notification)
-}
-
-// SendBattleStartedNotification tells the RESPONDER their answer landed and
-// they are now in a battle.
-//
-// ════════════════════════════════════════════════════════════════════════════
-// WHY BOTH SIDES GET TOLD
-// ════════════════════════════════════════════════════════════════════════════
-//
-// Only the challenger was told, which reads as an odd asymmetry once you look
-// at what actually happened: two people are now in a contest that people will
-// vote on, and one of them found out.
-//
-// It matters more than politeness. Accepting is the moment a short stops
-// being one person's video and becomes a thing with an opponent, a vote and a
-// result. The person who did the accepting has the most reason to come back
-// and watch it play out, and until now nothing told them it had started.
-//
-// The challenge's own title is in the message on purpose. A responder may
-// have answered several, and "you are in a battle" without saying which is a
-// notification that cannot be acted on.
-func SendBattleStartedNotification(responderUsername, challengerUsername, challengeTitle string) {
-	notification := Notification{
-		Type:      "battle_started",
-		Message:   fmt.Sprintf("You are in a battle with %s: \"%s\"", challengerUsername, challengeTitle),
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	}
-	deliverNotification(responderUsername, notification)
-}
-
-// SendVoteNotification notifies the response owner that someone voted for them.
-func SendVoteNotification(payload ChallengeVotePayload) {
-	// Get the response to find the owner
-	challenge, found := GetChallengeByID(payload.ChallengeID)
-	if !found {
-		return
-	}
-
-	voter, found := GetUserByID(payload.VoterID)
-	if !found {
-		return
-	}
-
-	// Find the response owner from the responses list
-	responses := GetChallengeResponses(payload.ChallengeID)
-	for _, resp := range responses {
-		if resp.ID == payload.ResponseID && resp.ResponderID != payload.VoterID {
-			notification := Notification{
-				Type:      "vote",
-				Message:   fmt.Sprintf("%s voted for you in \"%s %s\"", voter.Username, challenge.Prefix, challenge.Subject),
-				Timestamp: time.Now().UTC().Format(time.RFC3339),
-			}
-			deliverNotification(resp.ResponderUsername, notification)
-			break
-		}
-	}
 }
 
 // deliverNotification is a helper that sends a notification to a user

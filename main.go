@@ -584,6 +584,10 @@ func main() {
 	// Before the bare {id} route, or mux matches "tag-suggestions" as an id.
 	api.HandleFunc("/challenges/{id}/tag-suggestions", authed(GetTagSuggestionsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/tag-suggestions", authed(DecideTagSuggestionsHandler)).Methods("POST", "OPTIONS")
+	// Who voted for whom (the battle's players only) and who liked it (its
+	// poster only). See voters.go.
+	api.HandleFunc("/challenges/{id}/voters", authed(ChallengeVotersHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/challenges/{id}/likers", authed(ChallengeLikersHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/{id}", GetChallengeDetailHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/feed/recommended", authed(RecommendedFeedHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/feed/following", authed(FollowingFeedHandler)).Methods("GET", "OPTIONS")
@@ -688,6 +692,9 @@ func main() {
 	api.HandleFunc("/notifications/prefs", authed(HandleGetNotificationPrefs)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/notifications/prefs", authed(HandleSetNotificationPrefs)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/notifications/clicked", HandleNotificationClicked).Methods("POST", "OPTIONS")
+	// The notifications list the bell opens. See inbox.go.
+	api.HandleFunc("/notifications", authed(ListNotificationsHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/notifications/read", authed(MarkNotificationsReadHandler)).Methods("POST", "OPTIONS")
 
 	// Creator insights — feedback loop for creators to understand reach.
 	api.HandleFunc("/creator/insights", authed(HandleCreatorInsightsOverview)).Methods("GET", "OPTIONS")

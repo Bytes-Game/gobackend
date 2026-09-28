@@ -119,10 +119,10 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		go recordVideoDimensions("challenge", challenge.ID, dims)
 	}
 
-	// Notify friends if visibility is friends.
+	// A challenge for friends: every friend it is for hears about it — all
+	// of them, or only the ones chosen. See friends_only.go.
 	if payload.Visibility == "friends" {
-		creator, _ := GetUserByID(payload.CreatorID)
-		go SendChallengeNotification(creator.Username, payload.Prefix+" "+payload.Subject, payload.VisibleTo)
+		go notifyFriendsOfChallenge(challenge)
 	}
 
 	// Index in Meilisearch
@@ -298,9 +298,8 @@ func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	// if a websocket write fails — refusing it at this point would throw
 	// away somebody's video over a message.
 	responder, _ := GetUserByID(payload.ResponderID)
-	title := challenge.Prefix + " " + challenge.Subject
-	go SendChallengeAcceptedNotification(responder.Username, challenge.CreatorUsername, title)
-	go SendBattleStartedNotification(responder.Username, challenge.CreatorUsername, title)
+	go SendChallengeAcceptedNotification(challenge, payload.ResponderID, responder.Username)
+	go SendBattleStartedNotification(challenge, payload.ResponderID, responder.Username)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -349,8 +348,9 @@ func VoteChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		votes = []VoteSummary{}
 	}
 
-	// Send vote notification to the response owner
-	go SendVoteNotification(payload)
+	// No notification. Telling someone each time a person voted for them
+	// was a stream of pings on any live battle; who voted is a list the
+	// two players can open instead — see voters.go.
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{

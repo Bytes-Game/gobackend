@@ -395,6 +395,14 @@ func sourceFollowGraphWindowed(userID string, limit int, window string) []HomeFe
 		WHERE f.follower_id = CAST($1 AS INT)
 		  AND c.created_at > NOW() - ($3::text)::interval
 		  AND c.visibility IN ('arena','friends')
+		  -- A friends-only challenge picked for particular friends goes to
+		  -- them alone, not to every follower. See friends_only.go.
+		  AND (c.visibility = 'arena'
+		       OR NOT EXISTS (SELECT 1 FROM challenge_visible_to v
+		                       WHERE v.challenge_id = c.id)
+		       OR EXISTS (SELECT 1 FROM challenge_visible_to v
+		                   WHERE v.challenge_id = c.id
+		                     AND v.user_id = CAST($1 AS INT)))
 		ORDER BY c.created_at DESC
 		LIMIT $2`, userID, limit, window)
 	if err != nil {
