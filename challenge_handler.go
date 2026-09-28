@@ -180,8 +180,9 @@ func GetChallengeDetailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Increment views.
-	go IncrementChallengeViews(id)
+	// No view here. Opening this page used to add one every time, however
+	// often the same person opened it; a view is counted from watching the
+	// video, once a day — see counts.go.
 
 	responses := GetChallengeResponses(id)
 	if responses == nil {
@@ -334,11 +335,6 @@ func VoteChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	voted, err := CastVote(payload)
 	var refused voteRefusal
 	if errors.As(err, &refused) {
-		// The side of the vote they already have, so the app can mark it
-		// rather than guess. Only on "already voted".
-		if refused.yourVote != "" {
-			w.Header().Set("X-Your-Vote", refused.yourVote)
-		}
 		http.Error(w, refused.msg, refused.status)
 		return
 	}

@@ -2343,14 +2343,6 @@ func ToggleChallengeDislike(challengeID, userID string) (bool, int, int) {
 	return !exists, dislikes, likes
 }
 
-// IncrementChallengeViews bumps the view count for a challenge.
-func IncrementChallengeViews(challengeID string) {
-	cid, err := strconv.Atoi(challengeID)
-	if err == nil {
-		db.Exec(`UPDATE challenges SET views = views + 1 WHERE id = $1`, cid)
-	}
-}
-
 // (GetHomeFeed retired — the home reels feed is now served by SmartFeedHandler
 // (challenge-only, with the battles/shorts split). The old "3 challenges then
 // 1 post" interleave doesn't apply now that the post entity is gone.)
@@ -2377,21 +2369,6 @@ func RecordWatchEvent(payload WatchEventPayload) error {
 		return fmt.Errorf("invalid content ID")
 	}
 
-	// Check whether this user has already counted toward this challenge's
-	// view tally today. We look at watch_events directly instead of a
-	// dedicated table because the existing index on (user_id, content_id)
-	// makes this a sub-millisecond probe and avoids a schema migration.
-	shouldBumpViews := false
-	if payload.ContentType == "challenge" {
-		var prior int
-		_ = db.QueryRow(`
-			SELECT COUNT(*) FROM watch_events
-			WHERE user_id = $1 AND content_id = $2 AND content_type = 'challenge'
-			AND created_at > NOW() - INTERVAL '24 hours'`,
-			uid, cid).Scan(&prior)
-		shouldBumpViews = prior == 0
-	}
-
 	_, err = db.Exec(
 		`INSERT INTO watch_events (user_id, content_id, content_type, watch_time, completed)
 		 VALUES ($1,$2,$3,$4,$5)`,
@@ -2401,10 +2378,12 @@ func RecordWatchEvent(payload WatchEventPayload) error {
 		return err
 	}
 
-	if shouldBumpViews {
-		// Best effort — a failure here shouldn't fail the analytics insert
-		// above, which is the source of truth for the recommender.
-		go IncrementChallengeViews(payload.ContentID)
+	// The view itself: once a day per person per video, for each video of
+	// the card that was on screen long enough — see counts.go.
+	if payload.ContentType == "challenge" {
+		for _, rid := range videosWatched(cid, payload) {
+			recordView(uid, cid, rid)
+		}
 	}
 	return nil
 }
@@ -2415,26 +2394,16 @@ func RecordWatchEvent(payload WatchEventPayload) error {
 
 // voteRefusal is a vote the rules do not allow. Status is the HTTP status to
 // answer with; the message is shown to the voter as it stands.
-//
-// yourVote is set only when the refusal is "you already voted": the side
-// that person's one vote is on ("creator", or the answer's id), so the app
-// can show it instead of guessing.
 type voteRefusal struct {
-	status   int
-	msg      string
-	yourVote string
+	status int
+	msg    string
 }
-
-// alreadyVotedMsg is what someone sees when they try to vote a second time.
-// Said as a fact, not as an error: nothing went wrong.
-const alreadyVotedMsg = "You already voted in this battle. Everyone gets one vote."
 
 func (e voteRefusal) Error() string { return e.msg }
 
-// CastVote records a vote in a battle. One vote per person per battle, and
-// it stays where it was cast: a second vote is refused with alreadyVotedMsg,
-// whichever side it names. (It used to move the vote. The owner asked for
-// one vote that sticks.)
+// CastVote records a vote in a battle. One vote per person per battle;
+// voting again moves it to the side named. (For a while a second vote was
+// refused; the owner asked for changing your mind to be allowed again.)
 //
 // A vote names a side: an answer (ResponseID), or the person who posted the
 // challenge (Side "creator"). Until migration 011 there was no way to name the
@@ -2509,23 +2478,16 @@ func CastVote(payload ChallengeVotePayload) (bool, error) {
 		}
 	}
 
-	// DO NOTHING rather than a check first: two taps that arrive together
-	// cannot both get in, because the table allows one row per voter.
-	res, err := db.Exec(
+	// One row per voter, so a second vote moves the first rather than
+	// adding to it — even two taps arriving together.
+	if _, err := db.Exec(
 		`INSERT INTO challenge_votes (challenge_id, response_id, voter_id)
 		 VALUES ($1,$2,$3)
-		 ON CONFLICT (challenge_id, voter_id) DO NOTHING`,
+		 ON CONFLICT (challenge_id, voter_id)
+		 DO UPDATE SET response_id = EXCLUDED.response_id`,
 		cid, side, vid,
-	)
-	if err != nil {
+	); err != nil {
 		return false, err
-	}
-	added, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	if added == 0 {
-		return false, voteRefusal{status: 409, msg: alreadyVotedMsg, yourVote: viewerVote(cid, vid)}
 	}
 	return true, nil
 }

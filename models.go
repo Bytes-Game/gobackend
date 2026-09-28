@@ -202,7 +202,13 @@ type Challenge struct {
 	// challenge_comments at the feed-handler boundary so the reels right-rail
 	// can render the same digit the comment sheet shows. Omitempty keeps the
 	// payload tight for legacy callers that haven't started reading it.
-	CommentCount  int    `json:"commentCount,omitempty"`
+	CommentCount int `json:"commentCount,omitempty"`
+	// Votes cast, people who shared, and people who saved it. Filled with
+	// the comment count by fillCounts (counts.go), for every video the app
+	// is sent, so each screen shows the same numbers.
+	VoteCount     int    `json:"voteCount"`
+	ShareCount    int    `json:"shareCount"`
+	SaveCount     int    `json:"saveCount"`
 	CreatedAt     string `json:"createdAt"`
 	ExpiresAt     string `json:"expiresAt"`
 	ResponseCount int    `json:"responseCount"`
@@ -552,6 +558,11 @@ type WatchEventPayload struct {
 	ContentType string `json:"contentType"`
 	WatchTime   int    `json:"watchTime"`
 	Completed   bool   `json:"completed"`
+	// On a battle: how long each video was on screen, and which answer.
+	// Decides which videos the view counts for — see videosWatched.
+	CreatorMs  int    `json:"creatorMs,omitempty"`
+	OpponentMs int    `json:"opponentMs,omitempty"`
+	ResponseID string `json:"responseId,omitempty"`
 }
 
 // Report represents a user report on content or another user.

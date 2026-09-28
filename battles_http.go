@@ -47,80 +47,15 @@ func BattleStandingsHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(st)
 }
 
-// POST /api/v1/challenges/{id}/battle-length   {"days": 14}
+// POST /api/v1/challenges/{id}/battle-length
 //
-// The creator makes their battle longer. Never shorter — people are voting on
-// the length they were shown — and never past battleMaxDays. Allowed until the
-// battle is decided; once running, the end moves with it.
+// Refused, always. A battle runs for the length chosen when it was posted:
+// people vote knowing when it ends, and the owner asked that nobody can
+// stretch it once it is up. The route stays so an older app that still
+// offers "Make it longer" gets a plain answer instead of a 404.
 func ExtendBattleHandler(w http.ResponseWriter, r *http.Request) {
-	if db == nil {
-		http.Error(w, "db unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	id, err := strconv.Atoi(mux.Vars(r)["id"])
-	if err != nil {
-		http.Error(w, "challenge id must be a number", http.StatusBadRequest)
-		return
-	}
-	var body struct {
-		Days int `json:"days"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "body must be {\"days\": n}", http.StatusBadRequest)
-		return
-	}
-	var creatorID, days int
-	var resolved sql.NullTime
-	err = db.QueryRow(`SELECT creator_id, battle_days, resolved_at FROM challenges WHERE id = $1`, id).
-		Scan(&creatorID, &days, &resolved)
-	if errors.Is(err, sql.ErrNoRows) {
-		http.Error(w, "no such battle", http.StatusNotFound)
-		return
-	}
-	if queryFailed("battle length of "+strconv.Itoa(id), "answered 500", err) {
-		http.Error(w, "could not read this battle", http.StatusInternalServerError)
-		return
-	}
-	if strconv.Itoa(creatorID) != authUserID(r) {
-		http.Error(w, "only the person who posted the challenge can change its length", http.StatusForbidden)
-		return
-	}
-	if resolved.Valid {
-		http.Error(w, "this battle has already been decided", http.StatusConflict)
-		return
-	}
-	if body.Days <= days {
-		http.Error(w, "a battle can be made longer, not shorter", http.StatusBadRequest)
-		return
-	}
-	newDays := clampBattleDays(body.Days)
-	// The extra days go on the END, not on the start. A battle that was
-	// already running when battles got an end was given a fresh week from
-	// that day (see migration 011), so its end is not its start plus its
-	// length — and working it out from the start would move the end of a
-	// month-old battle into the past and close it on the spot.
-	var endsAt sql.NullTime
-	err = db.QueryRow(`
-		UPDATE challenges
-		   SET battle_days = $2::int,
-		       voting_ends_at = voting_ends_at + ($2::int - battle_days) * INTERVAL '1 day'
-		 WHERE id = $1 AND resolved_at IS NULL
-		RETURNING voting_ends_at`, id, newDays).Scan(&endsAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		http.Error(w, "this battle has already been decided", http.StatusConflict)
-		return
-	}
-	if err != nil {
-		queryFailed("extend battle "+strconv.Itoa(id), "answered 500", err)
-		http.Error(w, "could not change the length", http.StatusInternalServerError)
-		return
-	}
-	out := map[string]any{"battleDays": newDays}
-	if endsAt.Valid {
-		out["endsAt"] = endsAt.Time
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(out)
+	http.Error(w, "A battle's length is set when it is posted and can't be changed.",
+		http.StatusForbidden)
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -310,8 +245,8 @@ func loadBattleCards(ctx context.Context, q querier, uid int, tab string, visito
 		rows, err = q.QueryContext(ctx, `
 			SELECT c.id, TRIM(c.prefix || ' ' || c.subject), COALESCE(c.thumbnail_url, ''),
 			       COALESCE(c.video_url, ''), br.role, c.status, br.outcome, c.created_at,
-			       c.voting_ends_at, br.decided_at, br.votes,
-			       COALESCE((SELECT MAX(o.votes) FROM battle_results o
+			       c.voting_ends_at, br.decided_at, br.raw_votes,
+			       COALESCE((SELECT MAX(o.raw_votes) FROM battle_results o
 			                  WHERE o.challenge_id = br.challenge_id AND o.user_id <> br.user_id), 0),
 			       COALESCE((SELECT u.username FROM battle_results o JOIN users u ON u.id = o.user_id
 			                  WHERE o.challenge_id = br.challenge_id AND o.user_id <> br.user_id
@@ -363,12 +298,14 @@ func loadBattleCards(ctx context.Context, q querier, uid int, tab string, visito
 					"shown with no score", err)
 				continue
 			}
+			// The votes people see everywhere else: every vote cast.
 			for _, p := range st.Participants {
+				shown := float64(p.ShownVotes)
 				if p.UserID == me {
-					cards[i].MyVotes = p.Votes
+					cards[i].MyVotes = shown
 					cards[i].Leading = p.Leading
-				} else if p.Votes >= cards[i].TheirVotes {
-					cards[i].TheirVotes = p.Votes
+				} else if shown >= cards[i].TheirVotes {
+					cards[i].TheirVotes = shown
 					cards[i].Opponent = p.Username
 				}
 			}

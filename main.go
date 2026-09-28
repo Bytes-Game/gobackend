@@ -588,6 +588,8 @@ func main() {
 	// poster only). See voters.go.
 	api.HandleFunc("/challenges/{id}/voters", authed(ChallengeVotersHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/likers", authed(ChallengeLikersHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/challenges/{id}/people", authed(ChallengePeopleHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/challenges/share", authed(ShareChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/{id}", GetChallengeDetailHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/feed/recommended", authed(RecommendedFeedHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/feed/following", authed(FollowingFeedHandler)).Methods("GET", "OPTIONS")
