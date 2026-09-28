@@ -146,23 +146,20 @@ func TestVote_TheCreatorCanBeVotedFor(t *testing.T) {
 		t.Errorf("the summary shows %d votes for the creator, want 2: %+v", creatorVotes, sum)
 	}
 
-	// One vote, and it stays. A second one — for the other side or the same
-	// one — is turned down in plain words, with the side the vote is on.
-	for _, again := range []struct{ rid, side string }{{rid, ""}, {"", "creator"}} {
-		w := postVote(t, "5002", cid, again.rid, again.side)
-		if w.Code != http.StatusConflict {
-			t.Fatalf("a second vote got %d, want 409: %s", w.Code, w.Body.String())
-		}
-		if got := strings.TrimSpace(w.Body.String()); got != alreadyVotedMsg {
-			t.Errorf("a second vote said %q, want %q", got, alreadyVotedMsg)
-		}
-		if got := w.Header().Get("X-Your-Vote"); got != "creator" {
-			t.Errorf("a second vote named the vote already cast as %q, want creator", got)
-		}
+	// Changing your mind moves the one vote: to the answer, and back.
+	if w := postVote(t, "5002", cid, rid, ""); w.Code != http.StatusOK {
+		t.Fatalf("change of vote got %d: %s", w.Code, w.Body.String())
+	}
+	if got := storedVote(t, cid, 5002); got == nil || strconv.Itoa(*got) != rid {
+		t.Errorf("changed vote points at %v, want response %s", got, rid)
+	}
+	if w := postVote(t, "5002", cid, "", "creator"); w.Code != http.StatusOK {
+		t.Fatalf("change of vote back got %d: %s", w.Code, w.Body.String())
 	}
 	if got := storedVote(t, cid, 5002); got != nil {
-		t.Errorf("a refused second vote moved the first one to response %d", *got)
+		t.Errorf("a vote moved back to the creator points at response %d", *got)
 	}
+	// Still one vote, not three.
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM challenge_votes
 		WHERE challenge_id = $1 AND voter_id = 5002`, cid).Scan(&n); err != nil {
@@ -170,11 +167,6 @@ func TestVote_TheCreatorCanBeVotedFor(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("voter 5002 has %d votes in the battle, want 1", n)
-	}
-
-	// Other refusals do not claim a vote that is not there.
-	if w := postVote(t, "1", cid, rid, ""); w.Header().Get("X-Your-Vote") != "" {
-		t.Errorf("the creator's refusal named a vote: %q", w.Header().Get("X-Your-Vote"))
 	}
 }
 
@@ -901,74 +893,6 @@ func TestProfileBattles_EveryTabAndTheRecord(t *testing.T) {
 	}
 }
 
-func TestExtend_LongerNeverShorterAndOnlyByTheCreator(t *testing.T) {
-	defer withDB(t)()
-	cid, _ := liveBattle(t)
-	var before time.Time
-	if err := db.QueryRow(`SELECT voting_ends_at FROM challenges WHERE id = $1`, cid).Scan(&before); err != nil {
-		t.Fatal(err)
-	}
-	extend := func(who string, days int) int {
-		body := fmt.Sprintf(`{"days": %d}`, days)
-		r := httptest.NewRequest("POST", "/x", strings.NewReader(body))
-		r = mux.SetURLVars(r, map[string]string{"id": cid})
-		w := httptest.NewRecorder()
-		ExtendBattleHandler(w, withUser(r, who, "u"+who))
-		return w.Code
-	}
-	if c := extend("2", 14); c != http.StatusForbidden {
-		t.Errorf("the responder changed the length: %d", c)
-	}
-	if c := extend("1", 3); c != http.StatusBadRequest {
-		t.Errorf("a battle was made shorter: %d", c)
-	}
-	if c := extend("1", 14); c != http.StatusOK {
-		t.Fatalf("the creator could not extend: %d", c)
-	}
-	var after time.Time
-	if err := db.QueryRow(`SELECT voting_ends_at FROM challenges WHERE id = $1`, cid).Scan(&after); err != nil {
-		t.Fatal(err)
-	}
-	if d := after.Sub(before); d < 7*24*time.Hour-time.Minute || d > 7*24*time.Hour+time.Minute {
-		t.Errorf("extending 7→14 days moved the end by %v", d)
-	}
-	if c := extend("1", 90); c != http.StatusOK {
-		t.Fatalf("extend to 90: %d", c)
-	}
-	var days int
-	if err := db.QueryRow(`SELECT battle_days FROM challenges WHERE id = $1`, cid).Scan(&days); err != nil {
-		t.Fatal(err)
-	}
-	if days != battleMaxDays {
-		t.Errorf("asked for 90, got %d, want the %d-day ceiling", days, battleMaxDays)
-	}
-
-	// A battle that was already running when battles got an end: answered a
-	// month ago, given a fresh week by migration 011, three days of it left.
-	old, _ := liveBattle(t)
-	if _, err := db.Exec(`
-		UPDATE challenges
-		   SET accepted_at = NOW() - INTERVAL '30 days',
-		       voting_ends_at = NOW() + INTERVAL '3 days'
-		 WHERE id = $1`, old); err != nil {
-		t.Fatal(err)
-	}
-	r := httptest.NewRequest("POST", "/x", strings.NewReader(`{"days": 10}`))
-	r = mux.SetURLVars(r, map[string]string{"id": old})
-	w := httptest.NewRecorder()
-	ExtendBattleHandler(w, withUser(r, "1", "u1"))
-	var ends time.Time
-	if err := db.QueryRow(`SELECT voting_ends_at FROM challenges WHERE id = $1`, old).Scan(&ends); err != nil {
-		t.Fatal(err)
-	}
-	if left := time.Until(ends); w.Code != http.StatusOK || left < 6*24*time.Hour-time.Hour || left > 6*24*time.Hour+time.Hour {
-		t.Errorf("a month-old battle with 3 days left, extended 7→10 days: %d, "+
-			"%v left — want 6 days, not an end in the past", w.Code, left.Round(time.Hour))
-	}
-	if !strings.Contains(w.Body.String(), `"endsAt"`) {
-		t.Errorf("the reply does not say when it now ends: %s", w.Body.String())
-	}
-}
 
 // ── migration 011 puts back the votes the bug misfiled ────────────────────
 

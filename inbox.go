@@ -337,10 +337,12 @@ func SendBattleWonNotification(challengeID int, verdicts []battleVerdict) {
 	score := ""
 	if beaten != nil {
 		body += " against " + beaten.Username
-		// The score only when votes decided it. Level on votes means it
-		// went to likes, views or shares, and "3–3" would read like a draw.
-		if winner.Votes != beaten.Votes {
-			score = voteCount(winner.Votes) + "–" + voteCount(beaten.Votes)
+		// The score as people see it — every vote cast — and only when it
+		// reads as a win. Level on votes means likes, views or shares
+		// decided it; and when votes that didn't count turned the result,
+		// "5–6" beside "You won" would read as a mistake.
+		if winner.ShownVotes > beaten.ShownVotes {
+			score = strconv.Itoa(winner.ShownVotes) + "–" + strconv.Itoa(beaten.ShownVotes)
 			body += ", " + score
 		}
 	}
@@ -369,10 +371,4 @@ func SendBattleWonNotification(challengeID int, verdicts []battleVerdict) {
 		log.Printf("battle %d: could not queue the winner's push for user %d: "+
 			"%v — they still have it in their list", challengeID, winner.userID, err)
 	}
-}
-
-// voteCount is a vote count as people read it: "14", "4.5". A vote from a
-// very new account counts half, so counts are not always whole.
-func voteCount(v float64) string {
-	return strconv.FormatFloat(v, 'f', -1, 64)
 }

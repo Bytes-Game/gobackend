@@ -187,19 +187,36 @@ func markBursts(votes []voteEvidence, weights []float64, reasons []string) {
 // ════════════════════════════════════════════════════════════════════════════
 
 // Standing is one side of a battle and everything counted for it.
+//
+// Two sets of numbers, on purpose.
+//
+// The Shown ones are what people see: every vote, like, view and share, the
+// same numbers as every other screen in the app (see counts.go). They were
+// once the counted ones below, which left out the two players themselves and
+// very new accounts — so the live score said 0 likes on a video whose heart
+// said 3, and nobody could tell which was right.
+//
+// The counted ones decide the battle. A vote from someone who never watched,
+// or from a throwaway account, is still taken off there (see voteWeight), and
+// the app says so when it changes who is ahead.
 type Standing struct {
 	UserID       string  `json:"userId"`
 	Username     string  `json:"username"`
 	Role         string  `json:"role"`       // "creator" | "responder"
 	ResponseID   string  `json:"responseId"` // "" for the creator
-	Votes        float64 `json:"votes"`      // genuine, after weighting
+	Votes        float64 `json:"countedVotes"`
 	RawVotes     int     `json:"rawVotes"`
 	RemovedVotes int     `json:"removedVotes"`
-	Likes        int     `json:"likes"`
-	Views        int     `json:"views"`
-	Shares       int     `json:"shares"`
+	Likes        int     `json:"countedLikes"`
+	Views        int     `json:"countedViews"`
+	Shares       int     `json:"countedShares"`
 	Rank         int     `json:"rank"`
 	Leading      bool    `json:"leading"`
+
+	ShownVotes  int `json:"votes"`
+	ShownLikes  int `json:"likes"`
+	ShownViews  int `json:"views"`
+	ShownShares int `json:"shares"`
 
 	userID     int
 	responseID int
@@ -273,16 +290,17 @@ func rankSides(sides []Standing) {
 func loadBattleStandings(ctx context.Context, q querier, challengeID int) (BattleStandings, bool, error) {
 	out := BattleStandings{ChallengeID: strconv.Itoa(challengeID), Removed: map[string]int{}}
 
-	var creatorID int
+	var creatorID, cardViews int
 	var creatorName string
 	var accepted, ends, resolved sql.NullTime
 	err := q.QueryRowContext(ctx, `
 		SELECT c.creator_id, u.username, c.status, c.battle_days,
-		       c.accepted_at, c.voting_ends_at, c.resolved_at
+		       c.accepted_at, c.voting_ends_at, c.resolved_at, COALESCE(c.views, 0)
 		  FROM challenges c
 		  JOIN users u ON u.id = c.creator_id
 		 WHERE c.id = $1`, challengeID).Scan(
-		&creatorID, &creatorName, &out.Status, &out.BattleDays, &accepted, &ends, &resolved)
+		&creatorID, &creatorName, &out.Status, &out.BattleDays, &accepted, &ends, &resolved,
+		&cardViews)
 	if err == sql.ErrNoRows {
 		return out, false, nil
 	}
@@ -308,7 +326,7 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 	responseIDs := []string{}
 
 	rows, err := q.QueryContext(ctx, `
-		SELECT cr.id, cr.responder_id, u.username
+		SELECT cr.id, cr.responder_id, u.username, COALESCE(cr.views, 0)
 		  FROM challenge_responses cr
 		  JOIN users u ON u.id = cr.responder_id
 		 WHERE cr.challenge_id = $1
@@ -317,12 +335,16 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 		return out, true, fmt.Errorf("read answers to battle %d: %w", challengeID, err)
 	}
 	seenScan := 0
+	// challenges.views is the whole card; the creator's share of it is what
+	// is left once every answer's views are taken out (see counts.go).
+	answerViews := 0
 	for rows.Next() {
-		var rid, uid int
+		var rid, uid, views int
 		var name string
-		if scanFailed("battle standings: answers", rows.Scan(&rid, &uid, &name), &seenScan) {
+		if scanFailed("battle standings: answers", rows.Scan(&rid, &uid, &name, &views), &seenScan) {
 			continue
 		}
+		answerViews += views
 		// One side per person. Somebody who answered twice is still one
 		// competitor, and the first answer is the one that joined the battle.
 		if participants[uid] {
@@ -332,12 +354,17 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 		sides = append(sides, Standing{
 			UserID: strconv.Itoa(uid), Username: name, Role: "responder",
 			ResponseID: strconv.Itoa(rid), userID: uid, responseID: rid,
+			ShownViews: views,
 		})
 		contentIDs = append(contentIDs, strconv.Itoa(rid))
 		responseIDs = append(responseIDs, strconv.Itoa(rid))
 	}
 	if err := rows.Close(); err != nil {
 		return out, true, err
+	}
+	sides[0].ShownViews = cardViews - answerViews
+	if sides[0].ShownViews < 0 {
+		sides[0].ShownViews = 0
 	}
 	sideByResponse := map[int]int{}
 	for i, s := range sides {
@@ -410,6 +437,7 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 			continue
 		}
 		sides[idx].RawVotes++
+		sides[idx].ShownVotes++
 		sides[idx].Votes += weights[i]
 		if weights[i] == 0 {
 			sides[idx].RemovedVotes++
@@ -422,7 +450,14 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 	// Not from anybody in the battle, and not from a thin account made after
 	// it started — the same shape as a bought vote.
 	lrows, err := q.QueryContext(ctx, `
-		SELECT l.response_id, COUNT(*)
+		SELECT l.response_id, COUNT(*),
+		       COUNT(*) FILTER (
+		         WHERE NOT (l.user_id = ANY($2::int[]))
+		           AND NOT ($3::timestamptz IS NOT NULL
+		                    AND u.created_at > $3
+		                    AND (SELECT COUNT(DISTINCT (fe.created_at AT TIME ZONE 'UTC')::date)
+		                           FROM feed_events fe
+		                          WHERE fe.user_id = l.user_id::text) < 2))
 		  FROM (SELECT 0 AS response_id, cl.user_id
 		          FROM challenge_likes cl
 		         WHERE cl.challenge_id = $1
@@ -432,12 +467,6 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 		          JOIN challenge_responses cr ON cr.id = crl.response_id
 		         WHERE cr.challenge_id = $1) l
 		  JOIN users u ON u.id = l.user_id
-		 WHERE NOT (l.user_id = ANY($2::int[]))
-		   AND NOT ($3::timestamptz IS NOT NULL
-		            AND u.created_at > $3
-		            AND (SELECT COUNT(DISTINCT (fe.created_at AT TIME ZONE 'UTC')::date)
-		                   FROM feed_events fe
-		                  WHERE fe.user_id = l.user_id::text) < 2)
 		 GROUP BY l.response_id`,
 		challengeID, pq.Array(participantIDs), nullTimeArg(accepted))
 	if err != nil {
@@ -445,12 +474,13 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 	}
 	seenScan = 0
 	for lrows.Next() {
-		var rid, n int
-		if scanFailed("battle standings: likes", lrows.Scan(&rid, &n), &seenScan) {
+		var rid, all, counted int
+		if scanFailed("battle standings: likes", lrows.Scan(&rid, &all, &counted), &seenScan) {
 			continue
 		}
 		if idx, ok := sideByResponse[rid]; ok {
-			sides[idx].Likes = n
+			sides[idx].ShownLikes = all
+			sides[idx].Likes = counted
 		}
 	}
 	if err := lrows.Close(); err != nil {
@@ -551,6 +581,29 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 		}
 	}
 	if err := erows.Close(); err != nil {
+		return out, true, err
+	}
+
+	// Shares as people see them: everyone who shared each video.
+	srows, err := q.QueryContext(ctx, `
+		SELECT response_id, COUNT(*)
+		  FROM video_shares
+		 WHERE challenge_id = $1
+		 GROUP BY response_id`, challengeID)
+	if err != nil {
+		return out, true, fmt.Errorf("read shares in battle %d: %w", challengeID, err)
+	}
+	seenScan = 0
+	for srows.Next() {
+		var rid, n int
+		if scanFailed("battle standings: shares", srows.Scan(&rid, &n), &seenScan) {
+			continue
+		}
+		if idx, ok := sideByResponse[rid]; ok {
+			sides[idx].ShownShares = n
+		}
+	}
+	if err := srows.Close(); err != nil {
 		return out, true, err
 	}
 
