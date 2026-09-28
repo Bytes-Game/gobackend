@@ -106,11 +106,18 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 		searchType = "all"
 	}
 
-	// Best effort — record the query into the user's recent-search LIST so
-	// the For You ranker can bias toward this category for ~24h. Async to
-	// keep the search response latency down.
-	if userID != "" {
-		go RecordSearchQuery(userID, query)
+	// Into the person's search history — and the For You ranker's 24h bias —
+	// only when they asked for this search (record=1: they pressed search or
+	// tapped a suggestion), and only for whoever the token says they are.
+	//
+	// It used to record every call. The app searches as you type, so a
+	// search for "dance" left "d", "da", "dan" and "danc" in the history on
+	// the way. And the userId came from the address, so anyone could write
+	// into anyone's history.
+	if r.URL.Query().Get("record") == "1" {
+		if who := signedInUserID(r); who != "" {
+			go RecordSearchQuery(who, query)
+		}
 	}
 
 	// Pull personalization context once if we have a userID. All four lookups

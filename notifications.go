@@ -67,7 +67,7 @@ func defaultNotificationPrefs(userID string) NotificationPrefs {
 // allowedByPrefs returns true if this trigger kind is enabled for the user.
 func (p NotificationPrefs) allowedByPrefs(kind TriggerKind) bool {
 	switch kind {
-	case TriggerFriendResponse:
+	case TriggerFriendResponse, TriggerFriendChallenge:
 		return p.FriendResponse
 	case TriggerEndingSoon:
 		return p.EndingSoon

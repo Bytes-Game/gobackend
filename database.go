@@ -541,6 +541,23 @@ func runMigrations() error {
 		updated_at        TIMESTAMPTZ DEFAULT NOW()
 	);
 
+	-- The in-app notifications list: what the bell shows. Push messages
+	-- go through notification_outbox; these are the rows the app lists,
+	-- kept so the page has a history and not only what arrived while it
+	-- was open.
+	CREATE TABLE IF NOT EXISTS user_notifications (
+		id            BIGSERIAL PRIMARY KEY,
+		user_id       INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		kind          VARCHAR(40) NOT NULL,
+		actor_id      INT REFERENCES users(id) ON DELETE CASCADE,
+		challenge_id  INT REFERENCES challenges(id) ON DELETE CASCADE,
+		body          TEXT NOT NULL,
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		read_at       TIMESTAMPTZ
+	);
+	CREATE INDEX IF NOT EXISTS idx_user_notifications_user
+		ON user_notifications (user_id, created_at DESC);
+
 	CREATE TABLE IF NOT EXISTS notification_outbox (
 		id              SERIAL PRIMARY KEY,
 		user_id         TEXT NOT NULL,
@@ -1753,14 +1770,10 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 		wakeTranscodeWorker()
 	}
 
-	// If friends visibility with specific users, insert visibility rows.
+	// Friends-only, for friends picked by name: only those of them who
+	// follow the creator. See friends_only.go.
 	if payload.Visibility == "friends" && len(payload.VisibleTo) > 0 {
-		for _, uidStr := range payload.VisibleTo {
-			uid, _ := strconv.Atoi(uidStr)
-			if uid > 0 {
-				db.Exec(`INSERT INTO challenge_visible_to (challenge_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, id, uid)
-			}
-		}
+		saveVisibleTo(id, creatorID, payload.VisibleTo)
 	}
 
 	// Fetch the creator info.
