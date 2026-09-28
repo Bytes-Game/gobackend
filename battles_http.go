@@ -38,6 +38,11 @@ func BattleStandingsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no such battle", http.StatusNotFound)
 		return
 	}
+	// So the score page opens already showing your vote, and never offers
+	// a second one.
+	if viewer, err := strconv.Atoi(signedInUserID(r)); err == nil && viewer > 0 {
+		st.YourVote = viewerVote(id, viewer)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(st)
 }

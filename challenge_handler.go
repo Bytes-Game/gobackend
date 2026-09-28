@@ -334,6 +334,11 @@ func VoteChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	voted, err := CastVote(payload)
 	var refused voteRefusal
 	if errors.As(err, &refused) {
+		// The side of the vote they already have, so the app can mark it
+		// rather than guess. Only on "already voted".
+		if refused.yourVote != "" {
+			w.Header().Set("X-Your-Vote", refused.yourVote)
+		}
 		http.Error(w, refused.msg, refused.status)
 		return
 	}
