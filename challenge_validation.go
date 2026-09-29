@@ -50,9 +50,9 @@ const (
 	// Tier-1 rate limit (Redis bucket: responses:rate:{userID}, EX 3600)
 	maxResponsesPerHour = 5
 
-	// Tier-2 thresholds
-	relevanceLowCutoff = 0.10 // below this score = "off-topic-ish" (down-rank in feed)
-	offTopicUserCutoff = 0.4  // user with > 40% historically hidden responses gets stricter checks
+	// Somebody with more than this share of their answers taken down can't
+	// post new ones. See userOffTopicRate.
+	offTopicUserCutoff = 0.4
 )
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -124,7 +124,7 @@ func validateChallengeResponseSubmission(payload AcceptChallengePayload, challen
 	// off-topic, reject further submissions outright until a human reviews.
 	// Protects the challenge feed from well-tested bad actors without
 	// needing an explicit ban list.
-	if rate := userOffTopicRate(payload.ResponderID); rate > 0.4 {
+	if rate := userOffTopicRate(payload.ResponderID); rate > offTopicUserCutoff {
 		return fmt.Errorf("too many of your past responses were flagged off-topic — contact support")
 	}
 
