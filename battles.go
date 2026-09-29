@@ -356,7 +356,7 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 			continue
 		}
 		// Still somebody IN the battle — their own votes, likes and views
-		// never count — but no longer a side in it. See offtopic.go.
+		// never count — but no longer a side in it.
 		participants[uid] = true
 		if hidden {
 			takenDown[rid] = true
@@ -440,7 +440,7 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 	for i, v := range votes {
 		idx, ok := sideByResponse[v.ResponseID]
 		if !ok && takenDown[v.ResponseID] {
-			// Cast for a video taken down for not matching the challenge.
+			// Cast for an answer since hidden (by hand or by moderation).
 			// Out of the battle with it; the voter can vote again.
 			continue
 		}

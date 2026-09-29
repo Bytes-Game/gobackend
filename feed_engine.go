@@ -6735,8 +6735,8 @@ func populateTopResponses(items []HomeFeedItem) {
 		FROM challenge_responses cr
 		JOIN users ru ON cr.responder_id = ru.id
 		WHERE cr.challenge_id IN (` + strings.Join(placeholders, ",") + `)
-		  -- A video taken down for not matching the challenge is out of the
-		  -- battle. See offtopic.go.
+		  -- A hidden answer (hidden by hand or by moderation) is out of the
+		  -- battle.
 		  AND NOT COALESCE(cr.is_hidden, FALSE)
 		ORDER BY cr.challenge_id, cr.created_at DESC`
 	rows, err := db.Query(query, args...)
