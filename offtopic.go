@@ -1,7 +1,7 @@
 package main
 
-// offtopic.go — a video that doesn't match its challenge is taken down, and
-// the person who posted it pays for it.
+// offtopic.go — a video that doesn't match its challenge costs the person who
+// posted it, and when the evidence is strong enough it is taken down.
 //
 // ════════════════════════════════════════════════════════════════════════════
 // WHY THIS EXISTS
@@ -15,7 +15,7 @@ package main
 // HOW A VIDEO IS CAUGHT
 // ════════════════════════════════════════════════════════════════════════════
 //
-// Two kinds of evidence, and it takes both to agree:
+// Two kinds of evidence:
 //
 //	THE MODEL — the worker that prepares every upload also asks its model
 //	            "does this video match <the challenge>?" and gets back yes,
@@ -26,17 +26,18 @@ package main
 //	PEOPLE    — anybody can report a video that doesn't match: the other
 //	            side of the battle, or a viewer.
 //
-// A video is taken down when:
+// What happens:
 //
-//   - the model said "no" AND at least one person reported it, or
+//   - The model said "no" AND at least one person reported it: the video is
+//     TAKEN DOWN. Both kinds of evidence agree.
 //   - offTopicReportsAlone viewers with no part in the battle reported it,
-//     whatever the model said. It may never have been asked: videos from
-//     before this, or a worker running without a model.
-//
-// The model on its own never takes anything down. It is small and it can be
-// wrong, and being wrong here costs somebody their battle. What it does on
-// its own is warn the owner, so they can put it right before anybody reports
-// it.
+//     whatever the model said: its owner is PENALISED, once, and the video
+//     STAYS UP. The owner asked for this — with so few videos on the app,
+//     reports alone must not be able to remove one. (The model may never
+//     have been asked: videos from before this, or a worker with no model.)
+//   - The model on its own takes nothing down and charges nothing. It is
+//     small and it can be wrong. What it does on its own is warn the owner,
+//     so they can put it right before anybody reports it.
 //
 // A report counts only from somebody who can fairly make it: somebody else in
 // the battle, or a viewer who actually watched that video and whose account
@@ -47,9 +48,16 @@ package main
 // WHAT IT COSTS
 // ════════════════════════════════════════════════════════════════════════════
 //
+// Penalised on reports alone: the owner loses integrityPenalty rating points
+// and gets a strike. Nothing else changes; the battle goes on.
+//
+// Taken down:
+//
 //   - The video comes down. An answer drops out of its battle; a challenge
 //     is removed from the app.
-//   - Its owner loses integrityPenalty rating points and gets a strike.
+//   - Its owner loses integrityPenalty rating points and gets a strike —
+//     unless reports already charged them that for this video; nobody pays
+//     it twice for the same video.
 //   - If the battle was still being fought, the owner also LOSES it: a loss
 //     on their record and the rating a loss costs, on top. If that leaves
 //     one side standing, that side wins now and the battle is over. When the
@@ -81,13 +89,23 @@ const (
 	matchNo     = "no"
 	matchUnsure = "unsure"
 
-	// How many viewers with no part in the battle it takes to bring a video
-	// down with no word from the model.
+	// How many viewers with no part in the battle it takes to penalise a
+	// video's owner with no word from the model. The video stays up.
 	offTopicReportsAlone = 3
 
 	// Kinds of notification, as the app reads them.
 	noteOffTopic        = "off_topic"
 	noteOffTopicWarning = "off_topic_warning"
+	noteOffTopicPenalty = "off_topic_penalty"
+)
+
+// offTopicAction is what the evidence against a video adds up to.
+type offTopicAction int
+
+const (
+	offTopicNothing  offTopicAction = iota
+	offTopicPenalise                // reports alone: the owner pays, the video stays
+	offTopicTakeDown                // the model and a person agree: it comes down
 )
 
 // TriggerOffTopic is the phone push for "your video was taken down". Sent
@@ -104,24 +122,28 @@ func cleanMatch(s string) string {
 	return ""
 }
 
-// offTopicVerdict decides whether a video comes down. partyReports are from
+// offTopicVerdict decides what happens to a video. partyReports are from
 // somebody else in the battle; viewerReports from viewers with no part in it.
 // Both count only reports that can fairly be made — see the top of this file.
-func offTopicVerdict(model string, partyReports, viewerReports int) bool {
+func offTopicVerdict(model string, partyReports, viewerReports int) offTopicAction {
 	if model == matchNo && partyReports+viewerReports >= 1 {
-		return true
+		return offTopicTakeDown
 	}
-	return viewerReports >= offTopicReportsAlone
+	if viewerReports >= offTopicReportsAlone {
+		return offTopicPenalise
+	}
+	return offTopicNothing
 }
 
 // forfeitRatings is what taking a video down does to ratings while its battle
 // is still being fought.
 //
 // The owner loses to every side still standing, the same way last place loses
-// in decideBattle, and pays integrityPenalty on top. gains are what each side
+// in decideBattle, and pays [penalty] on top — integrityPenalty, or nothing
+// when reports already charged it for this video. gains are what each side
 // still standing takes if the battle ends here; they are only paid out when
 // it does.
-func forfeitRatings(offender int, standing []int) (offenderAfter int, gains []int) {
+func forfeitRatings(offender int, standing []int, penalty int) (offenderAfter int, gains []int) {
 	gains = make([]int, len(standing))
 	loss := 0.0
 	if len(standing) > 0 {
@@ -132,13 +154,14 @@ func forfeitRatings(offender int, standing []int) (offenderAfter int, gains []in
 			gains[i] = int(math.Round(d))
 		}
 	}
-	return max(offender-int(math.Round(loss))-integrityPenalty, ratingFloor), gains
+	return max(offender-int(math.Round(loss))-penalty, ratingFloor), gains
 }
 
-// penaltyRating is what taking a video down costs when there is no battle to
-// lose: no answer yet, or a battle already decided.
-func penaltyRating(rating int) int {
-	return max(rating-integrityPenalty, ratingFloor)
+// penaltyRating is a rating after [penalty] points are taken off it, never
+// below the floor. What a video costs when there is no battle to lose: no
+// answer yet, a battle already decided, or reports alone.
+func penaltyRating(rating, penalty int) int {
+	return max(rating-penalty, ratingFloor)
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -234,17 +257,18 @@ func settleQuestionMatch(table string, id int, raw string) {
 // JUDGING
 // ════════════════════════════════════════════════════════════════════════════
 
-// judgeOffTopic looks at the evidence against one video and takes it down if
-// it is enough. responseID 0 means the challenge's own video. Returns whether
-// this call took it down.
+// judgeOffTopic looks at the evidence against one video and acts on it:
+// takes it down, or charges its owner for reports alone. responseID 0 means
+// the challenge's own video. Returns whether this call took it down.
 func judgeOffTopic(ctx context.Context, challengeID, responseID int) (bool, error) {
 	var model string
-	var down bool
+	var down, paid bool
 	var party, viewers int
 	var err error
 	if responseID == 0 {
 		err = db.QueryRowContext(ctx, `
 			SELECT c.question_match, c.off_topic_at IS NOT NULL,
+			       c.report_penalty_at IS NOT NULL,
 			       COUNT(f.user_id) FILTER (WHERE EXISTS (
 			           SELECT 1 FROM challenge_responses o
 			            WHERE o.challenge_id = c.id AND o.responder_id = f.user_id)),
@@ -259,10 +283,11 @@ func judgeOffTopic(ctx context.Context, challengeID, responseID int) (bool, erro
 			  LEFT JOIN challenge_flags f ON f.challenge_id = c.id AND f.user_id <> c.creator_id
 			  LEFT JOIN users u ON u.id = f.user_id
 			 WHERE c.id = $1
-			 GROUP BY c.id`, challengeID).Scan(&model, &down, &party, &viewers)
+			 GROUP BY c.id`, challengeID).Scan(&model, &down, &paid, &party, &viewers)
 	} else {
 		err = db.QueryRowContext(ctx, `
 			SELECT cr.question_match, cr.off_topic_at IS NOT NULL,
+			       cr.report_penalty_at IS NOT NULL,
 			       COUNT(f.user_id) FILTER (WHERE f.user_id = c.creator_id OR EXISTS (
 			           SELECT 1 FROM challenge_responses o
 			            WHERE o.challenge_id = c.id AND o.responder_id = f.user_id)),
@@ -279,7 +304,7 @@ func judgeOffTopic(ctx context.Context, challengeID, responseID int) (bool, erro
 			         ON f.response_id = cr.id AND f.user_id <> cr.responder_id
 			  LEFT JOIN users u ON u.id = f.user_id
 			 WHERE cr.id = $1 AND cr.challenge_id = $2
-			 GROUP BY cr.id, c.id`, responseID, challengeID).Scan(&model, &down, &party, &viewers)
+			 GROUP BY cr.id, c.id`, responseID, challengeID).Scan(&model, &down, &paid, &party, &viewers)
 	}
 	if err == sql.ErrNoRows {
 		return false, nil
@@ -287,7 +312,23 @@ func judgeOffTopic(ctx context.Context, challengeID, responseID int) (bool, erro
 	if err != nil {
 		return false, fmt.Errorf("weigh the reports on battle %d video %d: %w", challengeID, responseID, err)
 	}
-	if down || !offTopicVerdict(model, party, viewers) {
+	if down {
+		return false, nil
+	}
+	switch offTopicVerdict(model, party, viewers) {
+	case offTopicNothing:
+		return false, nil
+	case offTopicPenalise:
+		if paid {
+			return false, nil // charged once for reports on this video already
+		}
+		log.Printf("off-topic: %d viewers reported battle %d video %d — charging its "+
+			"owner, the video stays up", viewers, challengeID, responseID)
+		charge, ok, err := penaliseForReports(ctx, challengeID, responseID)
+		if err != nil || !ok {
+			return false, err
+		}
+		tellReportPenalty(charge)
 		return false, nil
 	}
 	log.Printf("off-topic: taking down battle %d video %d — the model said %q, %d report(s) "+
@@ -330,13 +371,14 @@ func ruleOffTopic(ctx context.Context, challengeID, responseID int) (offTopicRul
 	var creatorID int
 	var status, prefix, subject string
 	var ends, resolved sql.NullTime
-	var challengeDown bool
+	var challengeDown, paid bool
 	err = tx.QueryRowContext(ctx, `
 		SELECT creator_id, status, COALESCE(prefix, ''), COALESCE(subject, ''),
-		       voting_ends_at, resolved_at, off_topic_at IS NOT NULL
+		       voting_ends_at, resolved_at, off_topic_at IS NOT NULL,
+		       report_penalty_at IS NOT NULL
 		  FROM challenges WHERE id = $1
 		 FOR UPDATE`, challengeID).Scan(
-		&creatorID, &status, &prefix, &subject, &ends, &resolved, &challengeDown)
+		&creatorID, &status, &prefix, &subject, &ends, &resolved, &challengeDown, &paid)
 	if err == sql.ErrNoRows {
 		return out, false, nil
 	}
@@ -352,10 +394,11 @@ func ruleOffTopic(ctx context.Context, challengeID, responseID int) (offTopicRul
 	} else {
 		var answerDown bool
 		err = tx.QueryRowContext(ctx, `
-			SELECT responder_id, off_topic_at IS NOT NULL
+			SELECT responder_id, off_topic_at IS NOT NULL,
+			       report_penalty_at IS NOT NULL
 			  FROM challenge_responses
 			 WHERE id = $1 AND challenge_id = $2
-			 FOR UPDATE`, responseID, challengeID).Scan(&out.Offender, &answerDown)
+			 FOR UPDATE`, responseID, challengeID).Scan(&out.Offender, &answerDown, &paid)
 		if err == sql.ErrNoRows || (err == nil && answerDown) {
 			return out, false, nil
 		}
@@ -432,15 +475,21 @@ func ruleOffTopic(ctx context.Context, challengeID, responseID int) (offTopicRul
 			records[id] = c
 		}
 	}
+	// Reports already charged the penalty and the strike for this video:
+	// taking it down costs the battle, not the same penalty twice.
+	penalty, strike := integrityPenalty, 1
+	if paid {
+		penalty, strike = 0, 0
+	}
 	off := records[out.Offender]
-	after := penaltyRating(off.Rating)
+	after := penaltyRating(off.Rating, penalty)
 	gains := make([]int, len(standing)) // what winning here is worth, per side
 	if live {
 		ratings := make([]int, len(standing))
 		for i, s := range standing {
 			ratings[i] = records[s.userID].Rating
 		}
-		after, gains = forfeitRatings(off.Rating, ratings)
+		after, gains = forfeitRatings(off.Rating, ratings, penalty)
 		off.Losses++
 		out.LostBattle = true
 	}
@@ -448,11 +497,11 @@ func ruleOffTopic(ctx context.Context, challengeID, responseID int) (offTopicRul
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE users
 		   SET rating = $2, losses = $3, league = $4,
-		       integrity_strikes = integrity_strikes + 1,
+		       integrity_strikes = integrity_strikes + $6,
 		       last_battle_at = CASE WHEN $5 THEN NOW() ELSE last_battle_at END
 		 WHERE id = $1`,
 		out.Offender, after, off.Losses,
-		leagueFor(after, off.Wins+off.Losses+off.Draws), live); err != nil {
+		leagueFor(after, off.Wins+off.Losses+off.Draws), live, strike); err != nil {
 		return out, false, fmt.Errorf("charge %d for battle %d: %w", out.Offender, challengeID, err)
 	}
 	if live {
@@ -495,6 +544,99 @@ func ruleOffTopic(ctx context.Context, challengeID, responseID int) (offTopicRul
 		return out, false, err
 	}
 	return out, true, nil
+}
+
+// reportCharge is what reports alone cost somebody, for telling them.
+type reportCharge struct {
+	ChallengeID int
+	ResponseID  int
+	Title       string
+	Owner       int
+	RatingLost  int
+}
+
+// penaliseForReports charges a video's owner for reports alone: the penalty
+// and a strike, once per video. The video stays up and the battle goes on.
+// Returns false when this video was already charged, or is already down.
+func penaliseForReports(ctx context.Context, challengeID, responseID int) (reportCharge, bool, error) {
+	out := reportCharge{ChallengeID: challengeID, ResponseID: responseID}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return out, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Marking the video first is what makes this once only: of two reports
+	// arriving together, only one gets a row back.
+	var prefix, subject string
+	if responseID == 0 {
+		err = tx.QueryRowContext(ctx, `
+			UPDATE challenges SET report_penalty_at = NOW()
+			 WHERE id = $1 AND report_penalty_at IS NULL AND off_topic_at IS NULL
+			RETURNING creator_id, COALESCE(prefix, ''), COALESCE(subject, '')`,
+			challengeID).Scan(&out.Owner, &prefix, &subject)
+	} else {
+		err = tx.QueryRowContext(ctx, `
+			UPDATE challenge_responses cr SET report_penalty_at = NOW()
+			  FROM challenges c
+			 WHERE cr.id = $1 AND cr.challenge_id = $2 AND c.id = cr.challenge_id
+			   AND cr.report_penalty_at IS NULL AND cr.off_topic_at IS NULL
+			RETURNING cr.responder_id, COALESCE(c.prefix, ''), COALESCE(c.subject, '')`,
+			responseID, challengeID).Scan(&out.Owner, &prefix, &subject)
+	}
+	if err == sql.ErrNoRows {
+		return out, false, nil
+	}
+	if err != nil {
+		return out, false, fmt.Errorf("mark battle %d video %d as charged: %w", challengeID, responseID, err)
+	}
+	out.Title = challengeTitle(prefix, subject)
+
+	var c competitor
+	if err := tx.QueryRowContext(ctx, `
+		SELECT rating, wins, losses, draws FROM users WHERE id = $1 FOR UPDATE`,
+		out.Owner).Scan(&c.Rating, &c.Wins, &c.Losses, &c.Draws); err != nil {
+		return out, false, fmt.Errorf("lock the owner of battle %d video %d: %w", challengeID, responseID, err)
+	}
+	if c.Rating == 0 {
+		c.Rating = ratingStart
+	}
+	after := penaltyRating(c.Rating, integrityPenalty)
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE users
+		   SET rating = $2, league = $3, integrity_strikes = integrity_strikes + 1
+		 WHERE id = $1`,
+		out.Owner, after, leagueFor(after, c.Wins+c.Losses+c.Draws)); err != nil {
+		return out, false, fmt.Errorf("charge %d for battle %d video %d: %w", out.Owner, challengeID, responseID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return out, false, err
+	}
+	out.RatingLost = c.Rating - after
+	return out, true, nil
+}
+
+// tellReportPenalty tells somebody that reports cost them, and that their
+// video is still up.
+func tellReportPenalty(c reportCharge) {
+	quoted := ""
+	if c.Title != "" {
+		quoted = fmt.Sprintf(" “%s”", c.Title)
+	}
+	notifyUser(InboxNote{UserID: c.Owner, Kind: noteOffTopicPenalty, ChallengeID: c.ChallengeID,
+		Body: fmt.Sprintf("Several people reported your video in%s for not matching the "+
+			"challenge. It cost you %d rating points. Your video stays up.", quoted, c.RatingLost)})
+	if _, _, err := enqueueNotification(EnqueueParams{
+		UserID:      strconv.Itoa(c.Owner),
+		TriggerKind: TriggerOffTopic,
+		DedupeKey:   fmt.Sprintf("off_topic_penalty:%d:%d:%d", c.ChallengeID, c.ResponseID, c.Owner),
+		Title:       "Your video was reported",
+		Body:        strings.TrimSpace(c.Title + " — people say it didn't match the challenge"),
+		Deeplink:    fmt.Sprintf("devf://challenge/%d", c.ChallengeID),
+	}); err != nil {
+		log.Printf("off-topic: could not queue the report-penalty push for user %d: %v — "+
+			"they still have it in their list", c.Owner, err)
+	}
 }
 
 // recordForfeit writes one side's result of a battle ended, or lost, by a

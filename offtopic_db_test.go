@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -210,10 +211,25 @@ func TestOffTopic_TheModelAndTheOpponentTakeDownAnAnswer(t *testing.T) {
 	}
 }
 
-func TestOffTopic_ReportsAloneNeedThreeRealViewers(t *testing.T) {
+// reportPushes counts the "your video was reported" pushes queued for uid.
+func reportPushes(t *testing.T, uid int, cid, rid string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM notification_outbox
+		WHERE user_id = $1 AND dedupe_key = $2`, strconv.Itoa(uid),
+		"off_topic_penalty:"+cid+":"+rid+":"+strconv.Itoa(uid)).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// The owner asked for this: with so few videos, reports alone must not be
+// able to remove one. Three real viewers charge its owner; the video stays.
+func TestOffTopic_ReportsAloneChargeTheOwnerAndLeaveTheVideoUp(t *testing.T) {
 	defer withDB(t)()
 	cid, rid := liveBattle(t)
 	modelSays(t, "response", rid, "yes")
+	before := recordOf(t, 2)
 
 	// The challenger alone is not enough when the model says it matches.
 	if _, out := report(t, "1", cid, rid); out["takenDown"] != false {
@@ -222,33 +238,95 @@ func TestOffTopic_ReportsAloneNeedThreeRealViewers(t *testing.T) {
 	// Reports that don't count: an old account that never watched it, and a
 	// brand-new account made after the video — the cheapest way to pile on.
 	voter(t, 7101, 5)
-	if _, out := report(t, "7101", cid, rid); out["takenDown"] != false {
-		t.Fatal("a report from somebody who never watched took it down")
-	}
+	report(t, "7101", cid, rid)
 	seedAccount(t, 7102, time.Now(), 0)
 	watchAnswer(t, 7102, cid, rid)
-	if _, out := report(t, "7102", cid, rid); out["takenDown"] != false {
-		t.Fatal("a report from a brand-new account took it down")
-	}
-	// Real viewers: two is not enough...
+	report(t, "7102", cid, rid)
+	// Real viewers: two is not enough for anything...
 	for _, v := range []int{7103, 7104} {
 		voter(t, v, 5)
 		watchAnswer(t, v, cid, rid)
-		if _, out := report(t, strconv.Itoa(v), cid, rid); out["takenDown"] != false {
-			t.Fatalf("down after viewer %d", v)
-		}
+		report(t, strconv.Itoa(v), cid, rid)
 	}
-	if answerDown(t, rid) {
-		t.Fatal("down with two real viewers' reports")
+	if got := recordOf(t, 2); got != before {
+		t.Fatalf("charged before three real viewers reported it: %+v → %+v", before, got)
 	}
-	// ...three is.
+	// ...three charges the owner, and the video stays up.
 	voter(t, 7105, 5)
 	watchAnswer(t, 7105, cid, rid)
-	if _, out := report(t, "7105", cid, rid); out["takenDown"] != true {
-		t.Fatalf("three real viewers reported it and it stayed up: %v", out)
+	if _, out := report(t, "7105", cid, rid); out["takenDown"] != false {
+		t.Fatalf("reports alone took the video down: %v", out)
 	}
+	if answerDown(t, rid) {
+		t.Fatal("reports alone took the answer down")
+	}
+	charged := recordOf(t, 2)
+	if charged.Rating != max(before.Rating-integrityPenalty, ratingFloor) ||
+		charged.Strikes != before.Strikes+1 || charged.Losses != before.Losses {
+		t.Errorf("owner %+v → %+v: want the penalty and a strike, no loss", before, charged)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM challenges WHERE id = $1`, cid).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" {
+		t.Errorf("the battle is %s, want it still running", status)
+	}
+	if n := notesOf(t, 2, cid, noteOffTopicPenalty); len(n) != 1 ||
+		!strings.Contains(n[0], "Your video stays up.") {
+		t.Errorf("the owner was told %v", n)
+	}
+	if n := reportPushes(t, 2, cid, rid); n != 1 {
+		t.Errorf("%d pushes about it queued, want 1", n)
+	}
+
+	// More reports charge nobody again.
+	voter(t, 7106, 5)
+	watchAnswer(t, 7106, cid, rid)
+	report(t, "7106", cid, rid)
+	if again := recordOf(t, 2); again != charged {
+		t.Errorf("a fourth report charged again: %+v → %+v", charged, again)
+	}
+
+	// If the model later says it doesn't match, it comes down — and the
+	// owner loses the battle, but does not pay the same penalty twice.
+	modelSays(t, "response", rid, "no")
 	if !answerDown(t, rid) {
-		t.Fatal("the answer is still up")
+		t.Fatal("the model and the reports agree, and it is still up")
+	}
+	after := recordOf(t, 2)
+	if after.Losses != charged.Losses+1 || after.Strikes != charged.Strikes {
+		t.Errorf("taken down after the charge: %+v → %+v — want a loss and no second strike",
+			charged, after)
+	}
+	if lost := charged.Rating - after.Rating; lost > int(eloK) {
+		t.Errorf("taken down after the charge cost %d points — more than a lost battle, "+
+			"so the penalty was charged twice", lost)
+	}
+}
+
+func TestOffTopic_ReportsAloneOnAChallengeLeaveItUp(t *testing.T) {
+	defer withDB(t)()
+	voter(t, 7351, 5)
+	cid := auditChallenge(t, map[string]any{"creator": 7351, "subject": "juggle five"})
+	before := recordOf(t, 7351)
+	for _, v := range []int{7352, 7353, 7354} {
+		voter(t, v, 5)
+		watch(t, strconv.Itoa(v), cid, map[string]any{"creatorMs": 4000})
+		if _, out := report(t, strconv.Itoa(v), cid, ""); out["takenDown"] != false {
+			t.Fatalf("reports alone took the challenge down: %v", out)
+		}
+	}
+	ch, ok := GetChallengeByID(cid)
+	if !ok || ch.Status != "open" {
+		t.Fatalf("challenge status %q, want it still open", ch.Status)
+	}
+	after := recordOf(t, 7351)
+	if after.Rating != max(before.Rating-integrityPenalty, ratingFloor) || after.Strikes != before.Strikes+1 {
+		t.Errorf("creator %+v → %+v: want the penalty and a strike", before, after)
+	}
+	if n := reportPushes(t, 7351, cid, "0"); n != 1 {
+		t.Errorf("%d pushes queued, want 1", n)
 	}
 }
 
@@ -507,5 +585,44 @@ func TestCreate_PrefixAndSubjectHaveALimit(t *testing.T) {
 	if code, body := post("Who can", strings.Repeat("b", maxSubjectChars+1)); code != http.StatusBadRequest ||
 		!strings.Contains(body, "at most 30 characters") {
 		t.Errorf("a 31-character subject: %d %s", code, body)
+	}
+}
+
+// Two reports arriving at the same moment both see "not charged yet". What
+// stops a double charge then is the video being marked in the same step as
+// the check — so both are sent here at once, for an answer and a challenge.
+func TestOffTopic_AReportChargeHappensOncePerVideo(t *testing.T) {
+	defer withDB(t)()
+	cid, rid := liveBattle(t)
+	ctx := context.Background()
+	for _, v := range []struct {
+		owner int
+		rid   int
+	}{{2, mustAtoi(t, rid)}, {1, 0}} {
+		before := recordOf(t, v.owner)
+		results := make(chan bool, 4)
+		for i := 0; i < 4; i++ {
+			go func() {
+				_, ok, err := penaliseForReports(ctx, mustAtoi(t, cid), v.rid)
+				if err != nil {
+					t.Error(err)
+				}
+				results <- ok
+			}()
+		}
+		charged := 0
+		for i := 0; i < 4; i++ {
+			if <-results {
+				charged++
+			}
+		}
+		if charged != 1 {
+			t.Errorf("video %d: charged %d times at once, want 1", v.rid, charged)
+		}
+		after := recordOf(t, v.owner)
+		if after.Strikes != before.Strikes+1 ||
+			after.Rating != max(before.Rating-integrityPenalty, ratingFloor) {
+			t.Errorf("video %d owner %+v → %+v: want exactly one charge", v.rid, before, after)
+		}
 	}
 }
