@@ -572,6 +572,8 @@ func main() {
 	api.HandleFunc("/challenges/vote", authed(VoteChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/comments", authed(AddChallengeCommentHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/responses/{id}/flag", authed(FlagResponseHandler)).Methods("POST", "OPTIONS")
+	// "This video doesn't match the challenge" — see offtopic.go.
+	api.HandleFunc("/challenges/{id}/report", authed(ReportOffTopicHandler)).Methods("POST", "OPTIONS")
 	// The same feature as the challenge route below, for the other half of a
 	// battle. Under /challenges/responses/ rather than a top-level /responses/
 	// because that is where the response routes already live.

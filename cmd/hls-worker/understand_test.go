@@ -118,7 +118,7 @@ func TestPrompt_TellsTheModelWhatTheCategoriesMean(t *testing.T) {
 	// one, and it guesses badly: "having ideas is easy, the important thing
 	// is how well you execute" came back as COMEDY. With the descriptions it
 	// came back as motivation.
-	p := buildUnderstandPrompt("anything")
+	p := buildUnderstandPrompt("anything", "")
 	for _, want := range []string{
 		"motivation — inspirational, discipline, success, hustle",
 		"story — vlogs, storytime, personal experiences",
@@ -136,7 +136,7 @@ func TestPrompt_WarnsThatBracketsAreSoundsNotSpeech(t *testing.T) {
 	// is "(music playing) (door squeaking) (music playing) (upbeat music)" —
 	// nobody speaks in that video at all. Without this line the model read
 	// the word "music" and filed it under MUSIC.
-	p := buildUnderstandPrompt("anything")
+	p := buildUnderstandPrompt("anything", "")
 	if !strings.Contains(p, "(music playing)") {
 		t.Error("the prompt no longer warns that bracketed text is the " +
 			"transcriber describing sound. A video where nobody speaks then " +
@@ -148,7 +148,7 @@ func TestPrompt_SaysAWrongAnswerIsWorseThanNoAnswer(t *testing.T) {
 	// This is the whole disposition of the feature. Without it the model
 	// reaches for a category on transcripts that say nothing, and a wrong
 	// tag shows the video to people who asked for something else.
-	p := buildUnderstandPrompt("anything")
+	p := buildUnderstandPrompt("anything", "")
 	if !strings.Contains(p, "worse than") {
 		t.Error(`the prompt no longer tells the model which way to err`)
 	}
@@ -160,7 +160,7 @@ func TestPrompt_CapsAStuckTranscript(t *testing.T) {
 	// all of it costs prompt-processing time and says nothing the first lines
 	// did not, and a long enough one would overflow the context.
 	long := strings.Repeat("यह एक लंबा वाक्य है। ", 4000)
-	p := buildUnderstandPrompt(long)
+	p := buildUnderstandPrompt(long, "")
 	if len([]rune(p)) > understandMaxSpeechChars+4000 {
 		t.Errorf("the transcript is not being capped: prompt is %d runes",
 			len([]rune(p)))
@@ -187,7 +187,7 @@ func TestUnderstand_StaysOffUnlessBothVariablesAreSet(t *testing.T) {
 		t.Setenv(understandModelEnv, c.model)
 		if _, ran := understandContent(t.Context(), videoAnalysis{
 			Speech: "this is a long enough sentence to be worth judging",
-		}); ran {
+		}, ""); ran {
 			t.Errorf("claimed to run with bin=%q model=%q", c.bin, c.model)
 		}
 	}
@@ -200,7 +200,7 @@ func TestUnderstand_DoesNotStartTheModelForAVideoThatSaidNothing(t *testing.T) {
 	// majority of videos, to learn what the word count already says.
 	t.Setenv(understandBinEnv, "/definitely/not/here/llama-cli")
 	t.Setenv(understandModelEnv, "/definitely/not/here/model.gguf")
-	if _, ran := understandContent(t.Context(), videoAnalysis{Speech: "(music playing)"}); ran {
+	if _, ran := understandContent(t.Context(), videoAnalysis{Speech: "(music playing)"}, ""); ran {
 		t.Error("ran the model on a transcript with nothing in it")
 	}
 }
@@ -282,7 +282,7 @@ func TestUnderstand_EndToEndAgainstARealModel(t *testing.T) {
 	a := videoAnalysis{Speech: "If I do forgive you, you're just gonna break " +
 		"my heart all over again and I can't handle that. I won't. I promise."}
 
-	got, ran := understandContent(t.Context(), a)
+	got, ran := understandContent(t.Context(), a, "")
 	if !ran {
 		t.Fatal("the pass reported it did not run, with both variables set")
 	}
@@ -420,7 +420,7 @@ func TestFrames_StayOffUnlessEveryPieceIsPresent(t *testing.T) {
 				t.Setenv(k, v)
 			}
 		}
-		if _, ran := understandContentFromFrames(t.Context(), "/tmp/nope.mp4", 10); ran {
+		if _, ran := understandContentFromFrames(t.Context(), "/tmp/nope.mp4", 10, ""); ran {
 			t.Errorf("claimed to run with %s unset", missing)
 		}
 	}
@@ -430,7 +430,7 @@ func TestFrames_AskTheSameQuestionAsTheReadingHalf(t *testing.T) {
 	// Both halves feed the same auto_tags column and the same ranker. If they
 	// offered different categories, which pass happened to run would change
 	// what a video could possibly be filed under.
-	p := buildFramesPrompt()
+	p := buildFramesPrompt("")
 	for _, c := range understandCategories {
 		if !strings.Contains(p, c.Name+" — "+c.Means) {
 			t.Errorf("the frames prompt is missing %q, so the two halves no "+
@@ -459,7 +459,7 @@ func TestFrames_AskForTopicsToo(t *testing.T) {
 	// videos say nothing at all. A frames prompt that asks only for a category
 	// leaves exactly those videos with one of eighteen words and no
 	// description, which is the situation topics were added to fix.
-	p := buildFramesPrompt()
+	p := buildFramesPrompt("")
 	if !strings.Contains(p, "TOPICS") {
 		t.Fatal("the frames prompt does not ask for topics, so a silent video " +
 			"can never be described — only filed under one of eighteen words")
@@ -636,7 +636,7 @@ func TestTopics_DoNotReachTheRankedTags(t *testing.T) {
 }
 
 func TestPrompt_AsksForTopicsWithoutGivingAList(t *testing.T) {
-	p := buildUnderstandPrompt("anything")
+	p := buildUnderstandPrompt("anything", "")
 	if !strings.Contains(p, "NOT a list to choose from") {
 		t.Error("the prompt no longer tells the model topics are open. Given a " +
 			"list it will pick from it, and the whole value here is the words " +
@@ -723,5 +723,62 @@ func TestDedupeStable_KeepsOrderAndDropsRepeats(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("got %v, want %v", got, want)
 		}
+	}
+}
+
+// ── does the video do what the challenge asks ──────────────────────────────
+
+func TestMatch_TheQuestionIsAskedOnlyWhenThereIsOne(t *testing.T) {
+	for name, p := range map[string]string{
+		"reading": buildUnderstandPrompt("anything", "Who is better at juggling"),
+		"looking": buildFramesPrompt("Who is better at juggling"),
+	} {
+		if !strings.Contains(p, `"Who is better at juggling"`) {
+			t.Errorf("%s pass: the challenge is not in the prompt", name)
+		}
+		if !strings.Contains(p, `"matches": "yes|no|unsure"`) {
+			t.Errorf("%s pass: the answer does not ask for the match", name)
+		}
+		// A wrong "no" can take somebody's video down; the prompt says so.
+		if !strings.Contains(p, `"unsure" is always better than a wrong "no"`) {
+			t.Errorf("%s pass: nothing warns against a careless no", name)
+		}
+	}
+	for name, p := range map[string]string{
+		"reading": buildUnderstandPrompt("anything", "  "),
+		"looking": buildFramesPrompt(""),
+	} {
+		if strings.Contains(p, "CHALLENGE") || strings.Contains(p, "matches") {
+			t.Errorf("%s pass asks about a challenge nobody named", name)
+		}
+	}
+}
+
+func TestMatch_AQuoteInTheTitleCannotBreakThePrompt(t *testing.T) {
+	p := buildUnderstandPrompt("anything", `Who says "hi" best`)
+	if !strings.Contains(p, `"Who says 'hi' best"`) {
+		t.Errorf("the title's quotes were not softened: %s", p)
+	}
+}
+
+func TestMatch_OnlyThreeAnswersCount(t *testing.T) {
+	for raw, want := range map[string]string{
+		`{"categories": ["dance"], "feelings": [], "topics": [], "matches": "no"}`:     "no",
+		`{"categories": ["dance"], "feelings": [], "topics": [], "matches": " YES "}`:  "yes",
+		`{"categories": ["other"], "feelings": [], "topics": [], "matches": "unsure"}`: "unsure",
+		// Anything else is not an answer, and never a "no".
+		`{"categories": ["dance"], "feelings": [], "topics": [], "matches": "probably not"}`: "",
+		`{"categories": ["dance"], "feelings": [], "topics": []}`:                            "",
+		`not json at all`: "",
+		// The prompt's own example comes first in the output; the answer is the last.
+		`{"categories": ["..."], "matches": "yes|no|unsure"} then {"categories": ["food"], "matches": "no"}`: "no",
+	} {
+		if got := understoodMatch("Who can dance?", raw); got != want {
+			t.Errorf("understoodMatch(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	// Nobody asked: nothing is taken, even a clear "no".
+	if got := understoodMatch("  ", `{"matches": "no"}`); got != "" {
+		t.Errorf("an answer to a question nobody asked was taken: %q", got)
 	}
 }

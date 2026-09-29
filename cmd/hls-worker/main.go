@@ -270,6 +270,10 @@ type pendingJob struct {
 	// limit lives in one place — see pendingHLSJob on the server. Zero, or
 	// a backend too old to send it, means cut nothing.
 	MaxSeconds int `json:"maxSeconds"`
+	// Question is the challenge the video was posted for — its own title
+	// for a challenge, the challenge it answers for a response. Asked about
+	// during analysis; see matchSection. Empty from an older backend.
+	Question string `json:"question"`
 }
 
 type reportPayload struct {
@@ -470,7 +474,7 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (jobResu
 	// the expensive part (download + transcode) is already paid for. Never
 	// fatal: analyzeVideo returns whatever it managed and the job completes
 	// either way — a missing optional binary must not block an upload.
-	analysis := analysisJSON(analyzeVideo(ctx, srcPath))
+	analysis := analysisJSON(analyzeVideo(ctx, srcPath, job.Question))
 
 	// One still frame, so the app has something to show while the video
 	// opens. Never fatal, for the same reason analysis is not: a video with

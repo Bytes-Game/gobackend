@@ -172,7 +172,8 @@ func loadBattleSummary(ctx context.Context, uid int, visitor bool) (BattleSummar
 		  (SELECT COUNT(*) FROM challenges c
 		    WHERE c.status = 'active' AND c.resolved_at IS NULL
 		      AND (c.creator_id = $1 OR EXISTS (SELECT 1 FROM challenge_responses cr
-		                                         WHERE cr.challenge_id = c.id AND cr.responder_id = $1))`+battleVisitorClause+`),
+		                                         WHERE cr.challenge_id = c.id AND cr.responder_id = $1
+		                                           AND NOT COALESCE(cr.is_hidden, FALSE)))`+battleVisitorClause+`),
 		  (SELECT COUNT(*) FROM battle_results br JOIN challenges c ON c.id = br.challenge_id
 		    WHERE br.user_id = $1 AND br.outcome = 'won'`+battleVisitorClause+`),
 		  (SELECT COUNT(*) FROM battle_results br JOIN challenges c ON c.id = br.challenge_id
@@ -238,7 +239,8 @@ func loadBattleCards(ctx context.Context, q querier, uid int, tab string, visito
 			  FROM challenges c
 			 WHERE c.status = 'active' AND c.resolved_at IS NULL
 			   AND (c.creator_id = $1 OR EXISTS (SELECT 1 FROM challenge_responses cr
-			                                      WHERE cr.challenge_id = c.id AND cr.responder_id = $1))`+battleVisitorClause+`
+			                                      WHERE cr.challenge_id = c.id AND cr.responder_id = $1
+			                                        AND NOT COALESCE(cr.is_hidden, FALSE)))`+battleVisitorClause+`
 			 ORDER BY c.voting_ends_at ASC NULLS LAST
 			 LIMIT $3 OFFSET $4`, uid, visitor, limit, offset)
 	default: // won, lost, draw

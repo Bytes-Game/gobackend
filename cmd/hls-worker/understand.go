@@ -247,8 +247,9 @@ How to judge:
 - "other" is a correct and useful answer for the CATEGORY. A wrong category is worse than "other", because the app will show this video to people who asked for something else. Topics are different: nothing is filed by them, so name anything the video is genuinely about.
 - Write topics in English even when the video is in another language, so the same subject reads the same way across the app.
 
+%s
 Answer with one line of JSON and nothing else:
-{"categories": ["..."], "feelings": ["..."], "topics": ["..."]}
+{"categories": ["..."], "feelings": ["..."], "topics": ["..."]%s}
 
 Transcript:
 %s
@@ -260,6 +261,7 @@ type understandReply struct {
 	Categories []string `json:"categories"`
 	Feelings   []string `json:"feelings"`
 	Topics     []string `json:"topics"`
+	Matches    string   `json:"matches"`
 }
 
 // lastJSONObject finds the final {...} containing "categories". The CLI prints
@@ -279,6 +281,11 @@ type understood struct {
 	Tags []string
 	// Topics are whatever the model wanted to say. Nothing ranks on them.
 	Topics []string
+
+	// Match is whether the video does what the challenge it was posted for
+	// asks: "yes", "no" or "unsure". Empty when there was no challenge to
+	// ask about, or the model did not say. See matchSection.
+	Match string
 }
 
 // understandContent reads what the video said and returns the tags a model
@@ -289,7 +296,7 @@ type understood struct {
 // "there is no model on this machine" both come back as no tags, and only one
 // of them means the feature is off. Callers use it to decide whether to fall
 // back to the keyword list.
-func understandContent(ctx context.Context, a videoAnalysis) (understood, bool) {
+func understandContent(ctx context.Context, a videoAnalysis, question string) (understood, bool) {
 	bin := strings.TrimSpace(os.Getenv(understandBinEnv))
 	model := strings.TrimSpace(os.Getenv(understandModelEnv))
 	if bin == "" || model == "" {
@@ -311,7 +318,7 @@ func understandContent(ctx context.Context, a videoAnalysis) (understood, bool) 
 		return understood{}, false
 	}
 
-	prompt := buildUnderstandPrompt(said)
+	prompt := buildUnderstandPrompt(said, question)
 	out, err := exec.CommandContext(ctx, bin,
 		"-m", model,
 		// See understandContextTokens — without this the process is killed.
@@ -330,7 +337,11 @@ func understandContent(ctx context.Context, a videoAnalysis) (understood, bool) 
 	}
 
 	answer := string(out)
-	return understood{Tags: understoodTags(answer), Topics: understoodTopics(answer)}, true
+	return understood{
+		Tags:   understoodTags(answer),
+		Topics: understoodTopics(answer),
+		Match:  understoodMatch(question, answer),
+	}, true
 }
 
 // understandMinWords is the floor below which the model is not asked.
@@ -342,17 +353,88 @@ func understandContent(ctx context.Context, a videoAnalysis) (understood, bool) 
 const understandMinWords = 6
 
 // buildUnderstandPrompt assembles the instruction, with the transcript capped.
-func buildUnderstandPrompt(said string) string {
+// [question] is the challenge the video was posted for; empty asks nothing
+// about it.
+func buildUnderstandPrompt(said, question string) string {
 	var cats strings.Builder
 	for _, c := range understandCategories {
 		cats.WriteString("  " + c.Name + " — " + c.Means + "\n")
 	}
+	section, field := matchSection(question)
 	return fmt.Sprintf(understandPrompt,
 		strings.TrimRight(cats.String(), "\n"),
 		strings.Join(understandEmotions, ", "),
 		understandMaxTopics,
 		strings.Join(understandTopicExamples, ", "),
+		section, field,
 		truncateForModel(said, understandMaxSpeechChars))
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// DOES THE VIDEO DO WHAT THE CHALLENGE ASKS
+// ════════════════════════════════════════════════════════════════════════════
+//
+// A battle is two people doing the same thing, and it only works if both of
+// them do it. Somebody answering "who is better at juggling" with a cooking
+// clip, or posting "who can dance on a bus" over a video of their cat, spoils
+// it for everyone who votes.
+//
+// The model is already reading every video to say what it is about, so it is
+// asked one more thing while it is there: does this video do what the
+// challenge says? One answer, three words it may use. It costs nothing extra
+// — the same run, a few more tokens of answer.
+//
+// The answer alone decides nothing. A four-billion-parameter model reading a
+// transcript can be wrong, so the backend takes a "no" as one of two signals
+// it needs before a video is taken down; a person reporting it is the other.
+// See offtopic.go in the backend.
+
+// matchSection is the part of the prompt that asks about the challenge, and
+// the field it adds to the answer. Both empty when there is no question — a
+// prompt must not ask about a challenge nobody named.
+func matchSection(question string) (section, field string) {
+	q := strings.TrimSpace(question)
+	if q == "" {
+		return "", ""
+	}
+	q = truncateForModel(strings.ReplaceAll(q, `"`, "'"), understandMaxQuestionChars)
+	return fmt.Sprintf(`CHALLENGE — this video was posted for the challenge: "%s"
+Does the video actually do what that challenge asks?
+- "yes" if it clearly does.
+- "no" only if it is clearly about something else entirely.
+- "unsure" if you cannot tell. "unsure" is always better than a wrong "no": a "no" can get somebody's video taken down.
+`, q), `, "matches": "yes|no|unsure"`
+}
+
+// understandMaxQuestionChars caps the challenge text in the prompt. The app
+// holds a challenge to 50 + 30 characters; this is a guard against a row
+// from before that, not a limit anybody meets.
+const understandMaxQuestionChars = 200
+
+// understoodMatch is the model's answer about the challenge, as one of the
+// three words it was allowed, or "" for anything else. Anything else — an
+// explanation, a "maybe" — is not an answer the backend can act on, and
+// must not be read as a "no".
+//
+// Nor is an answer to a question nobody asked: with no [question] in the
+// prompt, a "matches" the model volunteers anyway is dropped.
+func understoodMatch(question, raw string) string {
+	if strings.TrimSpace(question) == "" {
+		return ""
+	}
+	all := lastJSONObject.FindAllString(raw, -1)
+	if len(all) == 0 {
+		return ""
+	}
+	var r understandReply
+	if err := json.Unmarshal([]byte(all[len(all)-1]), &r); err != nil {
+		return ""
+	}
+	switch m := strings.ToLower(strings.TrimSpace(r.Matches)); m {
+	case "yes", "no", "unsure":
+		return m
+	}
+	return ""
 }
 
 // truncateForModel caps the transcript at a rune boundary.

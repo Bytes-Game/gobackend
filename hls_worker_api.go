@@ -136,6 +136,12 @@ type pendingHLSJob struct {
 	//
 	// A worker that predates this field ignores it and behaves as before.
 	MaxSeconds int `json:"maxSeconds,omitempty"`
+	// Question is the challenge the video belongs to, the way people read
+	// it: "Who can juggle five balls?". The worker asks its model whether
+	// the video actually matches it, and sends the answer back with the
+	// rest of its reading. An answer is checked against the challenge it
+	// answers. Empty = nothing to check against. See offtopic.go.
+	Question string `json:"question,omitempty"`
 }
 
 // hlsCompleteRequest is what the worker POSTs after a successful
@@ -296,6 +302,7 @@ func HLSNextPendingHandler(w http.ResponseWriter, r *http.Request) {
 			ChallengeID: strconv.Itoa(id), SourceURL: src, Kind: "challenge",
 			PublicBaseURL: publicBase,
 			MaxSeconds:    int(maxUploadDuration / time.Second),
+			Question:      jobQuestion("challenges", id),
 		})
 		return
 	}
@@ -305,6 +312,7 @@ func HLSNextPendingHandler(w http.ResponseWriter, r *http.Request) {
 			ChallengeID: strconv.Itoa(id), SourceURL: src, Kind: hlsKindResponse,
 			PublicBaseURL: publicBase,
 			MaxSeconds:    int(maxUploadDuration / time.Second),
+			Question:      jobQuestion("challenge_responses", id),
 		})
 		return
 	}

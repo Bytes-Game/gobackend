@@ -107,6 +107,12 @@ type videoAnalysis struct {
 	// could. See the topics note in understand.go.
 	Topics []string `json:"topics,omitempty"`
 
+	// Whether the video does what the challenge it was posted for asks —
+	// "yes", "no" or "unsure" — from whichever understanding pass ran.
+	// Empty when nobody asked (no challenge text, no model). See
+	// matchSection in understand.go.
+	QuestionMatch string `json:"questionMatch,omitempty"`
+
 	// Which passes actually ran, so the backend can tell "quiet video" from
 	// "we never listened".
 	Passes []string `json:"passes,omitempty"`
@@ -163,7 +169,10 @@ const (
 // analyzeVideo inspects a local file and returns everything it could work
 // out. It never returns an error: a failed pass is a missing field, not a
 // failed job.
-func analyzeVideo(ctx context.Context, src string) videoAnalysis {
+//
+// [question] is the challenge the video was posted for, asked about while
+// the model is reading it anyway. Empty asks nothing.
+func analyzeVideo(ctx context.Context, src, question string) videoAnalysis {
 	ctx, cancel := context.WithTimeout(ctx, analyzeTimeout)
 	defer cancel()
 
@@ -214,7 +223,7 @@ func analyzeVideo(ctx context.Context, src string) videoAnalysis {
 	// how often it cuts, whether anyone is talking — and are just as true
 	// whoever read the words.
 	understandCtx, cancelUnderstand := context.WithTimeout(ctx, understandBudget)
-	read, ranUnderstand := understandContent(understandCtx, a)
+	read, ranUnderstand := understandContent(understandCtx, a, question)
 	cancelUnderstand()
 	if ranUnderstand {
 		a.Passes = append(a.Passes, "understand")
@@ -223,6 +232,7 @@ func analyzeVideo(ctx context.Context, src string) videoAnalysis {
 		// ranks on them and that is the point — see the topics note in
 		// understand.go.
 		a.Topics = read.Topics
+		a.QuestionMatch = read.Match
 	}
 
 	// And the other half: for a video that said nothing, LOOK at it.
@@ -240,13 +250,16 @@ func analyzeVideo(ctx context.Context, src string) videoAnalysis {
 	// model. So the pass that needs the time is the one that gets it.
 	if len(read.Tags) == 0 {
 		framesCtx, cancelFrames := context.WithTimeout(ctx, framesBudget)
-		seen, ranFrames := understandContentFromFrames(framesCtx, src, dur)
+		seen, ranFrames := understandContentFromFrames(framesCtx, src, dur, question)
 		cancelFrames()
 		if ranFrames {
 			a.Passes = append(a.Passes, "frames")
 			a.AutoTags = dedupeStable(append(seen.Tags, shapeTags(a)...))
 			if len(seen.Topics) > 0 {
 				a.Topics = seen.Topics
+			}
+			if seen.Match != "" {
+				a.QuestionMatch = seen.Match
 			}
 		}
 	}

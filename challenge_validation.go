@@ -1,8 +1,10 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -25,9 +27,9 @@ import (
 //     - Challenge must still be open/active (not closed)
 //     - Rate limit: max 5 responses per user per hour (Redis counter)
 //
-//   Tier 2 (community-driven, no AI):
-//     - Voters can flag responses as off-topic
-//     - >= flagThreshold flags + flag-to-view ratio > flagRatioCutoff = auto-hide
+//   Tier 2 (does the video match its challenge):
+//     - The worker's model is asked, and people can report a video
+//     - When they agree, the video is taken down — see offtopic.go
 //     - Lightweight keyword-overlap relevance score computed at upload time
 //     - Per-user repeat-offender tracking via off_topic_rate
 //
@@ -48,9 +50,7 @@ const (
 	// Tier-1 rate limit (Redis bucket: responses:rate:{userID}, EX 3600)
 	maxResponsesPerHour = 5
 
-	// Tier-2 community moderation thresholds
-	flagThreshold      = 5    // need at least 5 flags to consider hiding
-	flagRatioCutoff    = 0.6  // flags / max(views, flags) >= 0.6 → hide
+	// Tier-2 thresholds
 	relevanceLowCutoff = 0.10 // below this score = "off-topic-ish" (down-rank in feed)
 	offTopicUserCutoff = 0.4  // user with > 40% historically hidden responses gets stricter checks
 )
@@ -78,6 +78,9 @@ func validateChallengeResponseSubmission(payload AcceptChallengePayload, challen
 	// --- Challenge must still accept responses ---
 	if challenge.Status == "closed" || challenge.Status == "expired" {
 		return fmt.Errorf("challenge is no longer accepting responses")
+	}
+	if challenge.Status == "removed" {
+		return fmt.Errorf("this challenge was taken down because its video didn't match it")
 	}
 
 	// --- Same user can't reuse the same video on any challenge ---
@@ -237,100 +240,59 @@ func tokenize(text string) []string {
 	return out
 }
 
-// FlagResponseHandler registers an off-topic flag from a community member.
-// POST /api/v1/challenges/responses/{id}/flag  body: {"userId":"...","reason":"off_topic"}
+// FlagResponseHandler is the older way to report an answer, by the answer's
+// own id. It now goes through exactly the same rules as ReportOffTopicHandler:
+// see offtopic.go.
 //
-// Each (response, user) pair can flag at most once (PRIMARY KEY constraint).
-// After insertion we recount flags and auto-hide if both:
-//   - flag count >= flagThreshold
-//   - flag rate (flags / max(views, flags)) >= flagRatioCutoff
+// POST /api/v1/challenges/responses/{id}/flag
 //
-// This avoids a single brigade hiding good content, but quickly hides obviously
-// off-topic uploads that have been seen by many people without engagement.
+// It used to hide an answer once five people had flagged it AND those flags
+// were most of its views. Nothing in the app ever called it, and a rule that
+// needs five flags on a video almost nobody has watched yet would not have
+// caught anything if it had.
 func FlagResponseHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	vars := mux.Vars(r)
-	responseIDStr := vars["id"]
-	responseID, err := strconv.Atoi(responseIDStr)
-	if err != nil {
+	uid, err := strconv.Atoi(authUserID(r))
+	if err != nil || uid <= 0 {
+		http.Error(w, "sign in to report a video", http.StatusUnauthorized)
+		return
+	}
+	rid, err := strconv.Atoi(mux.Vars(r)["id"])
+	if err != nil || rid <= 0 {
 		http.Error(w, "invalid response id", http.StatusBadRequest)
 		return
 	}
-
-	var payload FlagResponsePayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+	var cid int
+	err = db.QueryRowContext(r.Context(),
+		`SELECT challenge_id FROM challenge_responses WHERE id = $1`, rid).Scan(&cid)
+	if err == sql.ErrNoRows {
+		http.Error(w, "That video isn't there any more.", http.StatusNotFound)
 		return
 	}
-	// The flagger is the authenticated user.
-	payload.UserID = authUserID(r)
-	userID, err := strconv.Atoi(payload.UserID)
 	if err != nil {
-		http.Error(w, "invalid userId", http.StatusBadRequest)
+		log.Printf("flag: could not find the battle of answer %d: %v", rid, err)
+		http.Error(w, "could not record the report — try again", http.StatusInternalServerError)
 		return
 	}
-	reason := payload.Reason
-	if reason == "" {
-		reason = "off_topic"
-	}
-
-	// Insert the flag (idempotent via PRIMARY KEY (response_id, user_id))
-	_, err = db.Exec(
-		`INSERT INTO challenge_response_flags (response_id, user_id, reason)
-		 VALUES ($1, $2, $3)
-		 ON CONFLICT (response_id, user_id) DO NOTHING`,
-		responseID, userID, reason,
-	)
+	status, msg, down, err := reportOffTopic(r.Context(), uid, cid, rid)
 	if err != nil {
-		http.Error(w, "failed to record flag", http.StatusInternalServerError)
+		log.Printf("flag: report by %d on answer %d failed: %v", uid, rid, err)
+		http.Error(w, "could not record the report — try again", http.StatusInternalServerError)
 		return
 	}
-
-	// Re-evaluate hiding criteria
-	hidden := evaluateHidingThreshold(responseID)
-
+	if status != http.StatusOK {
+		http.Error(w, msg, status)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"hidden":  hidden,
+		"hidden":  down,
+		"message": msg,
 	})
-}
-
-// evaluateHidingThreshold counts flags + views and hides the response when
-// both thresholds are crossed. Returns the new is_hidden state.
-func evaluateHidingThreshold(responseID int) bool {
-	var flags, views int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM challenge_response_flags WHERE response_id = $1`, responseID).Scan(&flags); err != nil {
-		queryFailed("evaluateHidingThreshold: could not read challenge_response_flags",
-			"carrying on as if the answer were empty", err)
-	}
-	if err := db.QueryRow(`SELECT COALESCE(views, 0) FROM challenge_responses WHERE id = $1`, responseID).Scan(&views); err != nil {
-		queryFailed("evaluateHidingThreshold: could not read challenge_responses",
-			"carrying on as if the answer were empty", err)
-	}
-
-	// Update the cached counter on the response (used for fast feed reads)
-	db.Exec(`UPDATE challenge_responses SET off_topic_flags = $1 WHERE id = $2`, flags, responseID)
-
-	if flags < flagThreshold {
-		return false
-	}
-	denom := views
-	if flags > denom {
-		denom = flags
-	}
-	if denom == 0 {
-		return false
-	}
-	ratio := float64(flags) / float64(denom)
-	if ratio >= flagRatioCutoff {
-		db.Exec(`UPDATE challenge_responses SET is_hidden = TRUE WHERE id = $1`, responseID)
-		return true
-	}
-	return false
 }
 
 // userOffTopicRate returns the fraction of a user's past responses that were

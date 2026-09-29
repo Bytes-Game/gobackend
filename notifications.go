@@ -69,7 +69,7 @@ func (p NotificationPrefs) allowedByPrefs(kind TriggerKind) bool {
 	switch kind {
 	case TriggerFriendResponse, TriggerFriendChallenge:
 		return p.FriendResponse
-	case TriggerEndingSoon, TriggerBattleWon:
+	case TriggerEndingSoon, TriggerBattleWon, TriggerOffTopic:
 		return p.EndingSoon
 	case TriggerYouWillLove:
 		return p.YouWillLove

@@ -6729,11 +6729,15 @@ func populateTopResponses(items []HomeFeedItem) {
 			CASE WHEN COALESCE(cr.hls_manifest_url, '') IN ('', 'PENDING') THEN ''
 			     ELSE cr.hls_manifest_url END,
 			ru.username, ru.league,
-			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = cr.challenge_id),
+			(SELECT COUNT(*) FROM challenge_responses
+			  WHERE challenge_id = cr.challenge_id AND NOT COALESCE(is_hidden, FALSE)),
 			(SELECT COUNT(*) FROM challenge_response_likes WHERE response_id = cr.id)
 		FROM challenge_responses cr
 		JOIN users ru ON cr.responder_id = ru.id
 		WHERE cr.challenge_id IN (` + strings.Join(placeholders, ",") + `)
+		  -- A video taken down for not matching the challenge is out of the
+		  -- battle. See offtopic.go.
+		  AND NOT COALESCE(cr.is_hidden, FALSE)
 		ORDER BY cr.challenge_id, cr.created_at DESC`
 	rows, err := db.Query(query, args...)
 	if err != nil {
