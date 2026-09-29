@@ -135,8 +135,9 @@ How to judge:
 - "other" is a correct and useful answer for the CATEGORY. A wrong category is worse than "other", because the app will show this video to people who asked for something else. Topics are different: nothing is filed by them, so name anything you can genuinely see.
 - Write topics in English, so the same subject reads the same way across the app.
 
+%s
 Answer with one line of JSON and nothing else:
-{"categories": ["..."], "feelings": ["..."], "topics": ["..."]}
+{"categories": ["..."], "feelings": ["..."], "topics": ["..."]%s}
 `
 
 // understandContentFromFrames looks at a video and returns the tags a model
@@ -145,7 +146,7 @@ Answer with one line of JSON and nothing else:
 // Same second-return contract as every other pass: it says whether the model
 // RAN, so "looked and could not tell" stays distinguishable from "there was
 // nothing here to look with".
-func understandContentFromFrames(ctx context.Context, src string, dur float64) (understood, bool) {
+func understandContentFromFrames(ctx context.Context, src string, dur float64, question string) (understood, bool) {
 	bin := strings.TrimSpace(os.Getenv(framesBinEnv))
 	model := strings.TrimSpace(os.Getenv(understandModelEnv))
 	proj := strings.TrimSpace(os.Getenv(framesProjectorEnv))
@@ -178,7 +179,7 @@ func understandContentFromFrames(ctx context.Context, src string, dur float64) (
 	for _, f := range frames {
 		args = append(args, "--image", f)
 	}
-	args = append(args, "-p", buildFramesPrompt())
+	args = append(args, "-p", buildFramesPrompt(question))
 
 	out, err := exec.CommandContext(ctx, bin, args...).Output()
 	if err != nil {
@@ -186,7 +187,11 @@ func understandContentFromFrames(ctx context.Context, src string, dur float64) (
 		return understood{}, false
 	}
 	answer := string(out)
-	return understood{Tags: understoodTags(answer), Topics: understoodTopics(answer)}, true
+	return understood{
+		Tags:   understoodTags(answer),
+		Topics: understoodTopics(answer),
+		Match:  understoodMatch(question, answer),
+	}, true
 }
 
 // understandFramesContextTokens is bigger than the reading pass's bound
@@ -202,16 +207,18 @@ const understandFramesContextTokens = 8192
 // buildFramesPrompt assembles the instruction. Shares the category list and
 // descriptions with the reading pass so the two halves cannot drift into
 // answering different questions.
-func buildFramesPrompt() string {
+func buildFramesPrompt(question string) string {
 	var cats strings.Builder
 	for _, c := range understandCategories {
 		cats.WriteString("  " + c.Name + " — " + c.Means + "\n")
 	}
+	section, field := matchSection(question)
 	return fmt.Sprintf(understandFramesPrompt,
 		strings.TrimRight(cats.String(), "\n"),
 		strings.Join(understandEmotions, ", "),
 		understandMaxTopics,
-		strings.Join(understandTopicExamples, ", "))
+		strings.Join(understandTopicExamples, ", "),
+		section, field)
 }
 
 // extractFrames pulls evenly spread stills and returns their paths plus a

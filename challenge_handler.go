@@ -7,7 +7,9 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/mux"
 )
@@ -56,6 +58,27 @@ func checkLeagueEligibility(userID1, userID2 string) error {
 // Challenge HTTP handlers
 // ------------------------------------------------------------------------------------
 
+// The longest a challenge's two halves may be, in characters — the same
+// limits the posting form holds people to. Counted in characters a person
+// sees, not bytes, so "é" or an emoji is one, the way the app counts it.
+const (
+	maxPrefixChars  = 50
+	maxSubjectChars = 30
+)
+
+// challengeWordsTooLong says what is too long, or "" when both fit. The app
+// stops people typing past the limits; this is for everything that does not
+// go through the app's form.
+func challengeWordsTooLong(prefix, subject string) string {
+	if utf8.RuneCountInString(strings.TrimSpace(prefix)) > maxPrefixChars {
+		return fmt.Sprintf("The first part of the challenge can be at most %d characters.", maxPrefixChars)
+	}
+	if utf8.RuneCountInString(strings.TrimSpace(subject)) > maxSubjectChars {
+		return fmt.Sprintf("The subject can be at most %d characters.", maxSubjectChars)
+	}
+	return ""
+}
+
 // CreateChallengeHandler creates a new challenge.
 // POST /api/v1/challenges
 func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +92,10 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 
 	if payload.Prefix == "" || payload.Subject == "" {
 		http.Error(w, "prefix and subject are required", http.StatusBadRequest)
+		return
+	}
+	if msg := challengeWordsTooLong(payload.Prefix, payload.Subject); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 

@@ -1829,7 +1829,9 @@ SELECT c.id, c.creator_id, u.username, u.league,
 FROM challenges c
 JOIN users u ON c.creator_id = u.id
 LEFT JOIN (SELECT challenge_id, COUNT(*) AS cnt FROM challenge_likes GROUP BY challenge_id) lc ON lc.challenge_id = c.id
-LEFT JOIN (SELECT challenge_id, COUNT(*) AS cnt FROM challenge_responses GROUP BY challenge_id) rc ON rc.challenge_id = c.id`
+LEFT JOIN (SELECT challenge_id, COUNT(*) AS cnt FROM challenge_responses
+             WHERE NOT COALESCE(is_hidden, FALSE)
+             GROUP BY challenge_id) rc ON rc.challenge_id = c.id`
 
 // queryChallenges executes a challenge query and returns Challenge structs.
 func queryChallenges(query string, args ...interface{}) []Challenge {
@@ -2437,6 +2439,9 @@ func CastVote(payload ChallengeVotePayload) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if status == "removed" {
+		return false, voteRefusal{status: 409, msg: "This challenge was taken down because its video didn't match it."}
+	}
 	if resolvedAt.Valid || (endsAt.Valid && !endsAt.Time.After(time.Now())) {
 		return false, voteRefusal{status: 409, msg: "This battle has ended."}
 	}
@@ -2461,14 +2466,21 @@ func CastVote(payload ChallengeVotePayload) (bool, error) {
 		if err != nil {
 			return false, voteRefusal{status: 400, msg: "invalid response id"}
 		}
-		var inThisBattle bool
-		if err := db.QueryRow(`
-			SELECT EXISTS (SELECT 1 FROM challenge_responses
-			                WHERE id = $1 AND challenge_id = $2)`,
-			rid, cid).Scan(&inThisBattle); err != nil {
+		// A video taken down for not matching the challenge is out of the
+		// battle, and so is anything cast for it. See offtopic.go.
+		var takenDown bool
+		err = db.QueryRow(`
+			SELECT COALESCE(is_hidden, FALSE)
+			  FROM challenge_responses
+			 WHERE id = $1 AND challenge_id = $2`,
+			rid, cid).Scan(&takenDown)
+		inThisBattle := err == nil
+		if err != nil && err != sql.ErrNoRows {
 			return false, err
 		}
 		switch {
+		case inThisBattle && takenDown:
+			return false, voteRefusal{status: 409, msg: "That video was taken down because it didn't match the challenge."}
 		case inThisBattle:
 			side = rid
 		case rid == cid:

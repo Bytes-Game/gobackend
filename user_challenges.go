@@ -118,5 +118,8 @@ const profileWhereClause = `
 	  WHERE c.creator_id = CAST($1 AS INT)`
 
 // profileVisitorClause is added when the profile is not the viewer's own.
+// A challenge taken down for not matching its video stays on its owner's
+// own profile, marked, and nobody else's. See offtopic.go.
 const profileVisitorClause = `
-	    AND c.visibility = 'arena'`
+	    AND c.visibility = 'arena'
+	    AND c.status <> 'removed'`

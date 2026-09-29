@@ -326,7 +326,8 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 	responseIDs := []string{}
 
 	rows, err := q.QueryContext(ctx, `
-		SELECT cr.id, cr.responder_id, u.username, COALESCE(cr.views, 0)
+		SELECT cr.id, cr.responder_id, u.username, COALESCE(cr.views, 0),
+		       COALESCE(cr.is_hidden, FALSE)
 		  FROM challenge_responses cr
 		  JOIN users u ON u.id = cr.responder_id
 		 WHERE cr.challenge_id = $1
@@ -338,19 +339,29 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 	// challenges.views is the whole card; the creator's share of it is what
 	// is left once every answer's views are taken out (see counts.go).
 	answerViews := 0
+	takenDown := map[int]bool{}
 	for rows.Next() {
 		var rid, uid, views int
 		var name string
-		if scanFailed("battle standings: answers", rows.Scan(&rid, &uid, &name, &views), &seenScan) {
+		var hidden bool
+		if scanFailed("battle standings: answers", rows.Scan(&rid, &uid, &name, &views, &hidden), &seenScan) {
 			continue
 		}
+		// Still part of the card's views: they were watched, and the
+		// creator's share is what is left after every answer's.
 		answerViews += views
 		// One side per person. Somebody who answered twice is still one
 		// competitor, and the first answer is the one that joined the battle.
 		if participants[uid] {
 			continue
 		}
+		// Still somebody IN the battle — their own votes, likes and views
+		// never count — but no longer a side in it. See offtopic.go.
 		participants[uid] = true
+		if hidden {
+			takenDown[rid] = true
+			continue
+		}
 		sides = append(sides, Standing{
 			UserID: strconv.Itoa(uid), Username: name, Role: "responder",
 			ResponseID: strconv.Itoa(rid), userID: uid, responseID: rid,
@@ -428,6 +439,11 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 	markBursts(votes, weights, reasons)
 	for i, v := range votes {
 		idx, ok := sideByResponse[v.ResponseID]
+		if !ok && takenDown[v.ResponseID] {
+			// Cast for a video taken down for not matching the challenge.
+			// Out of the battle with it; the voter can vote again.
+			continue
+		}
 		if !ok {
 			// A vote for an answer that is not in this battle. The vote
 			// endpoint refuses these and migration 011 cleared the old ones,

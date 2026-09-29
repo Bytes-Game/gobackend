@@ -74,6 +74,11 @@ type VideoAnalysis struct {
 	// the worker's understanding pass; see cmd/hls-worker/understand.go.
 	Topics []string `json:"topics,omitempty"`
 
+	// Whether the video matches the challenge it was posted to, as the
+	// model judged it: "yes", "no", "unsure", or empty when it was not
+	// asked. See offtopic.go for what a "no" leads to.
+	QuestionMatch string `json:"questionMatch,omitempty"`
+
 	Passes []string `json:"passes,omitempty"`
 }
 
@@ -141,6 +146,10 @@ func storeVideoAnalysis(table string, id int, raw json.RawMessage) {
 	// Now the video has actually been watched, decide what it IS and write
 	// that down. See settleCategory — this is the wire that was missing.
 	settleCategory(table, id, tags, &a)
+
+	// Does it match its challenge? A "no" warns the owner, and with a
+	// report behind it takes the video down. See offtopic.go.
+	settleQuestionMatch(table, id, a.QuestionMatch)
 
 	// Tell search the video now has words attached to it.
 	//

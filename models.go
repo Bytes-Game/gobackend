@@ -508,12 +508,6 @@ type AcceptChallengePayload struct {
 	Tags []string `json:"tags,omitempty"`
 }
 
-// FlagResponsePayload is the body for community-moderation off-topic flagging.
-type FlagResponsePayload struct {
-	UserID string `json:"userId"`
-	Reason string `json:"reason,omitempty"` // defaults to "off_topic" if empty
-}
-
 // ChallengeVotePayload is the request body for voting on a challenge response.
 type ChallengeVotePayload struct {
 	ChallengeID string `json:"challengeId"`
