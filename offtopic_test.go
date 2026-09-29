@@ -7,49 +7,45 @@ import (
 
 // The rules of offtopic.go that need no database.
 
-func TestOffTopic_WhatItTakesToComeDown(t *testing.T) {
+func TestOffTopic_WhatTheEvidenceAddsUpTo(t *testing.T) {
 	for _, c := range []struct {
 		model          string
 		party, viewers int
-		down           bool
+		want           int
 		why            string
 	}{
-		{"no", 0, 0, false, "the model alone never takes anything down"},
-		{"no", 1, 0, true, "the model and the other side agree"},
-		{"no", 0, 1, true, "the model and a viewer agree"},
-		{"unsure", 1, 0, false, "an unsure model is no evidence"},
-		{"yes", 1, 2, false, "the other side and two viewers are not enough against a yes"},
-		{"", 0, 2, false, "two viewers alone are not enough"},
-		{"", 0, 3, true, "three viewers are, whatever the model said"},
-		{"yes", 0, 3, true, "three viewers are, even against a yes"},
-		{"", 5, 0, false, "the other side can't bring it down alone, however many of them"},
+		{"no", 0, 0, levelNone, "the model alone never charges anybody"},
+		{"no", 1, 0, levelConfirmed, "the model and the other side agree: the higher charge"},
+		{"no", 0, 1, levelConfirmed, "the model and a viewer agree: the higher charge"},
+		{"unsure", 1, 0, levelNone, "an unsure model is no evidence"},
+		{"yes", 1, 2, levelNone, "the other side and two viewers are not enough"},
+		{"", 0, 2, levelNone, "two viewers alone are not enough"},
+		{"", 0, 3, levelReported, "three viewers: the smaller charge"},
+		{"yes", 0, 3, levelReported, "even against a yes, three viewers are the smaller charge"},
+		{"", 5, 0, levelNone, "people in the battle can't charge the other side alone, however many"},
 	} {
-		if got := offTopicVerdict(c.model, c.party, c.viewers); got != c.down {
-			t.Errorf("model %q, %d from the battle, %d viewers: down=%v — %s",
-				c.model, c.party, c.viewers, got, c.why)
+		if got := offTopicVerdict(c.model, c.party, c.viewers); got != c.want {
+			t.Errorf("model %q, %d from the battle, %d viewers: level %d, want %d — %s",
+				c.model, c.party, c.viewers, got, c.want, c.why)
 		}
 	}
 }
 
-func TestOffTopic_WhatALostBattleCosts(t *testing.T) {
-	// One side left, both rated the same: the owner loses what a loss costs
-	// plus the penalty, and the other side gains what a win is worth.
-	after, gains := forfeitRatings(1000, []int{1000})
-	if after != 1000-16-integrityPenalty || len(gains) != 1 || gains[0] != 16 {
-		t.Errorf("even battle: owner → %d, gains %v; want %d and [16]",
-			after, gains, 1000-16-integrityPenalty)
+func TestOffTopic_WhatEachLevelCosts(t *testing.T) {
+	if pointsFor(levelNone) != 0 || pointsFor(levelReported) != 25 || pointsFor(levelConfirmed) != 50 {
+		t.Errorf("levels cost %d, %d, %d — want 0, 25 and 50",
+			pointsFor(levelNone), pointsFor(levelReported), pointsFor(levelConfirmed))
 	}
-	// Two sides left share it, the way a tie on top does in decideBattle.
-	after, gains = forfeitRatings(1000, []int{1000, 1000})
-	if after != 1000-16-integrityPenalty || gains[0] != 8 || gains[1] != 8 {
-		t.Errorf("two sides: owner → %d, gains %v", after, gains)
+	// Going from the smaller charge to the higher one charges the difference,
+	// so a video never costs more than the higher charge in all.
+	if d := pointsFor(levelConfirmed) - pointsFor(levelReported); d != 25 {
+		t.Errorf("topping up costs %d, want 25", d)
 	}
-	// Never below the floor.
-	if after, _ := forfeitRatings(ratingFloor+3, []int{2000}); after != ratingFloor {
-		t.Errorf("near the floor: %d, want %d", after, ratingFloor)
+	if penaltyRating(1000, 50) != 950 || penaltyRating(ratingFloor+3, 50) != ratingFloor {
+		t.Error("a charge takes the points off, never below the floor")
 	}
-	if penaltyRating(1000) != 1000-integrityPenalty || penaltyRating(ratingFloor) != ratingFloor {
-		t.Error("the penalty with no battle to lose is wrong")
+	if falseReportPenalty >= penaltyReported {
+		t.Error("a false report should cost less than a video that doesn't match")
 	}
 }
 

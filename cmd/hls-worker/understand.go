@@ -386,8 +386,9 @@ func buildUnderstandPrompt(said, question string) string {
 //
 // The answer alone decides nothing. A four-billion-parameter model reading a
 // transcript can be wrong, so the backend takes a "no" as one of two signals
-// it needs before a video is taken down; a person reporting it is the other.
-// See offtopic.go in the backend.
+// it needs before charging a video's owner the higher penalty; a person
+// reporting it is the other. Nothing is taken down either way. See offtopic.go
+// in the backend.
 
 // matchSection is the part of the prompt that asks about the challenge, and
 // the field it adds to the answer. Both empty when there is no question — a
@@ -402,7 +403,7 @@ func matchSection(question string) (section, field string) {
 Does the video actually do what that challenge asks?
 - "yes" if it clearly does.
 - "no" only if it is clearly about something else entirely.
-- "unsure" if you cannot tell. "unsure" is always better than a wrong "no": a "no" can get somebody's video taken down.
+- "unsure" if you cannot tell. "unsure" is always better than a wrong "no": a "no" can cost somebody rating points.
 `, q), `, "matches": "yes|no|unsure"`
 }
 

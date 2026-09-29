@@ -29,7 +29,7 @@ import (
 //
 //   Tier 2 (does the video match its challenge):
 //     - The worker's model is asked, and people can report a video
-//     - When they agree, the video is taken down — see offtopic.go
+//     - When they agree, the owner loses rating points — see offtopic.go
 //     - Lightweight keyword-overlap relevance score computed at upload time
 //     - Per-user repeat-offender tracking via off_topic_rate
 //
@@ -50,7 +50,7 @@ const (
 	// Tier-1 rate limit (Redis bucket: responses:rate:{userID}, EX 3600)
 	maxResponsesPerHour = 5
 
-	// Somebody with more than this share of their answers taken down can't
+	// Somebody with more than this share of their answers hidden can't
 	// post new ones. See userOffTopicRate.
 	offTopicUserCutoff = 0.4
 )
@@ -80,7 +80,7 @@ func validateChallengeResponseSubmission(payload AcceptChallengePayload, challen
 		return fmt.Errorf("challenge is no longer accepting responses")
 	}
 	if challenge.Status == "removed" {
-		return fmt.Errorf("this challenge was taken down because its video didn't match it")
+		return fmt.Errorf("this challenge has been removed")
 	}
 
 	// --- Same user can't reuse the same video on any challenge ---
@@ -277,7 +277,7 @@ func FlagResponseHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not record the report — try again", http.StatusInternalServerError)
 		return
 	}
-	status, msg, down, err := reportOffTopic(r.Context(), uid, cid, rid)
+	status, msg, err := reportOffTopic(r.Context(), uid, cid, rid)
 	if err != nil {
 		log.Printf("flag: report by %d on answer %d failed: %v", uid, rid, err)
 		http.Error(w, "could not record the report — try again", http.StatusInternalServerError)
@@ -287,10 +287,12 @@ func FlagResponseHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, status)
 		return
 	}
+	// Nothing is hidden for a report any more: videos stay up and their
+	// owners pay instead. See offtopic.go.
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"hidden":  down,
+		"hidden":  false,
 		"message": msg,
 	})
 }

@@ -2440,7 +2440,7 @@ func CastVote(payload ChallengeVotePayload) (bool, error) {
 		return false, err
 	}
 	if status == "removed" {
-		return false, voteRefusal{status: 409, msg: "This challenge was taken down because its video didn't match it."}
+		return false, voteRefusal{status: 409, msg: "This challenge has been removed."}
 	}
 	if resolvedAt.Valid || (endsAt.Valid && !endsAt.Time.After(time.Now())) {
 		return false, voteRefusal{status: 409, msg: "This battle has ended."}
@@ -2466,8 +2466,8 @@ func CastVote(payload ChallengeVotePayload) (bool, error) {
 		if err != nil {
 			return false, voteRefusal{status: 400, msg: "invalid response id"}
 		}
-		// A video taken down for not matching the challenge is out of the
-		// battle, and so is anything cast for it. See offtopic.go.
+		// A hidden answer (hidden by hand or by moderation) is out of the
+		// battle, and so is anything cast for it.
 		var takenDown bool
 		err = db.QueryRow(`
 			SELECT COALESCE(is_hidden, FALSE)
@@ -2480,7 +2480,7 @@ func CastVote(payload ChallengeVotePayload) (bool, error) {
 		}
 		switch {
 		case inThisBattle && takenDown:
-			return false, voteRefusal{status: 409, msg: "That video was taken down because it didn't match the challenge."}
+			return false, voteRefusal{status: 409, msg: "That video has been removed from this battle."}
 		case inThisBattle:
 			side = rid
 		case rid == cid:
