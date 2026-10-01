@@ -713,6 +713,7 @@ func main() {
 	api.HandleFunc("/chat/delete", authed(DeleteMessageHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/chat/forward", authed(ForwardMessageHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/chat/online/{username}", OnlineStatusHandler).Methods("GET", "OPTIONS")
+	api.HandleFunc("/calls/ice", authed(CallIceServersHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/save", authed(SaveChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/saved/{userId}", authed(GetSavedChallengesHandler)).Methods("GET", "OPTIONS")
 
