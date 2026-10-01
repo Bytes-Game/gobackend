@@ -2972,13 +2972,24 @@ func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 	return result
 }
 
-// MarkMessagesRead marks all messages from sender to receiver as read.
-func MarkMessagesRead(senderID, receiverID int) {
-	db.Exec(
-		`UPDATE chat_messages SET is_read = TRUE
+// MarkMessagesRead marks all messages from sender to receiver as read, and
+// says how many that was. Zero means there was nothing new to read, so
+// there is nobody to tell (see markReadAndTell).
+func MarkMessagesRead(senderID, receiverID int) int64 {
+	res, err := db.Exec(
+		`UPDATE chat_messages SET is_read = TRUE, status = 'read'
 		 WHERE sender_id = $1 AND receiver_id = $2 AND is_read = FALSE`,
 		senderID, receiverID,
 	)
+	if queryFailed(fmt.Sprintf("marking messages from user %d to user %d as read", senderID, receiverID),
+		"they stay unread, and the sender keeps seeing Sent", err) || res == nil {
+		return 0
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // GetConversations returns the list of users the given user has chatted with.
@@ -3018,14 +3029,17 @@ func GetConversations(userID int) []Conversation {
 			continue
 		}
 
-		var lastMsg string
+		var lastMsg, lastStatus string
 		var lastTime time.Time
+		var lastFromMe bool
 		err = db.QueryRow(
-			`SELECT message, created_at FROM chat_messages
+			`SELECT message, created_at, sender_id = $1,
+			        CASE WHEN is_read THEN 'read' ELSE COALESCE(status, 'sent') END
+			 FROM chat_messages
 			 WHERE (sender_id=$1 AND receiver_id=$2) OR (sender_id=$2 AND receiver_id=$1)
 			 ORDER BY created_at DESC LIMIT 1`,
 			userID, pid,
-		).Scan(&lastMsg, &lastTime)
+		).Scan(&lastMsg, &lastTime, &lastFromMe, &lastStatus)
 		if err != nil {
 			continue
 		}
@@ -3047,6 +3061,8 @@ func GetConversations(userID int) []Conversation {
 			LastMessage: lastMsg,
 			LastTime:    lastTime.UTC().Format(time.RFC3339),
 			UnreadCount: unread,
+			LastFromMe:  lastFromMe,
+			LastStatus:  lastStatus,
 		})
 	}
 

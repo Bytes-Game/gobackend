@@ -65,6 +65,12 @@ var actionLimitTable = map[string]actionLimitConfig{
 	// but a script could absolutely spam. 1 msg/sec sustained, burst
 	// of 10 for a quick exchange.
 	"chat":             {tokensPerSecond: 1.0, burst: 10},
+	// "typing…" — the app sends at most one every few seconds while
+	// somebody types; anything faster is not a person.
+	"typing":           {tokensPerSecond: 1.0, burst: 5},
+	// Starting a call. Redialling a few times is normal; ringing somebody
+	// over and over is not. 3/min sustained.
+	"call":             {tokensPerSecond: 0.05, burst: 5},
 
 	// Reports — moderation tooling abuse-prone (false reports to
 	// silence rivals), keep tight. 10/hr sustained.

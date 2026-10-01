@@ -102,6 +102,10 @@ type Conversation struct {
 	LastMessage string `json:"lastMessage"`
 	LastTime    string `json:"lastTime"`
 	UnreadCount int    `json:"unreadCount"`
+	// Whether the last message is one you sent, and how far it got:
+	// "sent", "delivered" or "read". The chat list shows "Seen" from these.
+	LastFromMe bool   `json:"lastFromMe"`
+	LastStatus string `json:"lastStatus"`
 }
 
 // Post represents a piece of content (video/image short) uploaded by a user.

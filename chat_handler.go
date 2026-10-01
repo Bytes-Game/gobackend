@@ -136,8 +136,9 @@ func GetMessagesHandler(w http.ResponseWriter, r *http.Request) {
 		messages = []ChatMessage{}
 	}
 
-	// Mark messages from otherUser as read
-	go MarkMessagesRead(otherID, userID)
+	// Opening the chat reads what they sent, and tells them so straight
+	// away: their phone turns "Sent" into "Seen" without being reloaded.
+	go markReadAndTell(otherID, userID)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(messages)
@@ -180,7 +181,7 @@ func MarkReadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "senderId must be a valid integer", http.StatusBadRequest)
 		return
 	}
-	MarkMessagesRead(sID, rID)
+	markReadAndTell(sID, rID)
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, `{"ok":true}`)
 }
@@ -362,7 +363,14 @@ func deliverChatMessage(recipientUsername string, msg ChatMessage) {
 		return
 	}
 
-	if !wsDeliver(recipientUsername, data) && IsUserOnline(recipientUsername) {
-		log.Printf("Failed to deliver chat message to %s", recipientUsername)
+	if !wsDeliver(recipientUsername, data) {
+		if IsUserOnline(recipientUsername) {
+			log.Printf("Failed to deliver chat message to %s", recipientUsername)
+		}
+		return
+	}
+	// It reached their phone: the sender's "Sent" becomes "Delivered".
+	if id, err := strconv.Atoi(msg.ID); err == nil {
+		markDeliveredAndTell(id, msg.SenderUsername, msg.ReceiverID)
 	}
 }

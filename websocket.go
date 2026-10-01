@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -123,7 +124,12 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("WebSocket for %s connected", username)
 
 	go SendStoredNotifications(username)
+	// What was sent to them while they were away has reached them now.
+	if uid, err := strconv.Atoi(claims.Subject); err == nil {
+		go deliverWaiting(uid)
+	}
 
+	conn.SetReadLimit(liveEventLimit)
 	conn.SetReadDeadline(time.Now().Add(pongWait))
 	conn.SetPongHandler(func(string) error {
 		conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -144,6 +150,8 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// What the phone sends: typing, and setting up calls (chat_live.go).
+	live := newLiveConn(claims.Subject, username)
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
@@ -152,7 +160,7 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			break
 		}
-		log.Printf("Received message from %s: %s", username, message)
+		live.handle(message)
 	}
 }
 
