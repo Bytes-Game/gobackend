@@ -261,6 +261,10 @@ type Challenge struct {
 	// the home reels can't cast a vote without first fetching the
 	// challenge detail. Surfacing it inline keeps the vote tap one-shot.
 	TopResponseID           string `json:"topResponseId,omitempty"`
+	// Leader is which side is ahead right now: "creator", "answer", or
+	// empty when nobody is. The app opens the battle on that side. Filled
+	// with the answer by markBattleLeaders (battle_leader.go).
+	Leader string `json:"leader,omitempty"`
 	TopResponseVideoUrl     string `json:"topResponseVideoUrl,omitempty"`
 	TopResponseThumbnailUrl string `json:"topResponseThumbnailUrl,omitempty"`
 	TopResponseUsername     string `json:"topResponseUsername,omitempty"`
