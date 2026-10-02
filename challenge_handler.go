@@ -172,6 +172,12 @@ func GetArenaChallengesHandler(w http.ResponseWriter, r *http.Request) {
 	if challenges == nil {
 		challenges = []Challenge{}
 	}
+	// The same numbers and battle details as every other list. Without
+	// these the app showed 0 comments, votes, shares and saves on every
+	// video from here, and battles as plain videos — Search falls back to
+	// this list when the explore list is empty.
+	populateTopResponsesChallenges(challenges)
+	markViewerStateChallenges(signedInUserID(r), challenges)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(challenges)
 }
@@ -190,6 +196,9 @@ func GetFriendsChallengesHandler(w http.ResponseWriter, r *http.Request) {
 	if challenges == nil {
 		challenges = []Challenge{}
 	}
+	// The same numbers and battle details as every other list.
+	populateTopResponsesChallenges(challenges)
+	markViewerStateChallenges(userID, challenges)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(challenges)
 }

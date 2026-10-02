@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 )
@@ -119,9 +120,25 @@ func HandleWatchEvent(w http.ResponseWriter, r *http.Request) {
 		go SendNextReelHint(payload.UserID, payload.ContentID)
 	}
 
+	// The video's views as they now stand, so the app shows the real number
+	// rather than guessing: a view counts once a day per person, and only
+	// after 1.5 seconds on screen, so "one more" was often wrong.
+	reply := map[string]any{"message": "Watch event recorded"}
+	if payload.ContentType == "challenge" {
+		var views int
+		err := db.QueryRow(`SELECT COALESCE(views, 0) FROM challenges WHERE id = $1`,
+			payload.ContentID).Scan(&views)
+		if err == nil {
+			reply["views"] = views
+		} else if err != sql.ErrNoRows {
+			queryFailed("reading the views of challenge "+payload.ContentID+" after a watch",
+				"answering without them, so the app keeps the number it has", err)
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Watch event recorded"})
+	json.NewEncoder(w).Encode(reply)
 }
 
 // HandleReportEvent creates a new report.
