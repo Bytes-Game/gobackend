@@ -103,6 +103,8 @@ func SendMessageHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Send real-time via WebSocket if receiver is online
 	go deliverChatMessage(receiver.Username, msg)
+	// And a push to their phone (never to the notifications page).
+	go pushChatMessage(msg)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(msg)
@@ -261,11 +263,34 @@ func ForwardMessageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get original message text
+	// The original, from a chat the forwarder is in. Anybody could
+	// forward ANY message before, from any chat, by guessing its number.
+	// A deleted message is not forwarded either: its text is just "This
+	// message was deleted".
 	var originalText string
-	err := db.QueryRow(`SELECT message FROM chat_messages WHERE id=$1`, msgID).Scan(&originalText)
+	err := db.QueryRow(`
+		SELECT message FROM chat_messages
+		 WHERE id = $1 AND (sender_id = $2 OR receiver_id = $2)
+		   AND is_deleted IS NOT TRUE`, msgID, senderID).Scan(&originalText)
 	if err != nil {
+		queryFailed(fmt.Sprintf("finding message %d for user %d to forward", msgID, senderID),
+			"answering not found", err)
 		http.Error(w, "Message not found", http.StatusNotFound)
+		return
+	}
+	// A block means no messages, forwarded ones included.
+	var blocked bool
+	err = db.QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM user_blocks
+		 WHERE (blocker_id = $1 AND blocked_id = $2)
+		    OR (blocker_id = $2 AND blocked_id = $1))`,
+		senderID, receiverID).Scan(&blocked)
+	if queryFailed(fmt.Sprintf("checking blocks between users %d and %d", senderID, receiverID),
+		"forwarding anyway, as sending does", err) {
+		blocked = false
+	}
+	if blocked {
+		http.Error(w, "cannot message this user", http.StatusForbidden)
 		return
 	}
 
@@ -291,6 +316,7 @@ func ForwardMessageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go deliverChatMessage(receiver.Username, msg)
+	go pushChatMessage(msg)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(msg)

@@ -38,6 +38,7 @@ func liveServer(t *testing.T) *httptest.Server {
 	api.HandleFunc("/chat/send", authed(SendMessageHandler)).Methods("POST")
 	api.HandleFunc("/chat/messages/{userId}/{otherUserId}", authed(GetMessagesHandler)).Methods("GET")
 	api.HandleFunc("/chat/read", authed(MarkReadHandler)).Methods("POST")
+	api.HandleFunc("/chat/forward", authed(ForwardMessageHandler)).Methods("POST")
 	api.HandleFunc("/calls/ice", authed(CallIceServersHandler)).Methods("GET")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
 	srv := httptest.NewServer(r)
@@ -550,6 +551,7 @@ func TestLive_MainWiresTheRoutes(t *testing.T) {
 		`"/calls/ice", authed(CallIceServersHandler)`,
 		`"/ws/{username}", WebsocketHandler`,
 		`"/chat/read", authed(MarkReadHandler)`,
+		`"/chat/forward", authed(ForwardMessageHandler)`,
 	} {
 		if !strings.Contains(code, want) {
 			t.Errorf("main.go does not wire %s", want)

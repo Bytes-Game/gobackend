@@ -197,14 +197,16 @@ func activeTokensForUser(userID string) []DeviceTokenRow {
 		ORDER BY last_seen_at DESC
 		LIMIT 8
 	`, userID)
-	if err != nil {
+	if queryFailed("finding the phones of user "+userID,
+		"nothing is pushed to them this time", err) {
 		return nil
 	}
 	defer rows.Close()
 	out := make([]DeviceTokenRow, 0, 4)
+	bad := 0
 	for rows.Next() {
 		var r DeviceTokenRow
-		if err := rows.Scan(&r.Token, &r.Platform); err == nil {
+		if !scanFailed("a phone of user "+userID, rows.Scan(&r.Token, &r.Platform), &bad) {
 			out = append(out, r)
 		}
 	}
@@ -217,6 +219,15 @@ func activeTokensForUser(userID string) []DeviceTokenRow {
 
 // OutboxRow is one queued (or sent) push notification.
 type OutboxRow struct {
+	// Set only on pushes sent straight away (pushNow in chat_push.go) and
+	// never stored. Tag groups the pushes about one thing, so a newer one
+	// replaces the older in the phone's list: one line per chat, not one
+	// per message. Channel is the Android notification channel. Data rides
+	// along for the app to act on when the push is tapped.
+	Tag     string
+	Channel string
+	Data    map[string]string
+
 	ID           int64
 	UserID       string
 	TriggerKind  TriggerKind

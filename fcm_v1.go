@@ -142,6 +142,54 @@ func (ts *fcmTokenSource) accessToken() (string, error) {
 // can't wedge the 30s dispatcher tick indefinitely.
 var fcmHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
+// fcmPayload is the message one phone is sent.
+//
+// A Tag makes a newer push replace the older one about the same thing, on
+// both kinds of phone: one line per chat in the phone's list, showing the
+// latest message, instead of a line per message. Channel picks the Android
+// notification channel ("messages" pops up on screen and makes a sound).
+func fcmPayload(notif OutboxRow, token string) map[string]interface{} {
+	// data values MUST be strings per the v1 schema.
+	data := map[string]string{
+		"deeplink": notif.Deeplink,
+		"outboxId": fmt.Sprintf("%d", notif.ID),
+		"trigger":  string(notif.TriggerKind),
+	}
+	for k, v := range notif.Data {
+		data[k] = v
+	}
+	android := map[string]interface{}{"priority": "HIGH"}
+	note := map[string]interface{}{}
+	if notif.Channel != "" {
+		note["channel_id"] = notif.Channel
+	}
+	if notif.Tag != "" {
+		note["tag"] = notif.Tag
+		android["collapse_key"] = notif.Tag
+	}
+	if len(note) > 0 {
+		android["notification"] = note
+	}
+	message := map[string]interface{}{
+		"token": token,
+		"notification": map[string]string{
+			"title": notif.Title,
+			"body":  notif.Body,
+		},
+		"data":    data,
+		"android": android,
+	}
+	if notif.Tag != "" {
+		message["apns"] = map[string]interface{}{
+			"headers": map[string]string{"apns-collapse-id": notif.Tag},
+			"payload": map[string]interface{}{
+				"aps": map[string]interface{}{"thread-id": notif.Tag, "sound": "default"},
+			},
+		}
+	}
+	return map[string]interface{}{"message": message}
+}
+
 // sendFCMMessage POSTs one message to the v1 API. Returns (ok, dead,
 // reason): dead=true means the token is permanently invalid and should
 // be deactivated (UNREGISTERED / 404).
@@ -151,25 +199,7 @@ func sendFCMMessage(ts *fcmTokenSource, projectID string, notif OutboxRow, token
 		return false, false, "fcm_auth_failed"
 	}
 
-	// data values MUST be strings per the v1 schema.
-	payload := map[string]interface{}{
-		"message": map[string]interface{}{
-			"token": token,
-			"notification": map[string]string{
-				"title": notif.Title,
-				"body":  notif.Body,
-			},
-			"data": map[string]string{
-				"deeplink": notif.Deeplink,
-				"outboxId": fmt.Sprintf("%d", notif.ID),
-				"trigger":  string(notif.TriggerKind),
-			},
-			"android": map[string]interface{}{
-				"priority": "HIGH",
-			},
-		},
-	}
-	body, err := json.Marshal(payload)
+	body, err := json.Marshal(fcmPayload(notif, token))
 	if err != nil {
 		return false, false, "fcm_marshal_failed"
 	}

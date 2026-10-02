@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"time"
+	"unicode/utf8"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -289,9 +290,16 @@ func scanInactiveWinbackTrigger() {
 
 // truncateText keeps push body lengths under platform limits (FCM ~240,
 // APNs ~256). 120 is comfortably under both with room for emojis.
+//
+// Cut on a character boundary: a chat message is full of emoji, and cutting
+// one in half sends the phone broken text.
 func truncateText(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max-1] + "…"
+	cut := max - 1
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
