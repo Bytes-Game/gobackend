@@ -277,6 +277,10 @@ func OnlineStatusHandler(w http.ResponseWriter, r *http.Request) {
 	if !online {
 		lastSeen = GetUserLastSeen(username)
 	}
+	// They chose not to show when they are active: nobody is told.
+	if activityHidden(username) {
+		online, lastSeen = false, ""
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{

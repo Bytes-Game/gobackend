@@ -79,6 +79,9 @@ var actionLimitTable = map[string]actionLimitConfig{
 	// Profile mutations — typical user does these once or twice.
 	// Sustained rate is throwaway; burst is what matters.
 	"profile_edit":     {tokensPerSecond: 0.0167, burst: 3},       // 60/hr
+	// Settings switches alone (privacy, notifications, appearance): a few
+	// in a row is normal. 30/min sustained, 20 at once.
+	"settings":         {tokensPerSecond: 0.5, burst: 20},
 
 	// Auth — login / signup attempts. Anything more than a few per
 	// minute from one account is a credential-stuffing attempt.

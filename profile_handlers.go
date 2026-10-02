@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -58,8 +59,17 @@ func UpdateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 	// average), burst of 3 covers a quick typo-fix sequence. Anything
 	// faster than that is either UI-glitch retries or someone
 	// brute-forcing username availability via the same endpoint.
-	if !allowAction(payload.UserID, "profile_edit") {
-		writeRateLimited(w, "profile_edit")
+	//
+	// A change to settings alone — flipping a switch on the Privacy,
+	// Notifications or Appearance page — has its own, looser limit: three
+	// switches in a minute is ordinary there, and was refused here.
+	action := "profile_edit"
+	if payload.FullName == nil && payload.Bio == nil && payload.Visibility == nil &&
+		payload.Settings != nil {
+		action = "settings"
+	}
+	if !allowAction(payload.UserID, action) {
+		writeRateLimited(w, action)
 		return
 	}
 
@@ -442,6 +452,34 @@ func GetWatchHistoryHandler(w http.ResponseWriter, r *http.Request) {
 	next := ""
 	if hasMore && !lastAt.IsZero() {
 		next = strconv.FormatInt(lastAt.Unix(), 10)
+	}
+
+	// The whole video for each, the same record every feed and the Liked
+	// tab send — counts, encoded versions, the answer on a battle, and
+	// what this person has done to it — so history is a grid of videos
+	// that plays like every other, one after another, instead of a list
+	// of titles that opened a bare player on the raw upload.
+	ids := make([]int, 0, len(items))
+	for _, it := range items {
+		if c, ok := it["challenge"].(map[string]any); ok {
+			if id, err := strconv.Atoi(fmt.Sprint(c["id"])); err == nil {
+				ids = append(ids, id)
+			}
+		}
+	}
+	full := challengesByIDs(ids)
+	populateTopResponsesChallenges(full)
+	markViewerStateChallenges(userID, full)
+	byID := make(map[string]Challenge, len(full))
+	for _, c := range full {
+		byID[c.ID] = c
+	}
+	for _, it := range items {
+		if c, ok := it["challenge"].(map[string]any); ok {
+			if whole, ok := byID[fmt.Sprint(c["id"])]; ok {
+				it["challenge"] = whole
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":      items,

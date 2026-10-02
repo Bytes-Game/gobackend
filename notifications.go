@@ -39,6 +39,8 @@ const (
 // NotificationPrefs is the user's per-trigger opt-out + rate-limit settings.
 type NotificationPrefs struct {
 	UserID           string `json:"userId"`
+	// Messages: a new message or a missed call buzzes the phone.
+	Messages         bool   `json:"messages"`
 	FriendResponse   bool   `json:"friendResponse"`
 	EndingSoon       bool   `json:"endingSoon"`
 	YouWillLove      bool   `json:"youWillLove"`
@@ -54,6 +56,7 @@ type NotificationPrefs struct {
 func defaultNotificationPrefs(userID string) NotificationPrefs {
 	return NotificationPrefs{
 		UserID:           userID,
+		Messages:         true,
 		FriendResponse:   true,
 		EndingSoon:       true,
 		YouWillLove:      true,
@@ -67,6 +70,8 @@ func defaultNotificationPrefs(userID string) NotificationPrefs {
 // allowedByPrefs returns true if this trigger kind is enabled for the user.
 func (p NotificationPrefs) allowedByPrefs(kind TriggerKind) bool {
 	switch kind {
+	case TriggerChatMessage, TriggerMissedCall:
+		return p.Messages
 	case TriggerFriendResponse, TriggerFriendChallenge:
 		return p.FriendResponse
 	case TriggerEndingSoon, TriggerBattleWon, TriggerOffTopic:
@@ -106,12 +111,16 @@ func loadNotificationPrefs(userID string) NotificationPrefs {
 	var p NotificationPrefs
 	p.UserID = userID
 	err := db.QueryRow(`
-		SELECT friend_response, ending_soon, you_will_love, inactive_winback,
-		       quiet_hours_start, quiet_hours_end, max_per_day
+		SELECT COALESCE(messages, TRUE), friend_response, ending_soon, you_will_love,
+		       inactive_winback, quiet_hours_start, quiet_hours_end, max_per_day
 		FROM notification_prefs WHERE user_id = $1
-	`, userID).Scan(&p.FriendResponse, &p.EndingSoon, &p.YouWillLove, &p.InactiveWinback,
-		&p.QuietHoursStart, &p.QuietHoursEnd, &p.MaxPerDay)
-	if err != nil {
+	`, userID).Scan(&p.Messages, &p.FriendResponse, &p.EndingSoon, &p.YouWillLove,
+		&p.InactiveWinback, &p.QuietHoursStart, &p.QuietHoursEnd, &p.MaxPerDay)
+	if errors.Is(err, sql.ErrNoRows) {
+		return defaultNotificationPrefs(userID)
+	}
+	if queryFailed("reading notification settings for user "+userID,
+		"using the defaults", err) {
 		return defaultNotificationPrefs(userID)
 	}
 	return p
@@ -125,9 +134,10 @@ func saveNotificationPrefs(p NotificationPrefs) error {
 	_, err := db.Exec(`
 		INSERT INTO notification_prefs
 			(user_id, friend_response, ending_soon, you_will_love, inactive_winback,
-			 quiet_hours_start, quiet_hours_end, max_per_day, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+			 quiet_hours_start, quiet_hours_end, max_per_day, messages, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
 		ON CONFLICT (user_id) DO UPDATE SET
+			messages         = EXCLUDED.messages,
 			friend_response  = EXCLUDED.friend_response,
 			ending_soon      = EXCLUDED.ending_soon,
 			you_will_love    = EXCLUDED.you_will_love,
@@ -137,7 +147,7 @@ func saveNotificationPrefs(p NotificationPrefs) error {
 			max_per_day      = EXCLUDED.max_per_day,
 			updated_at       = NOW()
 	`, p.UserID, p.FriendResponse, p.EndingSoon, p.YouWillLove, p.InactiveWinback,
-		p.QuietHoursStart, p.QuietHoursEnd, p.MaxPerDay)
+		p.QuietHoursStart, p.QuietHoursEnd, p.MaxPerDay, p.Messages)
 	return err
 }
 
@@ -146,8 +156,11 @@ func saveNotificationPrefs(p NotificationPrefs) error {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // registerDeviceToken upserts a token. Same token re-registered just bumps
-// last_seen_at (cheap idempotency for app-launch flows).
-func registerDeviceToken(userID, token, platform string) error {
+// last_seen_at (cheap idempotency for app-launch flows). drawsOwn says the
+// app on this phone draws message notifications itself, with Reply; it is
+// set again on every registration, so an app updated to (or back from) a
+// version that draws its own is believed the next time it starts.
+func registerDeviceToken(userID, token, platform string, drawsOwn bool) error {
 	if db == nil {
 		return errors.New("db missing")
 	}
@@ -159,14 +172,15 @@ func registerDeviceToken(userID, token, platform string) error {
 		return fmt.Errorf("unsupported platform %q", platform)
 	}
 	_, err := db.Exec(`
-		INSERT INTO device_tokens (token, user_id, platform, registered_at, last_seen_at, active)
-		VALUES ($1, $2, $3, NOW(), NOW(), TRUE)
+		INSERT INTO device_tokens (token, user_id, platform, registered_at, last_seen_at, active, draws_own)
+		VALUES ($1, $2, $3, NOW(), NOW(), TRUE, $4)
 		ON CONFLICT (token) DO UPDATE SET
 			user_id      = EXCLUDED.user_id,
 			platform     = EXCLUDED.platform,
 			last_seen_at = NOW(),
-			active       = TRUE
-	`, token, userID, platform)
+			active       = TRUE,
+			draws_own    = EXCLUDED.draws_own
+	`, token, userID, platform, drawsOwn)
 	return err
 }
 
@@ -185,6 +199,17 @@ func deactivateDeviceToken(token string) {
 // outbox row to multiple devices.
 type DeviceTokenRow struct {
 	Token, Platform string
+	// DrawsOwn: the app on this phone draws message notifications itself.
+	DrawsOwn bool
+}
+
+// forPhone is the push as one phone gets it: drawn by the app only when
+// the app on that phone draws its own.
+func (n OutboxRow) forPhone(t DeviceTokenRow) OutboxRow {
+	if !t.DrawsOwn {
+		n.AppDraws = false
+	}
+	return n
 }
 
 func activeTokensForUser(userID string) []DeviceTokenRow {
@@ -192,7 +217,7 @@ func activeTokensForUser(userID string) []DeviceTokenRow {
 		return nil
 	}
 	rows, err := db.Query(`
-		SELECT token, platform FROM device_tokens
+		SELECT token, platform, draws_own FROM device_tokens
 		WHERE user_id = $1 AND active = TRUE
 		ORDER BY last_seen_at DESC
 		LIMIT 8
@@ -206,7 +231,7 @@ func activeTokensForUser(userID string) []DeviceTokenRow {
 	bad := 0
 	for rows.Next() {
 		var r DeviceTokenRow
-		if !scanFailed("a phone of user "+userID, rows.Scan(&r.Token, &r.Platform), &bad) {
+		if !scanFailed("a phone of user "+userID, rows.Scan(&r.Token, &r.Platform, &r.DrawsOwn), &bad) {
 			out = append(out, r)
 		}
 	}
@@ -227,6 +252,13 @@ type OutboxRow struct {
 	Tag     string
 	Channel string
 	Data    map[string]string
+	// AppDraws: on Android the app draws this one itself — a conversation
+	// with the sender's messages, and Reply and Mark as read buttons that
+	// work without opening the app — so Android is sent the data only.
+	// Only to phones whose app said it can (DeviceTokenRow.DrawsOwn): an
+	// older app would be sent data it never shows, and see nothing at all.
+	// iPhones still get an ordinary alert.
+	AppDraws bool
 
 	ID           int64
 	UserID       string

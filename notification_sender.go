@@ -114,7 +114,7 @@ func (s *fcmSender) Send(notif OutboxRow, tokens []DeviceTokenRow) []SendResult 
 			})
 			continue
 		}
-		ok, dead, reason := sendFCMMessage(s.tokens, s.projectID, notif, t.Token)
+		ok, dead, reason := sendFCMMessage(s.tokens, s.projectID, notif.forPhone(t), t.Token)
 		out = append(out, SendResult{Token: t.Token, OK: ok, Dead: dead, Reason: reason})
 	}
 	return out

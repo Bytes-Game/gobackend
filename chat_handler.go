@@ -69,6 +69,11 @@ func SendMessageHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot message this user", http.StatusForbidden)
 		return
 	}
+	// They take messages only from people they follow.
+	if messagesRefused(senderID, receiverID) {
+		http.Error(w, "cannot message this user", http.StatusForbidden)
+		return
+	}
 
 	var replyToID *int
 	if payload.ReplyToID != "" {
@@ -322,7 +327,7 @@ func ForwardMessageHandler(w http.ResponseWriter, r *http.Request) {
 		"forwarding anyway, as sending does", err) {
 		blocked = false
 	}
-	if blocked {
+	if blocked || messagesRefused(senderID, receiverID) {
 		http.Error(w, "cannot message this user", http.StatusForbidden)
 		return
 	}

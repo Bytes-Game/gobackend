@@ -68,11 +68,15 @@ func pushNow(userID string, p OutboxRow) int {
 	return sent
 }
 
-// pushChatMessage tells the receiver's phone about a new message.
+// pushChatMessage tells the receiver's phone about a new message — unless
+// they turned "Messages and calls" off in their notification settings.
 func pushChatMessage(msg ChatMessage) {
 	sid, err1 := strconv.Atoi(msg.SenderID)
 	rid, err2 := strconv.Atoi(msg.ReceiverID)
 	if err1 != nil || err2 != nil {
+		return
+	}
+	if !loadNotificationPrefs(msg.ReceiverID).allowedByPrefs(TriggerChatMessage) {
 		return
 	}
 	title := msg.SenderUsername
@@ -91,6 +95,7 @@ func pushChatMessage(msg ChatMessage) {
 		Body:        truncateText(msg.Message, pushBodyLimit),
 		Tag:         "chat_" + msg.SenderID,
 		Channel:     pushChannelMessages,
+		AppDraws:    true,
 		Data: map[string]string{
 			"type":           "chat",
 			"senderId":       msg.SenderID,
@@ -103,6 +108,9 @@ func pushChatMessage(msg ChatMessage) {
 // pushMissedCall tells somebody's phone they missed a call from
 // [callerID]. A tap opens the chat, where the call buttons are.
 func pushMissedCall(toID, callerID, callerName string, video bool) {
+	if !loadNotificationPrefs(toID).allowedByPrefs(TriggerMissedCall) {
+		return
+	}
 	title := "Missed call"
 	if video {
 		title = "Missed video call"
@@ -113,6 +121,7 @@ func pushMissedCall(toID, callerID, callerName string, video bool) {
 		Body:        callerName + " tried to call you",
 		Tag:         "call_" + callerID,
 		Channel:     pushChannelMessages,
+		AppDraws:    true,
 		Data: map[string]string{
 			"type":           "missed_call",
 			"senderId":       callerID,

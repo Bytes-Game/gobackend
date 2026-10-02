@@ -41,6 +41,7 @@ func liveServer(t *testing.T) *httptest.Server {
 	api.HandleFunc("/chat/forward", authed(ForwardMessageHandler)).Methods("POST")
 	api.HandleFunc("/chat/clear", authed(ClearChatHandler)).Methods("POST")
 	api.HandleFunc("/calls/ice", authed(CallIceServersHandler)).Methods("GET")
+	api.HandleFunc("/notifications/register", authed(HandleRegisterPushToken)).Methods("POST")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
@@ -195,6 +196,12 @@ func liveSetup(t *testing.T) *httptest.Server {
 	resetRedis(t)
 	freshLimits(t)
 	liveUsers(t)
+	// Notification settings are not tied to users, so emptying users does
+	// not empty them: start every live test on the defaults.
+	if _, err := db.Exec(`DELETE FROM notification_prefs WHERE user_id IN ($1, $2, $3)`,
+		strconv.Itoa(liveLeo), strconv.Itoa(liveMaya), strconv.Itoa(liveSam)); err != nil {
+		t.Fatal(err)
+	}
 	return liveServer(t)
 }
 
