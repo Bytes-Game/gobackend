@@ -156,8 +156,11 @@ func saveNotificationPrefs(p NotificationPrefs) error {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // registerDeviceToken upserts a token. Same token re-registered just bumps
-// last_seen_at (cheap idempotency for app-launch flows).
-func registerDeviceToken(userID, token, platform string) error {
+// last_seen_at (cheap idempotency for app-launch flows). drawsOwn says the
+// app on this phone draws message notifications itself, with Reply; it is
+// set again on every registration, so an app updated to (or back from) a
+// version that draws its own is believed the next time it starts.
+func registerDeviceToken(userID, token, platform string, drawsOwn bool) error {
 	if db == nil {
 		return errors.New("db missing")
 	}
@@ -169,14 +172,15 @@ func registerDeviceToken(userID, token, platform string) error {
 		return fmt.Errorf("unsupported platform %q", platform)
 	}
 	_, err := db.Exec(`
-		INSERT INTO device_tokens (token, user_id, platform, registered_at, last_seen_at, active)
-		VALUES ($1, $2, $3, NOW(), NOW(), TRUE)
+		INSERT INTO device_tokens (token, user_id, platform, registered_at, last_seen_at, active, draws_own)
+		VALUES ($1, $2, $3, NOW(), NOW(), TRUE, $4)
 		ON CONFLICT (token) DO UPDATE SET
 			user_id      = EXCLUDED.user_id,
 			platform     = EXCLUDED.platform,
 			last_seen_at = NOW(),
-			active       = TRUE
-	`, token, userID, platform)
+			active       = TRUE,
+			draws_own    = EXCLUDED.draws_own
+	`, token, userID, platform, drawsOwn)
 	return err
 }
 
@@ -195,6 +199,17 @@ func deactivateDeviceToken(token string) {
 // outbox row to multiple devices.
 type DeviceTokenRow struct {
 	Token, Platform string
+	// DrawsOwn: the app on this phone draws message notifications itself.
+	DrawsOwn bool
+}
+
+// forPhone is the push as one phone gets it: drawn by the app only when
+// the app on that phone draws its own.
+func (n OutboxRow) forPhone(t DeviceTokenRow) OutboxRow {
+	if !t.DrawsOwn {
+		n.AppDraws = false
+	}
+	return n
 }
 
 func activeTokensForUser(userID string) []DeviceTokenRow {
@@ -202,7 +217,7 @@ func activeTokensForUser(userID string) []DeviceTokenRow {
 		return nil
 	}
 	rows, err := db.Query(`
-		SELECT token, platform FROM device_tokens
+		SELECT token, platform, draws_own FROM device_tokens
 		WHERE user_id = $1 AND active = TRUE
 		ORDER BY last_seen_at DESC
 		LIMIT 8
@@ -216,7 +231,7 @@ func activeTokensForUser(userID string) []DeviceTokenRow {
 	bad := 0
 	for rows.Next() {
 		var r DeviceTokenRow
-		if !scanFailed("a phone of user "+userID, rows.Scan(&r.Token, &r.Platform), &bad) {
+		if !scanFailed("a phone of user "+userID, rows.Scan(&r.Token, &r.Platform, &r.DrawsOwn), &bad) {
 			out = append(out, r)
 		}
 	}
@@ -237,6 +252,13 @@ type OutboxRow struct {
 	Tag     string
 	Channel string
 	Data    map[string]string
+	// AppDraws: on Android the app draws this one itself — a conversation
+	// with the sender's messages, and Reply and Mark as read buttons that
+	// work without opening the app — so Android is sent the data only.
+	// Only to phones whose app said it can (DeviceTokenRow.DrawsOwn): an
+	// older app would be sent data it never shows, and see nothing at all.
+	// iPhones still get an ordinary alert.
+	AppDraws bool
 
 	ID           int64
 	UserID       string

@@ -41,6 +41,7 @@ func liveServer(t *testing.T) *httptest.Server {
 	api.HandleFunc("/chat/forward", authed(ForwardMessageHandler)).Methods("POST")
 	api.HandleFunc("/chat/clear", authed(ClearChatHandler)).Methods("POST")
 	api.HandleFunc("/calls/ice", authed(CallIceServersHandler)).Methods("GET")
+	api.HandleFunc("/notifications/register", authed(HandleRegisterPushToken)).Methods("POST")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)

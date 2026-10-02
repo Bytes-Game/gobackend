@@ -39,6 +39,8 @@ func HandleRegisterPushToken(w http.ResponseWriter, r *http.Request) {
 		UserID   string `json:"userId"`
 		Token    string `json:"token"`
 		Platform string `json:"platform"`
+		// The app draws message notifications itself, with Reply.
+		DrawsOwn bool `json:"drawsOwn"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
@@ -46,7 +48,7 @@ func HandleRegisterPushToken(w http.ResponseWriter, r *http.Request) {
 	}
 	// Register the token against the authenticated user.
 	body.UserID = authUserID(r)
-	if err := registerDeviceToken(body.UserID, body.Token, body.Platform); err != nil {
+	if err := registerDeviceToken(body.UserID, body.Token, body.Platform, body.DrawsOwn); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

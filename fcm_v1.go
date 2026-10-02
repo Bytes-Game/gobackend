@@ -158,6 +158,9 @@ func fcmPayload(notif OutboxRow, token string) map[string]interface{} {
 	for k, v := range notif.Data {
 		data[k] = v
 	}
+	if notif.AppDraws {
+		return appDrawnPayload(notif, token, data)
+	}
 	android := map[string]interface{}{"priority": "HIGH"}
 	note := map[string]interface{}{}
 	if notif.Channel != "" {
@@ -188,6 +191,39 @@ func fcmPayload(notif OutboxRow, token string) map[string]interface{} {
 		}
 	}
 	return map[string]interface{}{"message": message}
+}
+
+// appDrawnPayload is a push the app draws itself on Android (see
+// OutboxRow.AppDraws): no "notification" for Android to show on its own —
+// everything the app needs to draw it rides in the data, at high priority
+// so it arrives at once even with the app closed. An iPhone shows the
+// ordinary alert, grouped by the same tag.
+func appDrawnPayload(notif OutboxRow, token string, data map[string]string) map[string]interface{} {
+	data["title"] = notif.Title
+	data["body"] = notif.Body
+	data["tag"] = notif.Tag
+	android := map[string]interface{}{"priority": "HIGH"}
+	if notif.Tag != "" {
+		android["collapse_key"] = notif.Tag
+	}
+	aps := map[string]interface{}{
+		"alert": map[string]string{"title": notif.Title, "body": notif.Body},
+		"sound": "default",
+	}
+	headers := map[string]string{"apns-priority": "10"}
+	if notif.Tag != "" {
+		aps["thread-id"] = notif.Tag
+		headers["apns-collapse-id"] = notif.Tag
+	}
+	return map[string]interface{}{"message": map[string]interface{}{
+		"token":   token,
+		"data":    data,
+		"android": android,
+		"apns": map[string]interface{}{
+			"headers": headers,
+			"payload": map[string]interface{}{"aps": aps},
+		},
+	}}
 }
 
 // sendFCMMessage POSTs one message to the v1 API. Returns (ok, dead,

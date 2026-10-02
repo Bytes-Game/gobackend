@@ -8,7 +8,11 @@ package main
 // (Firebase), phone by phone.
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -84,7 +88,7 @@ func withPusher(t *testing.T) *recordingPusher {
 
 func phone(t *testing.T, userID int, token string) {
 	t.Helper()
-	if err := registerDeviceToken(strconv.Itoa(userID), token, "fcm"); err != nil {
+	if err := registerDeviceToken(strconv.Itoa(userID), token, "fcm", false); err != nil {
 		t.Fatalf("register phone: %v", err)
 	}
 }
@@ -227,6 +231,136 @@ func TestPush_AMissedCallBuzzesTheirPhone(t *testing.T) {
 	if got.row.Title != "Missed video call" || got.row.Body != "leo tried to call you" ||
 		got.row.Data["type"] != "missed_call" || got.row.Data["senderId"] != strconv.Itoa(liveLeo) {
 		t.Fatalf("missed call pushed %+v", got.row)
+	}
+}
+
+func TestPush_AMessageIsDrawnByTheAppWithReply(t *testing.T) {
+	m := fcmPayload(OutboxRow{
+		Title: "leo", Body: "hi", Tag: "chat_9", Channel: "messages", AppDraws: true,
+		Data: map[string]string{"type": "chat", "senderId": "9"},
+	}, "tok")["message"].(map[string]interface{})
+	// Nothing for Android to show by itself: the app draws it, with Reply.
+	if _, ok := m["notification"]; ok {
+		t.Fatalf("a message push carries a notification Android would draw: %v", m)
+	}
+	android := m["android"].(map[string]interface{})
+	if _, ok := android["notification"]; ok || android["priority"] != "HIGH" ||
+		android["collapse_key"] != "chat_9" {
+		t.Fatalf("android part %v", android)
+	}
+	data := m["data"].(map[string]string)
+	if data["title"] != "leo" || data["body"] != "hi" || data["tag"] != "chat_9" ||
+		data["type"] != "chat" || data["senderId"] != "9" {
+		t.Fatalf("data %v has not what the app needs to draw it", data)
+	}
+	// An iPhone still gets an ordinary alert.
+	aps := m["apns"].(map[string]interface{})["payload"].(map[string]interface{})["aps"].(map[string]interface{})
+	alert := aps["alert"].(map[string]string)
+	if alert["title"] != "leo" || alert["body"] != "hi" || aps["thread-id"] != "chat_9" {
+		t.Fatalf("iPhone part %v", aps)
+	}
+}
+
+func TestPush_MessagesAndCallsAreAppDrawn(t *testing.T) {
+	srv := liveSetup(t)
+	p := withPusher(t)
+	// The way the app registers: through the server, saying it draws its own.
+	authedDo(t, srv, liveMaya, "POST", "/api/v1/notifications/register",
+		`{"token":"maya-phone","platform":"fcm","drawsOwn":true}`)
+	authedDo(t, srv, liveLeo, "POST", "/api/v1/chat/send",
+		`{"receiverId":"`+strconv.Itoa(liveMaya)+`","message":"hey"}`)
+	got := p.waitFor(t, 1)
+	if !got.row.AppDraws {
+		t.Fatal("a message push is not drawn by the app, so it has no Reply")
+	}
+	if len(got.tokens) != 1 || !got.tokens[0].DrawsOwn {
+		t.Fatalf("maya's phone %v lost that its app draws its own", got.tokens)
+	}
+	pushMissedCall(strconv.Itoa(liveMaya), strconv.Itoa(liveLeo), "leo", false)
+	if got := p.waitFor(t, 2); !got.row.AppDraws {
+		t.Fatal("a missed call push is not drawn by the app")
+	}
+}
+
+// An app from before Reply only shows what Android draws for it. Sent the
+// data-only kind, it would show nothing at all — so a phone gets that kind
+// only while the app on it says it draws its own, and says so again at
+// every start.
+func TestPush_OnlyAnAppThatDrawsItsOwnIsSentTheReplyKind(t *testing.T) {
+	srv := liveSetup(t)
+	withPusher(t)
+	drawsOwn := func() bool {
+		t.Helper()
+		tokens := activeTokensForUser(strconv.Itoa(liveMaya))
+		if len(tokens) != 1 || tokens[0].Token != "maya-phone" {
+			t.Fatalf("maya's phones %v", tokens)
+		}
+		return tokens[0].DrawsOwn
+	}
+	register := func(body string) {
+		t.Helper()
+		res := authedDo(t, srv, liveMaya, "POST", "/api/v1/notifications/register", body)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("register answered %d", res.StatusCode)
+		}
+	}
+	register(`{"token":"maya-phone","platform":"fcm"}`)
+	if drawsOwn() {
+		t.Fatal("an app that never said it draws its own is believed to")
+	}
+	register(`{"token":"maya-phone","platform":"fcm","drawsOwn":true}`)
+	if !drawsOwn() {
+		t.Fatal("the app said it draws its own and the server did not keep it")
+	}
+	register(`{"token":"maya-phone","platform":"fcm"}`)
+	if drawsOwn() {
+		t.Fatal("the app went back to an older version and is still sent the Reply kind")
+	}
+}
+
+type fcmRoundTrip func(*http.Request) (*http.Response, error)
+
+func (f fcmRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Through the real Firebase sender, with only Google's end faked: each
+// phone gets the kind its app can show.
+func TestPush_EachPhoneGetsTheKindItsAppCanShow(t *testing.T) {
+	sent := map[string]map[string]interface{}{}
+	before := fcmHTTPClient
+	fcmHTTPClient = &http.Client{Transport: fcmRoundTrip(func(r *http.Request) (*http.Response, error) {
+		var body struct {
+			Message map[string]interface{} `json:"message"`
+		}
+		b, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(b, &body); err != nil {
+			t.Errorf("sent %s: %v", b, err)
+		}
+		sent[body.Message["token"].(string)] = body.Message
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+	})}
+	t.Cleanup(func() { fcmHTTPClient = before })
+	s := &fcmSender{
+		tokens:    &fcmTokenSource{token: "access", expires: time.Now().Add(time.Hour)},
+		projectID: "p",
+	}
+	results := s.Send(OutboxRow{
+		Title: "leo", Body: "hi", Tag: "chat_9", Channel: "messages", AppDraws: true,
+		Data: map[string]string{"type": "chat", "senderId": "9"},
+	}, []DeviceTokenRow{
+		{Token: "old-app", Platform: "fcm"},
+		{Token: "new-app", Platform: "fcm", DrawsOwn: true},
+	})
+	if len(results) != 2 || !results[0].OK || !results[1].OK {
+		t.Fatalf("results %+v", results)
+	}
+	if _, ok := sent["old-app"]["notification"]; !ok {
+		t.Fatalf("the older app was sent %v, which it cannot show", sent["old-app"])
+	}
+	if _, ok := sent["new-app"]["notification"]; ok {
+		t.Fatalf("the new app was sent %v: Android draws it, with no Reply", sent["new-app"])
+	}
+	if d, _ := sent["new-app"]["data"].(map[string]interface{}); d["body"] != "hi" {
+		t.Fatalf("the new app was not given the message to draw: %v", sent["new-app"])
 	}
 }
 

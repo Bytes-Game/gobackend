@@ -543,6 +543,10 @@ func runMigrations() error {
 	);
 	-- Whether a new message or missed call buzzes the phone.
 	ALTER TABLE notification_prefs ADD COLUMN IF NOT EXISTS messages BOOLEAN DEFAULT TRUE;
+	-- Whether the app on this phone draws message notifications itself
+	-- (with Reply). Off for every phone registered by an older app, which
+	-- only shows what Android draws for it.
+	ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS draws_own BOOLEAN DEFAULT FALSE;
 
 	-- The in-app notifications list: what the bell shows. Push messages
 	-- go through notification_outbox; these are the rows the app lists,

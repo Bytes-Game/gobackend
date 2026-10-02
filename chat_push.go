@@ -95,6 +95,7 @@ func pushChatMessage(msg ChatMessage) {
 		Body:        truncateText(msg.Message, pushBodyLimit),
 		Tag:         "chat_" + msg.SenderID,
 		Channel:     pushChannelMessages,
+		AppDraws:    true,
 		Data: map[string]string{
 			"type":           "chat",
 			"senderId":       msg.SenderID,
@@ -120,6 +121,7 @@ func pushMissedCall(toID, callerID, callerName string, video bool) {
 		Body:        callerName + " tried to call you",
 		Tag:         "call_" + callerID,
 		Channel:     pushChannelMessages,
+		AppDraws:    true,
 		Data: map[string]string{
 			"type":           "missed_call",
 			"senderId":       callerID,
