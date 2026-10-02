@@ -98,8 +98,11 @@ type liveConn struct {
 type livePeer struct {
 	username string
 	blocked  bool
-	exists   bool
-	at       time.Time
+	// refuses: they take calls and messages only from people they follow,
+	// and do not follow this person. See privacy_settings.go.
+	refuses bool
+	exists  bool
+	at      time.Time
 }
 
 type offeredCall struct {
@@ -160,9 +163,10 @@ func (c *liveConn) handle(raw []byte) {
 		return
 	}
 	peer := c.peer(to)
-	if !peer.exists || peer.blocked {
+	if !peer.exists || peer.blocked || (peer.refuses && kind == "call_offer") {
 		// Said the same way whichever it is: a caller is not told that
-		// somebody has blocked them.
+		// somebody has blocked them, or takes calls only from people they
+		// follow.
 		if kind == "call_offer" {
 			c.tellUnavailable(ev, to)
 		}
@@ -203,8 +207,11 @@ func (c *liveConn) peer(id string) livePeer {
 		SELECT u.username, EXISTS(
 			SELECT 1 FROM user_blocks
 			 WHERE (blocker_id = $1 AND blocked_id = $2)
-			    OR (blocker_id = $2 AND blocked_id = $1))
-		  FROM users u WHERE u.id = $2`, me, uid).Scan(&p.username, &p.blocked)
+			    OR (blocker_id = $2 AND blocked_id = $1)),
+		       COALESCE(u.settings->>'messages', 'everyone') = 'following'
+		       AND NOT EXISTS (SELECT 1 FROM follows f
+		                        WHERE f.follower_id = u.id AND f.following_id = $1)
+		  FROM users u WHERE u.id = $2`, me, uid).Scan(&p.username, &p.blocked, &p.refuses)
 	if errors.Is(err, sql.ErrNoRows) {
 		c.peers[id] = p
 		return p

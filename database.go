@@ -541,6 +541,8 @@ func runMigrations() error {
 		max_per_day       INT DEFAULT 4,
 		updated_at        TIMESTAMPTZ DEFAULT NOW()
 	);
+	-- Whether a new message or missed call buzzes the phone.
+	ALTER TABLE notification_prefs ADD COLUMN IF NOT EXISTS messages BOOLEAN DEFAULT TRUE;
 
 	-- The in-app notifications list: what the bell shows. Push messages
 	-- go through notification_outbox; these are the rows the app lists,

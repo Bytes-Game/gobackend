@@ -94,17 +94,23 @@ func HandleSetNotificationPrefs(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	var p NotificationPrefs
+	// Prefs always belong to the authenticated user.
+	uid := authUserID(r)
+	if uid == "" {
+		http.Error(w, "userId required", http.StatusBadRequest)
+		return
+	}
+	// What is sent is laid over what they have, so a save changes only the
+	// switches it names. It used to start from nothing: every switch left
+	// out of the request was saved as off, and the app's settings page —
+	// which named switches the server did not know — turned every battle
+	// notification off for anyone who touched it.
+	p := loadNotificationPrefs(uid)
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	// Prefs always belong to the authenticated user.
-	p.UserID = authUserID(r)
-	if p.UserID == "" {
-		http.Error(w, "userId required", http.StatusBadRequest)
-		return
-	}
+	p.UserID = uid
 	// Validate quiet-hours bounds.
 	if p.QuietHoursStart < 0 || p.QuietHoursStart > 23 ||
 		p.QuietHoursEnd < 0 || p.QuietHoursEnd > 23 {

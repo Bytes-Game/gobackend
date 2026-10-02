@@ -39,6 +39,8 @@ const (
 // NotificationPrefs is the user's per-trigger opt-out + rate-limit settings.
 type NotificationPrefs struct {
 	UserID           string `json:"userId"`
+	// Messages: a new message or a missed call buzzes the phone.
+	Messages         bool   `json:"messages"`
 	FriendResponse   bool   `json:"friendResponse"`
 	EndingSoon       bool   `json:"endingSoon"`
 	YouWillLove      bool   `json:"youWillLove"`
@@ -54,6 +56,7 @@ type NotificationPrefs struct {
 func defaultNotificationPrefs(userID string) NotificationPrefs {
 	return NotificationPrefs{
 		UserID:           userID,
+		Messages:         true,
 		FriendResponse:   true,
 		EndingSoon:       true,
 		YouWillLove:      true,
@@ -67,6 +70,8 @@ func defaultNotificationPrefs(userID string) NotificationPrefs {
 // allowedByPrefs returns true if this trigger kind is enabled for the user.
 func (p NotificationPrefs) allowedByPrefs(kind TriggerKind) bool {
 	switch kind {
+	case TriggerChatMessage, TriggerMissedCall:
+		return p.Messages
 	case TriggerFriendResponse, TriggerFriendChallenge:
 		return p.FriendResponse
 	case TriggerEndingSoon, TriggerBattleWon, TriggerOffTopic:
@@ -106,12 +111,16 @@ func loadNotificationPrefs(userID string) NotificationPrefs {
 	var p NotificationPrefs
 	p.UserID = userID
 	err := db.QueryRow(`
-		SELECT friend_response, ending_soon, you_will_love, inactive_winback,
-		       quiet_hours_start, quiet_hours_end, max_per_day
+		SELECT COALESCE(messages, TRUE), friend_response, ending_soon, you_will_love,
+		       inactive_winback, quiet_hours_start, quiet_hours_end, max_per_day
 		FROM notification_prefs WHERE user_id = $1
-	`, userID).Scan(&p.FriendResponse, &p.EndingSoon, &p.YouWillLove, &p.InactiveWinback,
-		&p.QuietHoursStart, &p.QuietHoursEnd, &p.MaxPerDay)
-	if err != nil {
+	`, userID).Scan(&p.Messages, &p.FriendResponse, &p.EndingSoon, &p.YouWillLove,
+		&p.InactiveWinback, &p.QuietHoursStart, &p.QuietHoursEnd, &p.MaxPerDay)
+	if errors.Is(err, sql.ErrNoRows) {
+		return defaultNotificationPrefs(userID)
+	}
+	if queryFailed("reading notification settings for user "+userID,
+		"using the defaults", err) {
 		return defaultNotificationPrefs(userID)
 	}
 	return p
@@ -125,9 +134,10 @@ func saveNotificationPrefs(p NotificationPrefs) error {
 	_, err := db.Exec(`
 		INSERT INTO notification_prefs
 			(user_id, friend_response, ending_soon, you_will_love, inactive_winback,
-			 quiet_hours_start, quiet_hours_end, max_per_day, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+			 quiet_hours_start, quiet_hours_end, max_per_day, messages, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
 		ON CONFLICT (user_id) DO UPDATE SET
+			messages         = EXCLUDED.messages,
 			friend_response  = EXCLUDED.friend_response,
 			ending_soon      = EXCLUDED.ending_soon,
 			you_will_love    = EXCLUDED.you_will_love,
@@ -137,7 +147,7 @@ func saveNotificationPrefs(p NotificationPrefs) error {
 			max_per_day      = EXCLUDED.max_per_day,
 			updated_at       = NOW()
 	`, p.UserID, p.FriendResponse, p.EndingSoon, p.YouWillLove, p.InactiveWinback,
-		p.QuietHoursStart, p.QuietHoursEnd, p.MaxPerDay)
+		p.QuietHoursStart, p.QuietHoursEnd, p.MaxPerDay, p.Messages)
 	return err
 }
 

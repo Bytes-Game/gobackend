@@ -166,6 +166,8 @@ func TestCounts_EveryActionShowsOnEveryScreen(t *testing.T) {
 		"/api/v1/saved/6501", map[string]string{"userId": "6501"}, "6501", cid))
 	check("liked videos", screen(t, GetLikedChallengesHandler,
 		"/api/v1/users/6501/likes", map[string]string{"id": "6501"}, "6501", cid))
+	check("watch history", screen(t, GetWatchHistoryHandler,
+		"/api/v1/users/6501/history", map[string]string{"id": "6501"}, "6501", cid))
 	check("following feed", screen(t, FollowingFeedV2Handler,
 		"/api/v1/feed/following/v2?userId=6502&page=1&limit=50", nil, "6502", cid))
 	check("explore (the search grid)", screen(t, ExploreFeedHandler,
