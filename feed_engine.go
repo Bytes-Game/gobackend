@@ -6787,6 +6787,9 @@ func populateTopResponses(items []HomeFeedItem) {
 			}
 		}
 	}
+	// And which side is ahead, so the app opens each battle on the side
+	// that is winning (battle_leader.go).
+	markBattleLeaders(items)
 }
 
 // injectSuggestedAccountsCard builds an "Accounts you might like" card for

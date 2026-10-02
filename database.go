@@ -2914,6 +2914,9 @@ func SendChatMessage(senderID, receiverID int, message string, replyToID *int) (
 }
 
 // GetChatMessages returns messages between two users, newest first.
+//
+// userA is the person reading: a chat they deleted shows only what came
+// after (migration 016).
 func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 	rows, err := db.Query(
 		`SELECT m.id, m.sender_id, s.username, m.receiver_id, r.username,
@@ -2927,13 +2930,17 @@ func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 		 FROM chat_messages m
 		 JOIN users s ON m.sender_id = s.id
 		 JOIN users r ON m.receiver_id = r.id
-		 WHERE (m.sender_id = $1 AND m.receiver_id = $2)
-		    OR (m.sender_id = $2 AND m.receiver_id = $1)
+		 WHERE ((m.sender_id = $1 AND m.receiver_id = $2)
+		    OR (m.sender_id = $2 AND m.receiver_id = $1))
+		   AND m.created_at > COALESCE(
+		         (SELECT cleared_at FROM chat_cleared WHERE user_id = $1 AND other_id = $2),
+		         '-infinity'::timestamptz)
 		 ORDER BY m.created_at DESC
 		 LIMIT $3 OFFSET $4`,
 		userA, userB, limit, offset,
 	)
-	if err != nil {
+	if queryFailed(fmt.Sprintf("reading the chat between users %d and %d", userA, userB),
+		"the chat shows empty", err) {
 		return nil
 	}
 	defer rows.Close()
@@ -3037,22 +3044,34 @@ func GetConversations(userID int) []Conversation {
 		var lastMsg, lastStatus string
 		var lastTime time.Time
 		var lastFromMe bool
+		// Only what came after this person last deleted the chat: a chat
+		// they deleted, with nothing new since, is not on their list.
 		err = db.QueryRow(
 			`SELECT message, created_at, sender_id = $1,
 			        CASE WHEN is_read THEN 'read' ELSE COALESCE(status, 'sent') END
 			 FROM chat_messages
-			 WHERE (sender_id=$1 AND receiver_id=$2) OR (sender_id=$2 AND receiver_id=$1)
+			 WHERE ((sender_id=$1 AND receiver_id=$2) OR (sender_id=$2 AND receiver_id=$1))
+			   AND created_at > COALESCE(
+			         (SELECT cleared_at FROM chat_cleared WHERE user_id = $1 AND other_id = $2),
+			         '-infinity'::timestamptz)
 			 ORDER BY created_at DESC LIMIT 1`,
 			userID, pid,
 		).Scan(&lastMsg, &lastTime, &lastFromMe, &lastStatus)
 		if err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				queryFailed(fmt.Sprintf("reading the last message between users %d and %d", userID, pid),
+					"that chat is left off the list", err)
+			}
 			continue
 		}
 
 		var unread int
 		if err := db.QueryRow(
 			`SELECT COUNT(*) FROM chat_messages
-			WHERE sender_id=$1 AND receiver_id=$2 AND is_read=FALSE`,
+			WHERE sender_id=$1 AND receiver_id=$2 AND is_read=FALSE
+			  AND created_at > COALESCE(
+			        (SELECT cleared_at FROM chat_cleared WHERE user_id = $2 AND other_id = $1),
+			        '-infinity'::timestamptz)`,
 			pid, userID,
 		).Scan(&unread); err != nil {
 			queryFailed("GetConversations: could not read chat_messages",

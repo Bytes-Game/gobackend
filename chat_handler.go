@@ -188,6 +188,39 @@ func MarkReadHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, `{"ok":true}`)
 }
 
+// ClearChatHandler handles POST /api/v1/chat/clear body:{ otherUserId }.
+//
+// "Delete chat": the chat with that person goes off the list of the person
+// asking, with every message up to now. Only for them — the other person
+// keeps theirs, as in every chat app. A new message later starts it again,
+// showing only what came after (migration 016).
+func ClearChatHandler(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		OtherUserID string `json:"otherUserId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid body", http.StatusBadRequest)
+		return
+	}
+	me, _ := strconv.Atoi(authUserID(r))
+	other, _ := strconv.Atoi(payload.OtherUserID)
+	if me == 0 || other == 0 || me == other {
+		http.Error(w, "otherUserId required", http.StatusBadRequest)
+		return
+	}
+	_, err := db.Exec(`
+		INSERT INTO chat_cleared (user_id, other_id, cleared_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (user_id, other_id) DO UPDATE SET cleared_at = NOW()`, me, other)
+	if queryFailed(fmt.Sprintf("deleting the chat with user %d for user %d", other, me),
+		"the chat stays on their list", err) {
+		http.Error(w, "could not delete the chat", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprint(w, `{"ok":true}`)
+}
+
 // EditMessageHandler handles POST /api/v1/chat/edit body:{ messageId, senderId, text }
 func EditMessageHandler(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
