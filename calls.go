@@ -123,6 +123,9 @@ func (c *liveConn) missedCall(to, username string, video bool) {
 		ActorName: c.username,
 		Body:      body,
 	})
+	// And on their phone. Not waited for: this runs inside the caller's
+	// connection, and a slow push service must not hold it up.
+	go pushMissedCall(to, c.userID, c.username, video)
 }
 
 // iceServers is where a phone may look for its own public address, and the

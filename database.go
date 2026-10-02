@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -3021,7 +3022,11 @@ func GetConversations(userID int) []Conversation {
 	}
 
 	// Step 2: For each partner, get their info, last message, and unread count
-	var result []Conversation
+	result := make([]Conversation, 0, len(partnerIDs))
+	// When each chat's last message was, to the microsecond: the list puts
+	// the newest on top, and two messages in the same second must still
+	// come in the order they were sent.
+	var lastAt []time.Time
 	for _, pid := range partnerIDs {
 		var username, league string
 		err := db.QueryRow(`SELECT username, league FROM users WHERE id=$1`, pid).Scan(&username, &league)
@@ -3064,18 +3069,22 @@ func GetConversations(userID int) []Conversation {
 			LastFromMe:  lastFromMe,
 			LastStatus:  lastStatus,
 		})
+		lastAt = append(lastAt, lastTime)
 	}
 
-	// Sort by last_time descending
-	for i := 0; i < len(result); i++ {
-		for j := i + 1; j < len(result); j++ {
-			if result[j].LastTime > result[i].LastTime {
-				result[i], result[j] = result[j], result[i]
-			}
-		}
+	// Newest conversation first, the way every chat app orders its list.
+	order := make([]int, len(result))
+	for i := range order {
+		order[i] = i
 	}
-
-	return result
+	sort.SliceStable(order, func(a, b int) bool {
+		return lastAt[order[a]].After(lastAt[order[b]])
+	})
+	sorted := make([]Conversation, len(result))
+	for i, k := range order {
+		sorted[i] = result[k]
+	}
+	return sorted
 }
 
 // ---------------------------------------------------------------------------
