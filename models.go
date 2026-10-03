@@ -92,6 +92,15 @@ type ChatMessage struct {
 	IsEdited         bool   `json:"isEdited"`
 	IsDeleted        bool   `json:"isDeleted"`
 	CreatedAt        string `json:"createdAt"`
+	// "text", "photo" or "voice" (chat_media.go). A photo's caption is in
+	// Message; a voice note has none.
+	Kind            string `json:"kind"`
+	MediaURL        string `json:"mediaUrl,omitempty"`
+	MediaDurationMs int    `json:"mediaDurationMs,omitempty"`
+	MediaWidth      int    `json:"mediaWidth,omitempty"`
+	MediaHeight     int    `json:"mediaHeight,omitempty"`
+	// A voice note's loudness, 0-100, drawn as bars in its bubble.
+	Waveform []int `json:"waveform,omitempty"`
 }
 
 // Conversation represents a chat thread between two users (for the list view).
