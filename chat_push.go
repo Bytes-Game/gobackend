@@ -92,7 +92,7 @@ func pushChatMessage(msg ChatMessage) {
 	pushNow(msg.ReceiverID, OutboxRow{
 		TriggerKind: TriggerChatMessage,
 		Title:       title,
-		Body:        truncateText(msg.Message, pushBodyLimit),
+		Body:        truncateText(chatPreview(msg.Kind, msg.Message), pushBodyLimit),
 		Tag:         "chat_" + msg.SenderID,
 		Channel:     pushChannelMessages,
 		AppDraws:    true,
@@ -101,6 +101,7 @@ func pushChatMessage(msg ChatMessage) {
 			"senderId":       msg.SenderID,
 			"senderUsername": msg.SenderUsername,
 			"messageId":      msg.ID,
+			"kind":           msg.Kind,
 		},
 	})
 }

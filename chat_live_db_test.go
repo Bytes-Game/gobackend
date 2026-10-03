@@ -42,6 +42,10 @@ func liveServer(t *testing.T) *httptest.Server {
 	api.HandleFunc("/chat/clear", authed(ClearChatHandler)).Methods("POST")
 	api.HandleFunc("/calls/ice", authed(CallIceServersHandler)).Methods("GET")
 	api.HandleFunc("/notifications/register", authed(HandleRegisterPushToken)).Methods("POST")
+	api.HandleFunc("/chat/media", authed(ChatMediaPresignHandler)).Methods("POST")
+	api.HandleFunc("/chat/edit", authed(EditMessageHandler)).Methods("POST")
+	api.HandleFunc("/chat/delete", authed(DeleteMessageHandler)).Methods("POST")
+	api.HandleFunc("/chat/conversations/{userId}", authed(GetConversationsHandler)).Methods("GET")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
@@ -172,7 +176,7 @@ func authedDo(t *testing.T, srv *httptest.Server, id int, method, path, body str
 
 func message(t *testing.T, from, to int, text string) int {
 	t.Helper()
-	id, err := SendChatMessage(from, to, text, nil)
+	id, err := SendChatMessage(from, to, text, nil, ChatMedia{})
 	if err != nil {
 		t.Fatalf("send message: %v", err)
 	}

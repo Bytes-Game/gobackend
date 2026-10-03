@@ -17,6 +17,13 @@ type SendMessagePayload struct {
 	ReceiverID string `json:"receiverId"`
 	Message    string `json:"message"`
 	ReplyToID  string `json:"replyToId,omitempty"`
+	// A photo or voice note (chat_media.go). Kind is "text" when left out.
+	Kind            string `json:"kind,omitempty"`
+	MediaURL        string `json:"mediaUrl,omitempty"`
+	MediaDurationMs int    `json:"mediaDurationMs,omitempty"`
+	MediaWidth      int    `json:"mediaWidth,omitempty"`
+	MediaHeight     int    `json:"mediaHeight,omitempty"`
+	Waveform        []int  `json:"waveform,omitempty"`
 }
 
 // maxChatMessageLen bounds a single chat message. Generous for real
@@ -45,12 +52,26 @@ func SendMessageHandler(w http.ResponseWriter, r *http.Request) {
 
 	senderID, _ := strconv.Atoi(payload.SenderID)
 	receiverID, _ := strconv.Atoi(payload.ReceiverID)
-	if senderID == 0 || receiverID == 0 || payload.Message == "" {
+	if senderID == 0 || receiverID == 0 {
 		http.Error(w, "senderId, receiverId, and message are required", http.StatusBadRequest)
 		return
 	}
 	if len(payload.Message) > maxChatMessageLen {
 		http.Error(w, "message too long", http.StatusRequestEntityTooLarge)
+		return
+	}
+	// A text needs words; a photo or voice note needs a file of the
+	// sender's own (a photo's caption is optional).
+	media, err := checkChatMedia(payload.SenderID, payload.Message, ChatMedia{
+		Kind:       payload.Kind,
+		URL:        payload.MediaURL,
+		DurationMs: payload.MediaDurationMs,
+		Width:      payload.MediaWidth,
+		Height:     payload.MediaHeight,
+		Waveform:   payload.Waveform,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -82,7 +103,7 @@ func SendMessageHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	msgID, err := SendChatMessage(senderID, receiverID, payload.Message, replyToID)
+	msgID, err := SendChatMessage(senderID, receiverID, payload.Message, replyToID, media)
 	if err != nil {
 		log.Printf("SendChatMessage error: %v", err)
 		http.Error(w, "Failed to send message", http.StatusInternalServerError)
@@ -105,6 +126,7 @@ func SendMessageHandler(w http.ResponseWriter, r *http.Request) {
 		ReplyToID:       payload.ReplyToID,
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
+	msg.setMedia(media)
 
 	// Send real-time via WebSocket if receiver is online
 	go deliverChatMessage(receiver.Username, msg)
@@ -305,11 +327,19 @@ func ForwardMessageHandler(w http.ResponseWriter, r *http.Request) {
 	// forward ANY message before, from any chat, by guessing its number.
 	// A deleted message is not forwarded either: its text is just "This
 	// message was deleted".
-	var originalText string
+	// A photo or voice note is forwarded as itself: the copy shows the
+	// same file.
+	var originalText, waveform string
+	var media ChatMedia
 	err := db.QueryRow(`
-		SELECT message FROM chat_messages
+		SELECT message, COALESCE(kind, 'text'), COALESCE(media_url, ''),
+		       COALESCE(media_duration_ms, 0), COALESCE(media_width, 0),
+		       COALESCE(media_height, 0), COALESCE(media_waveform, '')
+		  FROM chat_messages
 		 WHERE id = $1 AND (sender_id = $2 OR receiver_id = $2)
-		   AND is_deleted IS NOT TRUE`, msgID, senderID).Scan(&originalText)
+		   AND is_deleted IS NOT TRUE`, msgID, senderID).Scan(&originalText,
+		&media.Kind, &media.URL, &media.DurationMs, &media.Width, &media.Height, &waveform)
+	media.Waveform = waveformFrom(waveform)
 	if err != nil {
 		queryFailed(fmt.Sprintf("finding message %d for user %d to forward", msgID, senderID),
 			"answering not found", err)
@@ -333,7 +363,7 @@ func ForwardMessageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send as a new message (no reply reference for forwards)
-	newMsgID, err := SendChatMessage(senderID, receiverID, originalText, nil)
+	newMsgID, err := SendChatMessage(senderID, receiverID, originalText, nil, media)
 	if err != nil {
 		http.Error(w, "Failed to forward", http.StatusInternalServerError)
 		return
@@ -352,6 +382,7 @@ func ForwardMessageHandler(w http.ResponseWriter, r *http.Request) {
 		Status:          "sent",
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
+	msg.setMedia(media)
 
 	go deliverChatMessage(receiver.Username, msg)
 	go pushChatMessage(msg)
@@ -420,6 +451,13 @@ func deliverChatMessage(recipientUsername string, msg ChatMessage) {
 		"receiverUsername": msg.ReceiverUsername,
 		"messageId":        msg.ID,
 		"timestamp":        msg.CreatedAt,
+		"replyToId":        msg.ReplyToID,
+		"kind":             msg.Kind,
+		"mediaUrl":         msg.MediaURL,
+		"mediaDurationMs":  msg.MediaDurationMs,
+		"mediaWidth":       msg.MediaWidth,
+		"mediaHeight":      msg.MediaHeight,
+		"waveform":         msg.Waveform,
 	}
 
 	data, err := json.Marshal(envelope)

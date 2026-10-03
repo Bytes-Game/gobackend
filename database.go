@@ -68,6 +68,14 @@ const alterStmts = `
 	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN is_edited BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE chat_messages ADD COLUMN edited_at TIMESTAMPTZ; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+	-- Photo and voice messages (chat_media.go): what kind a message is, and
+	-- its file. A photo's caption and every text message stay in message.
+	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS kind VARCHAR(10) DEFAULT 'text';
+	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media_url TEXT;
+	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media_duration_ms INT;
+	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media_width INT;
+	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media_height INT;
+	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media_waveform TEXT;
 	DO $$ BEGIN ALTER TABLE users ADD COLUMN last_seen TIMESTAMPTZ DEFAULT NOW(); EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN category VARCHAR(30) DEFAULT 'other'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
@@ -2908,13 +2916,21 @@ func seedChallenges() {
 // Chat
 // --------------------------------------------------------------------------
 
-// SendChatMessage inserts a message and returns its ID.
-func SendChatMessage(senderID, receiverID int, message string, replyToID *int) (int, error) {
+// SendChatMessage inserts a message and returns its ID. [media] is a photo
+// or voice note (checkChatMedia has already checked it); a text message
+// passes ChatMedia{}.
+func SendChatMessage(senderID, receiverID int, message string, replyToID *int, media ChatMedia) (int, error) {
+	if media.Kind == "" {
+		media.Kind = chatKindText
+	}
 	var id int
 	err := db.QueryRow(
-		`INSERT INTO chat_messages (sender_id, receiver_id, message, reply_to_id)
-		 VALUES ($1, $2, $3, $4) RETURNING id`,
+		`INSERT INTO chat_messages (sender_id, receiver_id, message, reply_to_id,
+		        kind, media_url, media_duration_ms, media_width, media_height, media_waveform)
+		 VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, 0), NULLIF($8, 0), NULLIF($9, 0), NULLIF($10, ''))
+		 RETURNING id`,
 		senderID, receiverID, message, replyToID,
+		media.Kind, media.URL, media.DurationMs, media.Width, media.Height, waveformText(media.Waveform),
 	).Scan(&id)
 	return id, err
 }
@@ -2931,11 +2947,15 @@ func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 				COALESCE(m.is_edited, FALSE) AS is_edited,
 				COALESCE(m.is_deleted, FALSE) AS is_deleted,
 				m.reply_to_id,
-				(SELECT m2.message FROM chat_messages m2 WHERE m2.id = m.reply_to_id) AS reply_to_text,
-				m.created_at
+				COALESCE(rm.message, ''), COALESCE(rm.kind, 'text'),
+				m.created_at,
+				COALESCE(m.kind, 'text'), COALESCE(m.media_url, ''),
+				COALESCE(m.media_duration_ms, 0), COALESCE(m.media_width, 0),
+				COALESCE(m.media_height, 0), COALESCE(m.media_waveform, '')
 		 FROM chat_messages m
 		 JOIN users s ON m.sender_id = s.id
 		 JOIN users r ON m.receiver_id = r.id
+		 LEFT JOIN chat_messages rm ON rm.id = m.reply_to_id
 		 WHERE ((m.sender_id = $1 AND m.receiver_id = $2)
 		    OR (m.sender_id = $2 AND m.receiver_id = $1))
 		   AND m.created_at > COALESCE(
@@ -2952,15 +2972,20 @@ func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 	defer rows.Close()
 
 	var result []ChatMessage
+	bad := 0
 	for rows.Next() {
 		var id, sID, rID int
 		var sName, rName, msg, status string
 		var isRead, isEdited, isDeleted bool
 		var replyToID *int
-		var replyToText *string
+		var replyToText, replyToKind string
 		var createdAt time.Time
-		if rows.Scan(&id, &sID, &sName, &rID, &rName, &msg, &isRead,
-			&status, &isEdited, &isDeleted, &replyToID, &replyToText, &createdAt) == nil {
+		var kind, mediaURL, waveform string
+		var durationMs, width, height int
+		if !scanFailed(fmt.Sprintf("a message between users %d and %d", userA, userB),
+			rows.Scan(&id, &sID, &sName, &rID, &rName, &msg, &isRead,
+				&status, &isEdited, &isDeleted, &replyToID, &replyToText, &replyToKind, &createdAt,
+				&kind, &mediaURL, &durationMs, &width, &height, &waveform), &bad) {
 			cm := ChatMessage{
 				ID:               strconv.Itoa(id),
 				SenderID:         strconv.Itoa(sID),
@@ -2973,12 +2998,16 @@ func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 				IsEdited:         isEdited,
 				IsDeleted:        isDeleted,
 				CreatedAt:        createdAt.UTC().Format(time.RFC3339),
+				Kind:             kind,
+				MediaURL:         mediaURL,
+				MediaDurationMs:  durationMs,
+				MediaWidth:       width,
+				MediaHeight:      height,
+				Waveform:         waveformFrom(waveform),
 			}
 			if replyToID != nil {
 				cm.ReplyToID = strconv.Itoa(*replyToID)
-			}
-			if replyToText != nil {
-				cm.ReplyToText = *replyToText
+				cm.ReplyToText = chatPreview(replyToKind, replyToText)
 			}
 			result = append(result, cm)
 		}
@@ -3047,14 +3076,15 @@ func GetConversations(userID int) []Conversation {
 			continue
 		}
 
-		var lastMsg, lastStatus string
+		var lastMsg, lastStatus, lastKind string
 		var lastTime time.Time
 		var lastFromMe bool
 		// Only what came after this person last deleted the chat: a chat
 		// they deleted, with nothing new since, is not on their list.
 		err = db.QueryRow(
 			`SELECT message, created_at, sender_id = $1,
-			        CASE WHEN is_read THEN 'read' ELSE COALESCE(status, 'sent') END
+			        CASE WHEN is_read THEN 'read' ELSE COALESCE(status, 'sent') END,
+			        COALESCE(kind, 'text')
 			 FROM chat_messages
 			 WHERE ((sender_id=$1 AND receiver_id=$2) OR (sender_id=$2 AND receiver_id=$1))
 			   AND created_at > COALESCE(
@@ -3062,7 +3092,7 @@ func GetConversations(userID int) []Conversation {
 			         '-infinity'::timestamptz)
 			 ORDER BY created_at DESC LIMIT 1`,
 			userID, pid,
-		).Scan(&lastMsg, &lastTime, &lastFromMe, &lastStatus)
+		).Scan(&lastMsg, &lastTime, &lastFromMe, &lastStatus, &lastKind)
 		if err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				queryFailed(fmt.Sprintf("reading the last message between users %d and %d", userID, pid),
@@ -3088,7 +3118,7 @@ func GetConversations(userID int) []Conversation {
 			UserID:      strconv.Itoa(pid),
 			Username:    username,
 			League:      league,
-			LastMessage: lastMsg,
+			LastMessage: chatPreview(lastKind, lastMsg),
 			LastTime:    lastTime.UTC().Format(time.RFC3339),
 			UnreadCount: unread,
 			LastFromMe:  lastFromMe,
@@ -3268,6 +3298,7 @@ func EditChatMessage(msgID int, senderID int, newText string) error {
 	result, err := db.Exec(
 		`UPDATE chat_messages SET message=$1, is_edited=TRUE, edited_at=NOW()
 		 WHERE id=$2 AND sender_id=$3 AND is_deleted=FALSE
+		   AND COALESCE(kind, 'text') <> 'voice'
 		   AND created_at > NOW() - INTERVAL '15 minutes'`,
 		newText, msgID, senderID,
 	)
@@ -3276,25 +3307,37 @@ func EditChatMessage(msgID int, senderID int, newText string) error {
 	}
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
-		return fmt.Errorf("message not found, not yours, or edit window expired (15 min)")
+		return fmt.Errorf("message not found, not yours, a voice message, or edit window expired (15 min)")
 	}
 	return nil
 }
 
-// DeleteChatMessage soft-deletes a message (unsend for everyone).
+// DeleteChatMessage soft-deletes a message (unsend for everyone). A photo
+// or voice note goes too: the message stops pointing at it, and the file is
+// cleared from storage unless a forwarded copy still shows it.
 func DeleteChatMessage(msgID int, senderID int) error {
-	result, err := db.Exec(
-		`UPDATE chat_messages SET is_deleted=TRUE, message='This message was deleted'
-		 WHERE id=$1 AND sender_id=$2`,
+	var oldURL string
+	err := db.QueryRow(
+		`WITH old AS (
+		     SELECT id, COALESCE(media_url, '') AS media_url FROM chat_messages
+		      WHERE id = $1 AND sender_id = $2
+		 )
+		 UPDATE chat_messages m
+		    SET is_deleted = TRUE, message = 'This message was deleted',
+		        kind = 'text', media_url = NULL, media_duration_ms = NULL,
+		        media_width = NULL, media_height = NULL, media_waveform = NULL
+		   FROM old
+		  WHERE m.id = old.id
+		 RETURNING old.media_url`,
 		msgID, senderID,
-	)
+	).Scan(&oldURL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("message not found or not yours")
+	}
 	if err != nil {
 		return err
 	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return fmt.Errorf("message not found or not yours")
-	}
+	go forgetChatFile(oldURL)
 	return nil
 }
 

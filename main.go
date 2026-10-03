@@ -544,6 +544,8 @@ func main() {
 	// client uploads bytes directly to object storage without ever
 	// streaming them through Render.
 	api.HandleFunc("/media/presign", authed(PresignMediaUploadHandler)).Methods("POST", "OPTIONS")
+	// Somewhere to upload a photo or voice message (chat_media.go).
+	api.HandleFunc("/chat/media", authed(ChatMediaPresignHandler)).Methods("POST", "OPTIONS")
 	// Multipart uploads: init/part/complete/abort presigns for large
 	// files — per-part retry + resume instead of restart-from-zero.
 	api.HandleFunc("/media/multipart", authed(MultipartPresignHandler)).Methods("POST", "OPTIONS")
