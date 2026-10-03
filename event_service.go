@@ -1,8 +1,21 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
+)
+
+// A follow across a block is refused. Blocking someone already ends any
+// follow between the two (BlockUserHandler); before these, the next tap on
+// Follow simply put it back, either way round.
+var (
+	// errYouBlocked: the follower blocked this person. The app offers to
+	// unblock them first.
+	errYouBlocked = errors.New("you have blocked this person")
+	// errTheyBlocked: this person blocked the follower. The follower is
+	// told only that they can't follow — never that they were blocked.
+	errTheyBlocked = errors.New("this account can't be followed")
 )
 
 // resolveUserID returns the integer DB primary key for a user,
@@ -45,6 +58,24 @@ func ProcessFollowEvent(payload FollowEventPayload) error {
 	followingID, err := resolveUserID(payload.FollowingID, payload.FollowingUsername)
 	if err != nil {
 		return fmt.Errorf("user to follow '%s' not found", payload.FollowingUsername)
+	}
+
+	var youBlocked, theyBlocked bool
+	err = db.QueryRow(`
+		SELECT EXISTS (SELECT 1 FROM user_blocks
+		                WHERE blocker_id = $1 AND blocked_id = $2),
+		       EXISTS (SELECT 1 FROM user_blocks
+		                WHERE blocker_id = $2 AND blocked_id = $1)`,
+		followerID, followingID).Scan(&youBlocked, &theyBlocked)
+	if queryFailed(fmt.Sprintf("checking for a block between %d and %d", followerID, followingID),
+		"not following, to be safe", err) {
+		return err
+	}
+	if youBlocked {
+		return errYouBlocked
+	}
+	if theyBlocked {
+		return errTheyBlocked
 	}
 
 	_, err = db.Exec(

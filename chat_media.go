@@ -66,6 +66,9 @@ type ChatMedia struct {
 	Width      int
 	Height     int
 	Waveform   []int
+	// A shared video (kind "share"): which one, and which side of a battle.
+	ChallengeID int
+	ResponseID  int
 }
 
 // chatMediaStorage is where chat files live. Tests swap in a stand-in.
@@ -158,6 +161,14 @@ func checkChatMedia(senderID string, text string, m ChatMedia) (ChatMedia, error
 			return m, errors.New("message is required")
 		}
 		return ChatMedia{Kind: chatKindText}, nil
+	case chatKindShare:
+		// A note with it is optional. Nothing of a file is kept.
+		sid, _ := strconv.Atoi(senderID)
+		if err := checkShare(sid, m.ChallengeID, m.ResponseID); err != nil {
+			return m, err
+		}
+		return ChatMedia{Kind: chatKindShare, ChallengeID: m.ChallengeID,
+			ResponseID: m.ResponseID}, nil
 	case chatKindPhoto, chatKindVoice:
 	default:
 		return m, fmt.Errorf("unknown message kind %q", m.Kind)
@@ -208,6 +219,8 @@ func (m *ChatMessage) setMedia(media ChatMedia) {
 	m.MediaWidth = media.Width
 	m.MediaHeight = media.Height
 	m.Waveform = media.Waveform
+	m.sharedChallengeID = media.ChallengeID
+	m.sharedResponseID = media.ResponseID
 }
 
 // chatPreview is a message as one line: the chat list, a reply's quote, a
@@ -221,6 +234,11 @@ func chatPreview(kind, text string) string {
 		return "📷 Photo"
 	case chatKindVoice:
 		return "🎤 Voice message"
+	case chatKindShare:
+		if strings.TrimSpace(text) != "" {
+			return "🎬 " + text
+		}
+		return "🎬 Shared a video"
 	}
 	return text
 }

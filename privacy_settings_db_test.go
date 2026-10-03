@@ -75,6 +75,68 @@ func TestPrivacy_OnlyPeopleIFollowCanMessageMe(t *testing.T) {
 	}
 }
 
+// goPrivate makes [id]'s account private (or public again) through the same
+// handler the app's Private account switch uses.
+func goPrivate(t *testing.T, id int, private bool) {
+	t.Helper()
+	actionLimitersMu.Lock()
+	delete(actionLimiters, "settings")
+	delete(actionLimiters, "profile_edit")
+	actionLimitersMu.Unlock()
+	vis := "public"
+	if private {
+		vis = "friends"
+	}
+	sid := strconv.Itoa(id)
+	r := httptest.NewRequest("PATCH", "/api/v1/users/"+sid,
+		strings.NewReader(`{"visibility":"`+vis+`"}`))
+	r = mux.SetURLVars(withUser(r, sid, liveNames[id]), map[string]string{"id": sid})
+	w := httptest.NewRecorder()
+	UpdateUserProfileHandler(w, r)
+	if w.Code != 200 {
+		t.Fatalf("making %d %s = %d: %s", id, vis, w.Code, w.Body.String())
+	}
+}
+
+// A private account greys "Everyone" out in the app, so it must be off on
+// the server too — even for someone who picked "Everyone" before going
+// private.
+func TestPrivacy_APrivateAccountTakesMessagesOnlyFromPeopleItFollows(t *testing.T) {
+	srv := liveSetup(t)
+	choose(t, liveMaya, `{"messages":"everyone"}`)
+	goPrivate(t, liveMaya, true)
+	if code := sendAs(t, srv, liveLeo, liveMaya, "hi"); code != 403 {
+		t.Fatalf("maya is private; leo, whom she does not follow, got %d, want 403", code)
+	}
+	if _, err := db.Exec(`INSERT INTO follows (follower_id, following_id) VALUES ($1, $2)`,
+		liveMaya, liveLeo); err != nil {
+		t.Fatal(err)
+	}
+	if code := sendAs(t, srv, liveLeo, liveMaya, "now?"); code != 200 {
+		t.Fatalf("maya follows leo; leo messaging her = %d, want 200", code)
+	}
+	if code := sendAs(t, srv, liveSam, liveMaya, "and me?"); code != 403 {
+		t.Fatalf("maya does not follow sam; sam got %d, want 403", code)
+	}
+	// Public again: "Everyone" means everyone again.
+	goPrivate(t, liveMaya, false)
+	if code := sendAs(t, srv, liveSam, liveMaya, "hi maya"); code != 200 {
+		t.Fatalf("maya is public and takes messages from everyone; sam got %d", code)
+	}
+}
+
+func TestPrivacy_APrivateAccountTakesCallsOnlyFromPeopleItFollows(t *testing.T) {
+	srv := liveSetup(t)
+	goPrivate(t, liveMaya, true)
+	leo := dial(t, srv, liveLeo)
+	maya := dial(t, srv, liveMaya)
+	send(t, leo, map[string]interface{}{"type": "call_offer", "to": strconv.Itoa(liveMaya), "callId": "pv1"})
+	if ev := next(t, leo, "call_unavailable", 3*time.Second); ev["callId"] != "pv1" {
+		t.Fatalf("call_unavailable = %v", ev)
+	}
+	none(t, maya, "call_offer", 300*time.Millisecond)
+}
+
 func TestPrivacy_OnlyPeopleIFollowCanCallMe(t *testing.T) {
 	srv := liveSetup(t)
 	choose(t, liveMaya, `{"messages":"following"}`)

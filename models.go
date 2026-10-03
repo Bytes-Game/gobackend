@@ -101,6 +101,14 @@ type ChatMessage struct {
 	MediaHeight     int    `json:"mediaHeight,omitempty"`
 	// A voice note's loudness, 0-100, drawn as bars in its bubble.
 	Waveform []int `json:"waveform,omitempty"`
+	// A shared battle or short (kind "share", chat_share.go), as the
+	// reader may see it.
+	Shared *ChatShare `json:"shared,omitempty"`
+
+	// Which video a share points at, as stored; attachShares turns these
+	// into Shared for whoever is reading.
+	sharedChallengeID int
+	sharedResponseID  int
 }
 
 // Conversation represents a chat thread between two users (for the list view).

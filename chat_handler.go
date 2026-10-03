@@ -24,6 +24,10 @@ type SendMessagePayload struct {
 	MediaWidth      int    `json:"mediaWidth,omitempty"`
 	MediaHeight     int    `json:"mediaHeight,omitempty"`
 	Waveform        []int  `json:"waveform,omitempty"`
+	// A shared battle or short (kind "share", chat_share.go), and for a
+	// battle which side.
+	ChallengeID string `json:"challengeId,omitempty"`
+	ResponseID  string `json:"responseId,omitempty"`
 }
 
 // maxChatMessageLen bounds a single chat message. Generous for real
@@ -62,13 +66,17 @@ func SendMessageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// A text needs words; a photo or voice note needs a file of the
 	// sender's own (a photo's caption is optional).
+	sharedCID, _ := strconv.Atoi(payload.ChallengeID)
+	sharedRID, _ := strconv.Atoi(payload.ResponseID)
 	media, err := checkChatMedia(payload.SenderID, payload.Message, ChatMedia{
-		Kind:       payload.Kind,
-		URL:        payload.MediaURL,
-		DurationMs: payload.MediaDurationMs,
-		Width:      payload.MediaWidth,
-		Height:     payload.MediaHeight,
-		Waveform:   payload.Waveform,
+		Kind:        payload.Kind,
+		URL:         payload.MediaURL,
+		DurationMs:  payload.MediaDurationMs,
+		Width:       payload.MediaWidth,
+		Height:      payload.MediaHeight,
+		Waveform:    payload.Waveform,
+		ChallengeID: sharedCID,
+		ResponseID:  sharedRID,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -128,13 +136,19 @@ func SendMessageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	msg.setMedia(media)
 
+	// A shared video, as each of them may see it.
+	toThem := []ChatMessage{msg}
+	attachShares(receiverID, toThem)
+	toMe := []ChatMessage{msg}
+	attachShares(senderID, toMe)
+
 	// Send real-time via WebSocket if receiver is online
-	go deliverChatMessage(receiver.Username, msg)
+	go deliverChatMessage(receiver.Username, toThem[0])
 	// And a push to their phone (never to the notifications page).
 	go pushChatMessage(msg)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(msg)
+	json.NewEncoder(w).Encode(toMe[0])
 }
 
 // GetMessagesHandler handles GET /api/v1/chat/messages/{userId}/{otherUserId}
@@ -334,11 +348,13 @@ func ForwardMessageHandler(w http.ResponseWriter, r *http.Request) {
 	err := db.QueryRow(`
 		SELECT message, COALESCE(kind, 'text'), COALESCE(media_url, ''),
 		       COALESCE(media_duration_ms, 0), COALESCE(media_width, 0),
-		       COALESCE(media_height, 0), COALESCE(media_waveform, '')
+		       COALESCE(media_height, 0), COALESCE(media_waveform, ''),
+		       COALESCE(shared_challenge_id, 0), COALESCE(shared_response_id, 0)
 		  FROM chat_messages
 		 WHERE id = $1 AND (sender_id = $2 OR receiver_id = $2)
 		   AND is_deleted IS NOT TRUE`, msgID, senderID).Scan(&originalText,
-		&media.Kind, &media.URL, &media.DurationMs, &media.Width, &media.Height, &waveform)
+		&media.Kind, &media.URL, &media.DurationMs, &media.Width, &media.Height, &waveform,
+		&media.ChallengeID, &media.ResponseID)
 	media.Waveform = waveformFrom(waveform)
 	if err != nil {
 		queryFailed(fmt.Sprintf("finding message %d for user %d to forward", msgID, senderID),
@@ -360,6 +376,14 @@ func ForwardMessageHandler(w http.ResponseWriter, r *http.Request) {
 	if blocked || messagesRefused(senderID, receiverID) {
 		http.Error(w, "cannot message this user", http.StatusForbidden)
 		return
+	}
+	// A shared video is passed on only if the forwarder may still watch it:
+	// forwarding is sharing it again.
+	if media.Kind == chatKindShare {
+		if err := checkShare(senderID, media.ChallengeID, media.ResponseID); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 	}
 
 	// Send as a new message (no reply reference for forwards)
@@ -384,11 +408,16 @@ func ForwardMessageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	msg.setMedia(media)
 
-	go deliverChatMessage(receiver.Username, msg)
+	toThem := []ChatMessage{msg}
+	attachShares(receiverID, toThem)
+	toMe := []ChatMessage{msg}
+	attachShares(senderID, toMe)
+
+	go deliverChatMessage(receiver.Username, toThem[0])
 	go pushChatMessage(msg)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(msg)
+	json.NewEncoder(w).Encode(toMe[0])
 }
 
 // SaveChallengeHandler toggles save on a challenge.
@@ -458,6 +487,7 @@ func deliverChatMessage(recipientUsername string, msg ChatMessage) {
 		"mediaWidth":       msg.MediaWidth,
 		"mediaHeight":      msg.MediaHeight,
 		"waveform":         msg.Waveform,
+		"shared":           msg.Shared,
 	}
 
 	data, err := json.Marshal(envelope)
