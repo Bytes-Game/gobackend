@@ -208,7 +208,7 @@ func (c *liveConn) peer(id string) livePeer {
 			SELECT 1 FROM user_blocks
 			 WHERE (blocker_id = $1 AND blocked_id = $2)
 			    OR (blocker_id = $2 AND blocked_id = $1)),
-		       COALESCE(u.settings->>'messages', 'everyone') = 'following'
+		       `+onlyFromFollowedSQL+`
 		       AND NOT EXISTS (SELECT 1 FROM follows f
 		                        WHERE f.follower_id = u.id AND f.following_id = $1)
 		  FROM users u WHERE u.id = $2`, me, uid).Scan(&p.username, &p.blocked, &p.refuses)

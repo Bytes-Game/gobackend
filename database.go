@@ -76,6 +76,10 @@ const alterStmts = `
 	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media_width INT;
 	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media_height INT;
 	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media_waveform TEXT;
+	-- A shared battle or short (kind 'share'): which video, and for a
+	-- battle which side (chat_share.go).
+	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS shared_challenge_id INT;
+	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS shared_response_id INT;
 	DO $$ BEGIN ALTER TABLE users ADD COLUMN last_seen TIMESTAMPTZ DEFAULT NOW(); EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 	DO $$ BEGIN ALTER TABLE challenges ADD COLUMN category VARCHAR(30) DEFAULT 'other'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
@@ -2373,9 +2377,10 @@ func ToggleChallengeDislike(challengeID, userID string) (bool, int, int) {
 // home reels grows in real time — previously the only path that
 // incremented that counter was the challenge-detail page open
 // (challenge_handler.go:132), which meant a user could watch hundreds of
-// reels without ever moving the number on screen. Capped at one bump per
-// (user, challenge) day at the SQL level via a simple existence check
-// against watch_events to keep the count from inflating from rewatches.
+// reels without ever moving the number on screen. Capped at one view per
+// person per video per day by the video_views table (counts.go) — NOT by
+// watch_events, which is only the watch history. Clearing your watch
+// history deletes watch_events and leaves every view count as it was.
 func RecordWatchEvent(payload WatchEventPayload) error {
 	uid, err := strconv.Atoi(payload.UserID)
 	if err != nil {
@@ -2926,11 +2931,14 @@ func SendChatMessage(senderID, receiverID int, message string, replyToID *int, m
 	var id int
 	err := db.QueryRow(
 		`INSERT INTO chat_messages (sender_id, receiver_id, message, reply_to_id,
-		        kind, media_url, media_duration_ms, media_width, media_height, media_waveform)
-		 VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, 0), NULLIF($8, 0), NULLIF($9, 0), NULLIF($10, ''))
+		        kind, media_url, media_duration_ms, media_width, media_height, media_waveform,
+		        shared_challenge_id, shared_response_id)
+		 VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, 0), NULLIF($8, 0), NULLIF($9, 0), NULLIF($10, ''),
+		         NULLIF($11, 0), NULLIF($12, 0))
 		 RETURNING id`,
 		senderID, receiverID, message, replyToID,
 		media.Kind, media.URL, media.DurationMs, media.Width, media.Height, waveformText(media.Waveform),
+		media.ChallengeID, media.ResponseID,
 	).Scan(&id)
 	return id, err
 }
@@ -2951,7 +2959,8 @@ func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 				m.created_at,
 				COALESCE(m.kind, 'text'), COALESCE(m.media_url, ''),
 				COALESCE(m.media_duration_ms, 0), COALESCE(m.media_width, 0),
-				COALESCE(m.media_height, 0), COALESCE(m.media_waveform, '')
+				COALESCE(m.media_height, 0), COALESCE(m.media_waveform, ''),
+				COALESCE(m.shared_challenge_id, 0), COALESCE(m.shared_response_id, 0)
 		 FROM chat_messages m
 		 JOIN users s ON m.sender_id = s.id
 		 JOIN users r ON m.receiver_id = r.id
@@ -2981,29 +2990,32 @@ func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 		var replyToText, replyToKind string
 		var createdAt time.Time
 		var kind, mediaURL, waveform string
-		var durationMs, width, height int
+		var durationMs, width, height, sharedCID, sharedRID int
 		if !scanFailed(fmt.Sprintf("a message between users %d and %d", userA, userB),
 			rows.Scan(&id, &sID, &sName, &rID, &rName, &msg, &isRead,
 				&status, &isEdited, &isDeleted, &replyToID, &replyToText, &replyToKind, &createdAt,
-				&kind, &mediaURL, &durationMs, &width, &height, &waveform), &bad) {
+				&kind, &mediaURL, &durationMs, &width, &height, &waveform,
+				&sharedCID, &sharedRID), &bad) {
 			cm := ChatMessage{
-				ID:               strconv.Itoa(id),
-				SenderID:         strconv.Itoa(sID),
-				SenderUsername:   sName,
-				ReceiverID:       strconv.Itoa(rID),
-				ReceiverUsername: rName,
-				Message:          msg,
-				IsRead:           isRead,
-				Status:           status,
-				IsEdited:         isEdited,
-				IsDeleted:        isDeleted,
-				CreatedAt:        createdAt.UTC().Format(time.RFC3339),
-				Kind:             kind,
-				MediaURL:         mediaURL,
-				MediaDurationMs:  durationMs,
-				MediaWidth:       width,
-				MediaHeight:      height,
-				Waveform:         waveformFrom(waveform),
+				ID:                strconv.Itoa(id),
+				SenderID:          strconv.Itoa(sID),
+				SenderUsername:    sName,
+				ReceiverID:        strconv.Itoa(rID),
+				ReceiverUsername:  rName,
+				Message:           msg,
+				IsRead:            isRead,
+				Status:            status,
+				IsEdited:          isEdited,
+				IsDeleted:         isDeleted,
+				CreatedAt:         createdAt.UTC().Format(time.RFC3339),
+				Kind:              kind,
+				MediaURL:          mediaURL,
+				MediaDurationMs:   durationMs,
+				MediaWidth:        width,
+				MediaHeight:       height,
+				Waveform:          waveformFrom(waveform),
+				sharedChallengeID: sharedCID,
+				sharedResponseID:  sharedRID,
 			}
 			if replyToID != nil {
 				cm.ReplyToID = strconv.Itoa(*replyToID)
@@ -3012,6 +3024,8 @@ func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 			result = append(result, cm)
 		}
 	}
+	// Shared videos, as the reader may see them.
+	attachShares(userA, result)
 	return result
 }
 
@@ -3325,7 +3339,8 @@ func DeleteChatMessage(msgID int, senderID int) error {
 		 UPDATE chat_messages m
 		    SET is_deleted = TRUE, message = 'This message was deleted',
 		        kind = 'text', media_url = NULL, media_duration_ms = NULL,
-		        media_width = NULL, media_height = NULL, media_waveform = NULL
+		        media_width = NULL, media_height = NULL, media_waveform = NULL,
+		        shared_challenge_id = NULL, shared_response_id = NULL
 		   FROM old
 		  WHERE m.id = old.id
 		 RETURNING old.media_url`,

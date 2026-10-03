@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 )
 
@@ -29,7 +30,21 @@ func HandleFollowEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := ProcessFollowEvent(payload); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// Across a block: said plainly, with a reason the app can act on.
+		switch {
+		case errors.Is(err, errYouBlocked):
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error":  "You've blocked this person. Unblock them to follow.",
+				"reason": "you_blocked",
+			})
+		case errors.Is(err, errTheyBlocked):
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error":  "You can't follow this account.",
+				"reason": "unavailable",
+			})
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 
