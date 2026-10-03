@@ -61,11 +61,7 @@ func checkShare(senderID, challengeID, responseID int) error {
 	if challengeID <= 0 {
 		return errors.New("which video is being shared?")
 	}
-	var ok bool
-	err := db.QueryRow(`
-		SELECT EXISTS (SELECT 1 FROM challenges c
-		                WHERE c.id = $1 AND `+mayWatchSQL+`)`,
-		challengeID, senderID).Scan(&ok)
+	ok, err := mayWatch(senderID, challengeID)
 	if queryFailed(fmt.Sprintf("checking user %d may share challenge %d", senderID, challengeID),
 		"refusing the share", err) {
 		return errors.New("could not check the video; try again")

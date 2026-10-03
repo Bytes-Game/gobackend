@@ -49,6 +49,7 @@ func liveServer(t *testing.T) *httptest.Server {
 	api.HandleFunc("/follow", authed(HandleFollowEvent)).Methods("POST")
 	api.HandleFunc("/blocks", authed(BlockUserHandler)).Methods("POST")
 	api.HandleFunc("/unblock", authed(UnblockUserHandler)).Methods("POST")
+	api.HandleFunc("/challenges/comments", authed(AddChallengeCommentHandler)).Methods("POST")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)

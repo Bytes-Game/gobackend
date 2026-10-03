@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -443,6 +444,12 @@ func AddChallengeCommentHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to add comment: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Whoever the comment names with an @ is told (mentions.go).
+	cid, _ := strconv.Atoi(payload.ChallengeID)
+	commentID, _ := strconv.Atoi(comment.ID)
+	authorID, _ := strconv.Atoi(payload.UserID)
+	notifyCommentMentions(cid, commentID, authorID, payload.Username, payload.Text)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(comment)
