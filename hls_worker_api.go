@@ -236,8 +236,12 @@ const hlsClaimMarker = "PENDING"
 //
 // $1 is the retry cool-off in seconds.
 func hlsClaimableWhere() string {
+	// A photo has nothing to convert, and the model that judges whether a
+	// video matches its challenge runs inside the worker — so a photo is
+	// never offered. See photo_posts.go.
 	return `hls_manifest_url = ''
 			      AND video_url <> ''
+			      AND media_type = 'video'
 			      AND hls_attempts < ` + strconv.Itoa(maxHLSAttempts) + `
 			      AND (hls_claimed_at IS NULL
 			           OR hls_claimed_at < NOW() - INTERVAL '1 second' * $1)`

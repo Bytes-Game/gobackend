@@ -322,6 +322,8 @@ func newUploadID() string {
 var mediaKindAllowed = map[string]struct{}{
 	"video":     {},
 	"thumbnail": {},
+	// The picture of a photo challenge or a photo answer (photo_posts.go).
+	"photo": {},
 }
 
 // variantToExt maps the requested variant name to the file extension we
@@ -363,6 +365,11 @@ func buildObjectKey(userID, uploadID, kind, variant string) (string, error) {
 	}
 	if _, ok := mediaKindAllowed[kind]; !ok {
 		return "", fmt.Errorf("invalid media kind %q", kind)
+	}
+	// One photo per upload, under its own name so it never lands on the
+	// thumbnail that shares its upload ("default.jpg").
+	if kind == "photo" {
+		return fmt.Sprintf("u/%s/%s/%s", userID, uploadID, photoObjectName), nil
 	}
 	ext, ok := variantToExt[variant]
 	if !ok {

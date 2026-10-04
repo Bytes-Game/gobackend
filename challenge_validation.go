@@ -62,16 +62,21 @@ const (
 // validateChallengeResponseSubmission runs all tier-1 checks on a new response.
 // Returns nil on success or a user-facing error on failure.
 func validateChallengeResponseSubmission(payload AcceptChallengePayload, challenge Challenge) error {
-	// --- Duration bounds ---
-	if payload.DurationMs < minVideoDurationMs {
+	isPhoto := payload.MediaType == mediaPhoto
+
+	// --- Duration bounds --- (a photo has no length)
+	if !isPhoto && payload.DurationMs < minVideoDurationMs {
 		return fmt.Errorf("video too short — minimum %d seconds", minVideoDurationMs/1000)
 	}
-	if payload.DurationMs > maxVideoDurationMs {
+	if !isPhoto && payload.DurationMs > maxVideoDurationMs {
 		return fmt.Errorf("video too long — maximum %d seconds", maxVideoDurationMs/1000)
 	}
 
-	// --- Video URL must not be empty ---
+	// --- The video or photo must be there ---
 	if strings.TrimSpace(payload.VideoURL) == "" {
+		if isPhoto {
+			return fmt.Errorf("the photo is missing")
+		}
 		return fmt.Errorf("video URL is required")
 	}
 
@@ -102,6 +107,9 @@ func validateChallengeResponseSubmission(payload AcceptChallengePayload, challen
 			"letting the upload through, so the same video can answer twice", err)
 	}
 	if dupExists {
+		if isPhoto {
+			return fmt.Errorf("you have already used this photo for another challenge — pick a new one")
+		}
 		return fmt.Errorf("you have already used this video for another challenge — record a new one")
 	}
 

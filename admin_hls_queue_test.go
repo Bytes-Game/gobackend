@@ -131,8 +131,11 @@ func TestHLSQueueState_CoversEveryLegOfTheClaimQuery(t *testing.T) {
 	sql := claimWhere(t)
 	legs := regexp.MustCompile(`\bAND\b`).FindAllString(sql, -1)
 	// hls_manifest_url = '' is the first condition, so it has no AND; the
-	// cool-off leg is a single AND holding an OR of two.
-	const known = 3 // video_url, hls_attempts, hls_claimed_at
+	// cool-off leg is a single AND holding an OR of two. media_type = 'video'
+	// is decided by the queue listing itself, which leaves photos out
+	// altogether (readHLSQueue), so hlsQueueState never sees one — see
+	// TestPhotosAreNeverOfferedToTheVideoWorker.
+	const known = 4 // video_url, media_type, hls_attempts, hls_claimed_at
 	if len(legs) != known {
 		t.Errorf("the claim query now has %d AND-ed conditions, not %d.\n\n"+
 			"A condition was added or removed. hlsQueueState has to make the "+

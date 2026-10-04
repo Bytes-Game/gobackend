@@ -99,13 +99,23 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
+	mediaType, ok := mediaTypeOf(payload.MediaType)
+	if !ok {
+		http.Error(w, `mediaType must be "video" or "photo"`, http.StatusBadRequest)
+		return
+	}
+	isPhoto := mediaType == mediaPhoto
+	if isPhoto && strings.TrimSpace(payload.VideoURL) == "" {
+		http.Error(w, "a photo challenge needs its photo", http.StatusBadRequest)
+		return
+	}
 
 	// What the app says the video runs to. Checked here so an obviously
 	// over-long upload is turned away before the server fetches any of it;
 	// the real decision is gateUpload below, which measures the file rather
 	// than trusting the phone. Zero means the app did not say — older
 	// builds do not — and falls through to that measurement.
-	if payload.DurationMs > maxVideoDurationMs {
+	if !isPhoto && payload.DurationMs > maxVideoDurationMs {
 		http.Error(w, fmt.Sprintf(
 			"video too long — maximum %d seconds", maxVideoDurationMs/1000),
 			http.StatusBadRequest)
@@ -128,8 +138,14 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	// hardware we never tested.
 	//
 	// Fails open: an unreachable probe allows the upload. Only a positive
-	// measurement over the ceiling refuses.
-	refusal, dims, measured := gateUpload(payload.VideoURL)
+	// measurement over the ceiling refuses. A photo is not a video and is
+	// not measured as one; the app shrinks it before it uploads.
+	var refusal string
+	var dims videoDimensions
+	var measured bool
+	if !isPhoto {
+		refusal, dims, measured = gateUpload(payload.VideoURL)
+	}
 	if refusal != "" {
 		log.Printf("rejected oversized challenge video from %s: %s", payload.CreatorID, dims)
 		http.Error(w, refusal, http.StatusRequestEntityTooLarge)
@@ -298,6 +314,17 @@ func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
+	// A photo challenge is answered with a photo, a video with a video.
+	answerType, ok := mediaTypeOf(payload.MediaType)
+	if !ok {
+		http.Error(w, `mediaType must be "video" or "photo"`, http.StatusBadRequest)
+		return
+	}
+	if msg := answerKindRefusal(challenge.MediaType, answerType); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	payload.MediaType = answerType
 
 	// Tier-1 structural validation: duration bounds, video dedupe, one-per-challenge,
 	// challenge-still-open, per-user rate limit. Cheap checks that fire on every upload.
@@ -309,7 +336,13 @@ func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	// Same size gate as challenge creation. A battle's second video is
 	// decoded on the same phones as its first — often BOTH at once during a
 	// flip — so it cannot be held to a looser standard. See video_probe.go.
-	refusal, dims, measured := gateUpload(payload.VideoURL)
+	// A photo answer is not measured as a video.
+	var refusal string
+	var dims videoDimensions
+	var measured bool
+	if answerType == mediaVideo {
+		refusal, dims, measured = gateUpload(payload.VideoURL)
+	}
 	if refusal != "" {
 		log.Printf("rejected oversized response video from %s: %s", payload.ResponderID, dims)
 		http.Error(w, refusal, http.StatusRequestEntityTooLarge)

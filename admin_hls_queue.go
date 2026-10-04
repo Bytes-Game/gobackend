@@ -199,6 +199,8 @@ func readHLSQueue(table, kind string, limit int) ([]hlsQueueRow, error) {
 	             COALESCE(video_variants::text, '{}'),
 	             created_at
 	        FROM ` + table + `
+	       -- A photo is never converted, so it is not in this queue at all.
+	       WHERE media_type = 'video'
 	       ORDER BY created_at DESC
 	       LIMIT $1`
 	res, err := db.Query(q, limit)

@@ -76,6 +76,10 @@ const alterStmts = `
 	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media_width INT;
 	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media_height INT;
 	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media_waveform TEXT;
+	-- What a post is made of: 'video', or 'photo' (photo_posts.go). An
+	-- answer is always the same kind as its challenge.
+	ALTER TABLE challenges          ADD COLUMN IF NOT EXISTS media_type TEXT NOT NULL DEFAULT 'video';
+	ALTER TABLE challenge_responses ADD COLUMN IF NOT EXISTS media_type TEXT NOT NULL DEFAULT 'video';
 	-- A shared battle or short (kind 'share'): which video, and for a
 	-- battle which side (chat_share.go).
 	ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS shared_challenge_id INT;
@@ -1703,6 +1707,10 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 	if err != nil {
 		return Challenge{}, fmt.Errorf("invalid creator ID")
 	}
+	mediaType, ok := mediaTypeOf(payload.MediaType)
+	if !ok {
+		return Challenge{}, fmt.Errorf("a post is a video or a photo")
+	}
 
 	var id int
 	var createdAt time.Time
@@ -1771,11 +1779,11 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 	// though somebody had made a claim. See migrations/010.
 	creatorCategory := usableCategory(strings.ToLower(strings.TrimSpace(payload.Category)))
 	err = db.QueryRow(
-		`INSERT INTO challenges (creator_id, video_url, video_variants, thumbnail_url, prefix, subject, visibility, category, creator_category, category_source, emotion_tags, custom_tags, energy_level, battle_days)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id, created_at`,
+		`INSERT INTO challenges (creator_id, video_url, video_variants, thumbnail_url, prefix, subject, visibility, category, creator_category, category_source, emotion_tags, custom_tags, energy_level, battle_days, media_type)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id, created_at`,
 		creatorID, payload.VideoURL, variantsJSON, payload.ThumbnailURL, payload.Prefix, payload.Subject, payload.Visibility,
 		category, creatorCategory, categorySourceAtUpload(creatorCategory, category), emotionJSON, tagsJSON, energyLevel,
-		clampBattleDays(payload.BattleDays),
+		clampBattleDays(payload.BattleDays), mediaType,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return Challenge{}, err
@@ -1784,8 +1792,9 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 	// The row is now waiting to be converted, so ask the worker to start
 	// rather than leaving it for the next scheduled run up to 30 minutes
 	// away. Returns immediately and cannot fail this upload; does nothing
-	// at all unless it has been switched on. See transcode_wakeup.go.
-	if payload.VideoURL != "" {
+	// at all unless it has been switched on. See transcode_wakeup.go. A
+	// photo has nothing to convert.
+	if payload.VideoURL != "" && mediaType == mediaVideo {
 		wakeTranscodeWorker()
 	}
 
@@ -1800,6 +1809,7 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 
 	return Challenge{
 		ID:              strconv.Itoa(id),
+		MediaType:       mediaType,
 		CreatorID:       payload.CreatorID,
 		CreatorUsername: creator.Username,
 		CreatorLeague:   creator.League,
@@ -1844,7 +1854,8 @@ SELECT c.id, c.creator_id, u.username, u.league,
 	-- '' here or a client will try to play the word.
 	COALESCE(c.video_variants, '{}'::jsonb)::text AS video_variants,
 	CASE WHEN COALESCE(c.hls_manifest_url, '') = 'PENDING' THEN ''
-	     ELSE COALESCE(c.hls_manifest_url, '') END AS hls_manifest_url
+	     ELSE COALESCE(c.hls_manifest_url, '') END AS hls_manifest_url,
+	COALESCE(c.media_type, 'video') AS media_type
 FROM challenges c
 JOIN users u ON c.creator_id = u.id
 LEFT JOIN (SELECT challenge_id, COUNT(*) AS cnt FROM challenge_likes GROUP BY challenge_id) lc ON lc.challenge_id = c.id
@@ -1865,7 +1876,7 @@ func queryChallenges(query string, args ...interface{}) []Challenge {
 	for rows.Next() {
 		var id, creatorID, views, likes, respCount int
 		var username, league, videoURL, thumbURL, prefix, subject, visibility, status string
-		var categoryStr, energyStr, variantsJSON, manifestURL string
+		var categoryStr, energyStr, variantsJSON, manifestURL, mediaType string
 		var emotionJSON []byte
 		var createdAt time.Time
 
@@ -1874,7 +1885,7 @@ func queryChallenges(query string, args ...interface{}) []Challenge {
 			&prefix, &subject, &visibility, &status, &views,
 			&likes, &respCount, &createdAt,
 			&categoryStr, &emotionJSON, &energyStr,
-			&variantsJSON, &manifestURL) == nil {
+			&variantsJSON, &manifestURL, &mediaType) == nil {
 
 			var emotions []string
 			json.Unmarshal(emotionJSON, &emotions)
@@ -1891,6 +1902,7 @@ func queryChallenges(query string, args ...interface{}) []Challenge {
 			}
 
 			result = append(result, Challenge{
+				MediaType:       mediaType,
 				VideoVariants:   variants,
 				HLSManifestURL:  manifestURL,
 				ID:              strconv.Itoa(id),
@@ -2158,6 +2170,10 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 	if err1 != nil || err2 != nil {
 		return ChallengeResponse{}, fmt.Errorf("invalid IDs")
 	}
+	mediaType, ok := mediaTypeOf(payload.MediaType)
+	if !ok {
+		return ChallengeResponse{}, fmt.Errorf("an answer is a video or a photo")
+	}
 
 	// Compute relevance once at upload time so the feed engine can use it
 	// for ranking without recomputing per-request.
@@ -2223,12 +2239,12 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 	err = db.QueryRow(
 		`INSERT INTO challenge_responses
 			(challenge_id, responder_id, video_url, video_variants, thumbnail_url, duration_ms, caption, relevance_score,
-			 category, creator_category, category_source, custom_tags, emotion_tags, energy_level)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id, created_at`,
+			 category, creator_category, category_source, custom_tags, emotion_tags, energy_level, media_type)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id, created_at`,
 		cid, rid, payload.VideoURL, variantsJSON, payload.ThumbnailURL,
 		payload.DurationMs, payload.Caption, relevance,
 		category, responderCategory, categorySourceAtUpload(responderCategory, category),
-		tagsJSON, emotionJSON, energyLevel,
+		tagsJSON, emotionJSON, energyLevel, mediaType,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return ChallengeResponse{}, err
@@ -2236,8 +2252,8 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 
 	// Same as CreateChallenge: this answer is waiting to be converted, so
 	// start the worker now instead of waiting out the timer. See
-	// transcode_wakeup.go.
-	if payload.VideoURL != "" {
+	// transcode_wakeup.go. A photo has nothing to convert.
+	if payload.VideoURL != "" && mediaType == mediaVideo {
 		wakeTranscodeWorker()
 	}
 

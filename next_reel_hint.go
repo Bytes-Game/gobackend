@@ -117,23 +117,7 @@ func SendNextReelHint(userID, currentContentID string) {
 		return
 	}
 
-	chosenURL := ""
-	for _, item := range candidates {
-		// Only challenges (the feed is challenge-only post the post
-		// retirement) and only those with a playable URL.
-		if item.Challenge == nil {
-			continue
-		}
-		if item.Challenge.ID == currentContentID {
-			continue // don't hint the reel they just started
-		}
-		url := item.Challenge.VideoURL
-		if url == "" {
-			continue
-		}
-		chosenURL = url
-		break
-	}
+	chosenURL := hintURLFrom(candidates, currentContentID)
 	if chosenURL == "" {
 		return
 	}
@@ -159,4 +143,38 @@ func SendNextReelHint(userID, currentContentID string) {
 		hintLastSentMu.Unlock()
 		log.Printf("next_reel_hint: delivery failed for %s", username)
 	}
+}
+
+// hintURLFrom picks the video to pre-load from [candidates]: the first one
+// with something to play that is not [current], the one already on screen.
+//
+// A photo post is skipped. Its picture sits where a video's file would
+// (photo_posts.go), and the phone would download a JPEG into its video
+// player to "warm" it — bandwidth spent on something that never plays.
+func hintURLFrom(candidates []HomeFeedItem, current string) string {
+	chs := make([]*Challenge, 0, len(candidates))
+	for _, item := range candidates {
+		if item.Challenge != nil {
+			chs = append(chs, item.Challenge)
+		}
+	}
+	// The trending records do not say what they are made of.
+	fillMediaTypes(chs)
+	for _, item := range candidates {
+		// Only challenges (the feed is challenge-only post the post
+		// retirement) and only those with a playable URL.
+		if item.Challenge == nil {
+			continue
+		}
+		if item.Challenge.ID == current {
+			continue // don't hint the reel they just started
+		}
+		if item.Challenge.MediaType == mediaPhoto {
+			continue
+		}
+		if url := item.Challenge.VideoURL; url != "" {
+			return url
+		}
+	}
+	return ""
 }
