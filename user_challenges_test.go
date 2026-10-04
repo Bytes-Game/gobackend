@@ -21,14 +21,14 @@ func challengeRowsForProfile(variants, manifest string) *sqlmock.Rows {
 		"prefix", "subject", "visibility", "status", "views",
 		"likes", "response_count", "created_at",
 		"category", "emotion_tags", "energy_level",
-		"video_variants", "hls_manifest_url",
+		"video_variants", "hls_manifest_url", "media_type",
 	}).AddRow(
 		258, 7, "kar", "bronze",
 		"https://cdn/u/7/raw.mp4", "https://cdn/u/7/thumb.jpg",
 		"can you", "beat this", "arena", "open", 3,
 		1, 0, time.Now().Add(-90*24*time.Hour),
 		"other", []byte(`[]`), "medium",
-		variants, manifest,
+		variants, manifest, "video",
 	)
 }
 

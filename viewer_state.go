@@ -59,8 +59,10 @@ func markViewerState(viewerID string, chs []*Challenge) {
 	if db == nil || len(chs) == 0 {
 		return
 	}
-	// The counts are for everyone, signed in or not.
+	// The counts are for everyone, signed in or not. So is whether a post is
+	// a photo.
 	fillCounts(chs)
+	fillMediaTypes(chs)
 	viewer, err := strconv.Atoi(viewerID)
 	if err != nil || viewer <= 0 {
 		return

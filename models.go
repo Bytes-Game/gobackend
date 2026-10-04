@@ -196,7 +196,10 @@ type VideoVariants map[string]string
 
 // challenge represents an open challenge created by a user.
 type Challenge struct {
-	ID              string        `json:"id"`
+	ID string `json:"id"`
+	// What the post is made of: "photo", or a video when empty. An answer is
+	// always the same kind as its challenge. See photo_posts.go.
+	MediaType       string        `json:"mediaType,omitempty"`
 	CreatorID       string        `json:"creatorId"`
 	CreatorUsername string        `json:"creatorUsername"`
 	CreatorLeague   string        `json:"creatorLeague"`
@@ -277,11 +280,11 @@ type Challenge struct {
 	// endpoint takes (challengeId, responseId, voterId) and without the ID
 	// the home reels can't cast a vote without first fetching the
 	// challenge detail. Surfacing it inline keeps the vote tap one-shot.
-	TopResponseID           string `json:"topResponseId,omitempty"`
+	TopResponseID string `json:"topResponseId,omitempty"`
 	// Leader is which side is ahead right now: "creator", "answer", or
 	// empty when nobody is. The app opens the battle on that side. Filled
 	// with the answer by markBattleLeaders (battle_leader.go).
-	Leader string `json:"leader,omitempty"`
+	Leader                  string `json:"leader,omitempty"`
 	TopResponseVideoUrl     string `json:"topResponseVideoUrl,omitempty"`
 	TopResponseThumbnailUrl string `json:"topResponseThumbnailUrl,omitempty"`
 	TopResponseUsername     string `json:"topResponseUsername,omitempty"`
@@ -394,7 +397,10 @@ type ChallengeResponse struct {
 // CreateChallengePayload is the request body for creating a challenge.
 type CreateChallengePayload struct {
 	CreatorID string `json:"creatorId"`
+	// VideoURL is the post's media: the video, or for a photo challenge
+	// (MediaType "photo") the photo. See photo_posts.go.
 	VideoURL  string `json:"videoUrl"`
+	MediaType string `json:"mediaType,omitempty"`
 	// How many days voting runs once somebody accepts. At least seven, at
 	// most thirty; zero means seven. See clampBattleDays.
 	BattleDays int `json:"battleDays,omitempty"`
@@ -509,9 +515,12 @@ var CaptionKeywordTags = map[string][]string{
 
 // AcceptChallengePayload is sent when a user accepts a challenge.
 type AcceptChallengePayload struct {
-	ChallengeID   string        `json:"challengeId"`
-	ResponderID   string        `json:"responderId"`
-	VideoURL      string        `json:"videoUrl"`
+	ChallengeID string `json:"challengeId"`
+	ResponderID string `json:"responderId"`
+	VideoURL    string `json:"videoUrl"`
+	// "photo" for a photo answer, which a photo challenge needs; empty for a
+	// video. See photo_posts.go.
+	MediaType     string        `json:"mediaType,omitempty"`
 	VideoVariants VideoVariants `json:"videoVariants,omitempty"` // optional multi-bitrate variants from device-side transcode
 	ThumbnailURL  string        `json:"thumbnailUrl"`
 	// Tier-1 validation fields — required so the server can enforce length limits
