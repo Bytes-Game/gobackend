@@ -8,12 +8,15 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -21,7 +24,7 @@ import (
 func musicSetup(t *testing.T) (*httptest.Server, *fakeOpenverse) {
 	t.Helper()
 	t.Cleanup(withDB(t))
-	if _, err := db.Exec(`TRUNCATE music_tracks CASCADE`); err != nil {
+	if _, err := db.Exec(`TRUNCATE music_tracks, music_searches CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 	actionLimitersMu.Lock()
@@ -287,5 +290,229 @@ func TestThePickerOpensOnTheMostUsedSongsAndSaysWhenSearchIsBusy(t *testing.T) {
 	_ = json.NewDecoder(res.Body).Decode(&busy)
 	if !busy.Busy || len(busy.Tracks) != 0 {
 		t.Errorf("busy search: %+v", busy)
+	}
+}
+
+// searchAs asks the picker's search as [as] and answers its songs' ids, in
+// order, and whether it said busy.
+func searchAs(t *testing.T, srv *httptest.Server, as int, q string) ([]string, bool) {
+	t.Helper()
+	res := authedDo(t, srv, as, "GET", "/api/v1/music/search?q="+q, "")
+	var page struct {
+		Tracks []MusicTrack `json:"tracks"`
+		Busy   bool         `json:"busy"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
+		t.Fatalf("search %q: %v", q, err)
+	}
+	ids := []string{}
+	for _, tr := range page.Tracks {
+		ids = append(ids, tr.SourceID)
+	}
+	return ids, page.Busy
+}
+
+func TestASearchIsSavedAndAnsweredFromTheDatabaseAfterARestart(t *testing.T) {
+	srv, f := musicSetup(t)
+	f.results = []openverseAudio{freeSong("a", "Happy A", "by"), freeSong("b", "Happy B", "cc0")}
+	if ids, _ := searchAs(t, srv, liveMaya, "Happy"); strings.Join(ids, ",") != "a,b" {
+		t.Fatalf("first search: %v", ids)
+	}
+	// The server restarts: its memory is gone.
+	forgetMusicSearches()
+	// Somebody else, later, the same words.
+	ids, busy := searchAs(t, srv, liveLeo, "happy")
+	if strings.Join(ids, ",") != "a,b" || busy {
+		t.Errorf("after a restart: %v busy=%v", ids, busy)
+	}
+	if n := f.searchCount(); n != 1 {
+		t.Errorf("Openverse was asked %d times for the same search, want once", n)
+	}
+	var used int
+	db.QueryRow(`SELECT times_used FROM music_searches WHERE query = 'happy' AND page = 1`).Scan(&used)
+	if used != 2 {
+		t.Errorf("the saved search was used %d times, want 2", used)
+	}
+}
+
+func TestASavedSearchIsAskedAgainAfterThirtyDaysAndKeptWhenOpenverseIsBusy(t *testing.T) {
+	srv, f := musicSetup(t)
+	f.results = []openverseAudio{freeSong("a", "Old", "by")}
+	searchAs(t, srv, liveMaya, "song")
+	age := func() {
+		if _, err := db.Exec(`UPDATE music_searches SET fetched_at = NOW() - INTERVAL '31 days'`); err != nil {
+			t.Fatal(err)
+		}
+		forgetMusicSearches()
+	}
+
+	age()
+	f.mu.Lock()
+	f.results = []openverseAudio{freeSong("c", "New", "by")}
+	f.mu.Unlock()
+	if ids, busy := searchAs(t, srv, liveLeo, "song"); strings.Join(ids, ",") != "c" || busy {
+		t.Errorf("after 30 days: %v busy=%v, want the fresh answer", ids, busy)
+	}
+	if n := f.searchCount(); n != 2 {
+		t.Errorf("Openverse asked %d times, want 2", n)
+	}
+
+	age()
+	f.mu.Lock()
+	f.busy = true
+	f.mu.Unlock()
+	if ids, busy := searchAs(t, srv, liveSam, "song"); strings.Join(ids, ",") != "c" || !busy {
+		t.Errorf("old and Openverse busy: %v busy=%v, want the saved answer, marked busy", ids, busy)
+	}
+}
+
+func TestASongTakenDownDropsOutOfSavedSearches(t *testing.T) {
+	srv, f := musicSetup(t)
+	f.results = []openverseAudio{freeSong("a", "Fine", "by"), freeSong("b", "Bad", "by")}
+	searchAs(t, srv, liveMaya, "song")
+	res := authedDo(t, srv, 1, "POST", "/api/v1/admin/music/block", `{"sourceId":"b"}`)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("block: %d", res.StatusCode)
+	}
+	forgetMusicSearches()
+	if ids, _ := searchAs(t, srv, liveLeo, "song"); strings.Join(ids, ",") != "a" {
+		t.Errorf("a saved search still offers the song taken down: %v", ids)
+	}
+	if n := f.searchCount(); n != 1 {
+		t.Errorf("answered from Openverse again (%d), not from the saved search", n)
+	}
+}
+
+func TestSavedSearchesAreKeptToTheirLimitWithTheSongsStillNeeded(t *testing.T) {
+	srv, f := musicSetup(t)
+	prev := musicSavedMax
+	musicSavedMax = 2
+	t.Cleanup(func() { musicSavedMax = prev })
+
+	for _, q := range []string{"one", "two", "three"} {
+		f.mu.Lock()
+		f.results = []openverseAudio{freeSong("only-"+q, q, "by"), freeSong("shared", "Shared", "by")}
+		f.mu.Unlock()
+		searchAs(t, srv, liveMaya, q)
+	}
+	// "one" was used longest ago.
+	if _, err := db.Exec(`UPDATE music_searches SET used_at = NOW() - INTERVAL '3 days' WHERE query = 'one';
+		UPDATE music_searches SET used_at = NOW() - INTERVAL '2 days' WHERE query = 'two'`); err != nil {
+		t.Fatal(err)
+	}
+	// Songs posted with: a challenge's and an answer's.
+	for _, id := range []string{"posted", "answered", "repicked"} {
+		f.songs[id] = freeSong(id, id, "by")
+	}
+	_, posted, _ := pickSong(t, srv, liveMaya, "posted")
+	_, ch, _ := postAs(t, srv, liveMaya, videoWithSong(posted.ID))
+	_, answered, _ := pickSong(t, srv, liveLeo, "answered")
+	answerAs(t, srv, liveLeo, `{"challengeId":"`+ch.ID+`","videoUrl":"https://cdn/u/2/b/720p.mp4",`+
+		`"durationMs":8000,"musicTrackId":"`+answered.ID+`"}`)
+	// Picked a week ago, not posted yet: picked again just now, below.
+	pickSong(t, srv, liveSam, "repicked")
+	// A song taken down, and one counted as used though no post holds it now.
+	authedDo(t, srv, 1, "POST", "/api/v1/admin/music/block", `{"sourceId":"blocked"}`)
+	if _, err := db.Exec(`INSERT INTO music_tracks (source, source_id, license, use_count)
+		VALUES ('openverse', 'counted', 'by', 3)`); err != nil {
+		t.Fatal(err)
+	}
+	// Everything last seen long ago but "only-two", seen just now; and the
+	// two posts' counts lost, so only the posts themselves can keep them.
+	if _, err := db.Exec(`UPDATE music_tracks SET seen_at = NOW() - INTERVAL '8 days' WHERE source_id <> 'only-two';
+		UPDATE music_tracks SET use_count = 0 WHERE source_id IN ('posted', 'answered')`); err != nil {
+		t.Fatal(err)
+	}
+	pickSong(t, srv, liveSam, "repicked")
+
+	pruneSavedMusic(t.Context())
+
+	var kept []string
+	rows, err := db.Query(`SELECT query FROM music_searches ORDER BY query`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var q string
+		rows.Scan(&q)
+		kept = append(kept, q)
+	}
+	rows.Close()
+	if strings.Join(kept, ",") != "three,two" {
+		t.Errorf("kept searches %v, want the two used most recently", kept)
+	}
+	has := func(id string) bool {
+		var n int
+		db.QueryRow(`SELECT COUNT(*) FROM music_tracks WHERE source_id = $1`, id).Scan(&n)
+		return n == 1
+	}
+	if has("only-one") {
+		t.Error("a song only the dropped search had is still kept")
+	}
+	for id, why := range map[string]string{
+		"shared":     "a saved search still has it",
+		"only-three": "a saved search still has it",
+		"only-two":   "it was seen this week",
+		"repicked":   "somebody picked it just now",
+		"posted":     "a challenge uses it",
+		"answered":   "an answer uses it",
+		"blocked":    "it is taken down, and must stay so",
+		"counted":    "it counts as used",
+	} {
+		if !has(id) {
+			t.Errorf("song %q was removed, but %s", id, why)
+		}
+	}
+}
+
+func TestASavedSearchTakesAboutAKilobyte(t *testing.T) {
+	srv, f := musicSetup(t)
+	var songs []openverseAudio
+	r := rand.New(rand.NewSource(1))
+	for i := 0; i < musicPageSize; i++ {
+		// Openverse ids are random 36-character UUIDs, which do not squash
+		// down the way a run of zeros would.
+		id := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+			r.Uint32(), r.Intn(1<<16), r.Intn(1<<16), r.Intn(1<<16), r.Int63n(1<<48))
+		songs = append(songs, freeSong(id, "A song", "by"))
+	}
+	f.results = songs
+	searchAs(t, srv, liveMaya, "size")
+	var bytes int
+	if err := db.QueryRow(`SELECT pg_column_size(s.*) FROM music_searches s`).Scan(&bytes); err != nil {
+		t.Fatal(err)
+	}
+	if bytes > 1500 {
+		t.Errorf("one saved search of %d songs takes %d bytes, more than the "+
+			"kilobyte or so the README promises", musicPageSize, bytes)
+	}
+	t.Logf("one saved search of %d songs: %d bytes", musicPageSize, bytes)
+}
+
+func TestSavingASearchKeepsThemToTheLimitAtMostOnceAnHour(t *testing.T) {
+	srv, f := musicSetup(t)
+	prev := musicSavedMax
+	musicSavedMax = 1
+	t.Cleanup(func() { musicSavedMax = prev })
+	count := func() int {
+		var n int
+		db.QueryRow(`SELECT COUNT(*) FROM music_searches`).Scan(&n)
+		return n
+	}
+	f.results = []openverseAudio{freeSong("a", "A", "by")}
+	searchAs(t, srv, liveMaya, "one")
+	// An hour on: the next save keeps them to the limit.
+	musicPrune.Lock()
+	musicPrune.last = time.Now().Add(-2 * time.Hour)
+	musicPrune.Unlock()
+	searchAs(t, srv, liveMaya, "two")
+	if n := count(); n != 1 {
+		t.Fatalf("%d saved searches after a save an hour on, want the limit of 1", n)
+	}
+	// Within the hour: not again — a full clean-up on every search would
+	// cost more than the space it saves.
+	searchAs(t, srv, liveMaya, "three")
+	if n := count(); n != 2 {
+		t.Errorf("%d saved searches, want 2: kept to the limit twice within an hour", n)
 	}
 }
