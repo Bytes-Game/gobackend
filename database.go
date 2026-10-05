@@ -1779,15 +1779,16 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 	// though somebody had made a claim. See migrations/010.
 	creatorCategory := usableCategory(strings.ToLower(strings.TrimSpace(payload.Category)))
 	err = db.QueryRow(
-		`INSERT INTO challenges (creator_id, video_url, video_variants, thumbnail_url, prefix, subject, visibility, category, creator_category, category_source, emotion_tags, custom_tags, energy_level, battle_days, media_type)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id, created_at`,
+		`INSERT INTO challenges (creator_id, video_url, video_variants, thumbnail_url, prefix, subject, visibility, category, creator_category, category_source, emotion_tags, custom_tags, energy_level, battle_days, media_type, music_track_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id, created_at`,
 		creatorID, payload.VideoURL, variantsJSON, payload.ThumbnailURL, payload.Prefix, payload.Subject, payload.Visibility,
 		category, creatorCategory, categorySourceAtUpload(creatorCategory, category), emotionJSON, tagsJSON, energyLevel,
-		clampBattleDays(payload.BattleDays), mediaType,
+		clampBattleDays(payload.BattleDays), mediaType, payload.musicTrack,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return Challenge{}, err
 	}
+	countMusicUse(payload.musicTrack)
 
 	// The row is now waiting to be converted, so ask the worker to start
 	// rather than leaving it for the next scheduled run up to 30 minutes
@@ -2239,16 +2240,17 @@ func AcceptChallenge(payload AcceptChallengePayload) (ChallengeResponse, error) 
 	err = db.QueryRow(
 		`INSERT INTO challenge_responses
 			(challenge_id, responder_id, video_url, video_variants, thumbnail_url, duration_ms, caption, relevance_score,
-			 category, creator_category, category_source, custom_tags, emotion_tags, energy_level, media_type)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id, created_at`,
+			 category, creator_category, category_source, custom_tags, emotion_tags, energy_level, media_type, music_track_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id, created_at`,
 		cid, rid, payload.VideoURL, variantsJSON, payload.ThumbnailURL,
 		payload.DurationMs, payload.Caption, relevance,
 		category, responderCategory, categorySourceAtUpload(responderCategory, category),
-		tagsJSON, emotionJSON, energyLevel, mediaType,
+		tagsJSON, emotionJSON, energyLevel, mediaType, payload.musicTrack,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return ChallengeResponse{}, err
 	}
+	countMusicUse(payload.musicTrack)
 
 	// Same as CreateChallenge: this answer is waiting to be converted, so
 	// start the worker now instead of waiting out the timer. See

@@ -595,6 +595,9 @@ func main() {
 	api.HandleFunc("/challenges/{id}/people", authed(ChallengePeopleHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/share", authed(ShareChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/{id}", GetChallengeDetailHandler).Methods("GET", "OPTIONS")
+	// Free music for videos: search, and keep the song somebody picked. See free_music.go.
+	api.HandleFunc("/music/search", authed(MusicSearchHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/music/tracks", authed(PickMusicHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/feed/recommended", authed(RecommendedFeedHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/feed/following", authed(FollowingFeedHandler)).Methods("GET", "OPTIONS")
 	// Psychology-based recommendation engine (v2)
@@ -676,6 +679,7 @@ func main() {
 	// session length, new-content discovery, catalog coverage) with good/watch/bad
 	// verdicts. See admin_feed_health.go.
 	api.HandleFunc("/admin/feed-health", adminOnly(AdminFeedHealthHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/admin/music/block", adminOnly(AdminBlockMusicHandler)).Methods("POST", "OPTIONS")
 	// Experiment CRUD: upsert an experiment (or kill one with
 	// "active": false) without a redeploy — refresher propagates the
 	// change to every replica within 60s.
