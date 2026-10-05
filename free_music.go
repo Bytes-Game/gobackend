@@ -288,10 +288,10 @@ func openverseGet(ctx context.Context, path string, query url.Values, out any) e
 		openverseLogin.Lock()
 		openverseLogin.token = ""
 		openverseLogin.Unlock()
-		return errors.New("Openverse refused the login pass")
+		return errors.New("the music search refused the login pass")
 	default:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
-		return fmt.Errorf("Openverse answered %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("the music search answered %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return fmt.Errorf("unreadable answer from Openverse: %w", err)
