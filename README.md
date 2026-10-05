@@ -240,6 +240,7 @@ Everything is environment variables. Only the first two are required.
 | `ALLOWED_ORIGINS` | Comma-separated list of web origins allowed to call this API from a browser, e.g. `https://app.example.com,https://staging.example.com`. **Unset keeps the historical `*` wildcard.** Native mobile clients never send an `Origin` header and are unaffected either way. |
 | `MEILISEARCH_URL`, `MEILI_MASTER_KEY` | Full-text search. Search degrades gracefully when absent. |
 | `FCM_SERVICE_ACCOUNT_JSON`, `FCM_PROJECT` | Push notifications via FCM HTTP v1. Raw or base64-encoded service-account JSON. |
+| `OPENVERSE_CLIENT_ID`, `OPENVERSE_CLIENT_SECRET` | The free music search behind the video editor's Music button (`free_music.go`). Without them the whole server gets Openverse's visitor allowance — 200 searches a day — which is fine for testing and runs out fast with real users. Register a free app at Openverse (one form, then click the link in the email) and put the two values here. Answers are kept for six hours either way. |
 | `MULTI_REPLICA` | Set to `1` when running more than one instance. Switches rate limiting to a shared Redis token bucket and turns on cross-replica WebSocket delivery. |
 
 ---

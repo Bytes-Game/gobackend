@@ -60,9 +60,10 @@ func markViewerState(viewerID string, chs []*Challenge) {
 		return
 	}
 	// The counts are for everyone, signed in or not. So is whether a post is
-	// a photo.
+	// a photo, and the credit for its song.
 	fillCounts(chs)
 	fillMediaTypes(chs)
+	fillMusic(chs)
 	viewer, err := strconv.Atoi(viewerID)
 	if err != nil || viewer <= 0 {
 		return

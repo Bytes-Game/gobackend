@@ -64,6 +64,10 @@ var actionLimitTable = map[string]actionLimitConfig{
 	// Messaging — chat needs to feel instant for real conversations
 	// but a script could absolutely spam. 1 msg/sec sustained, burst
 	// of 10 for a quick exchange.
+	// Free music: searching while typing, and picking a song. Every search
+	// may cost one of the music library's daily allowance (free_music.go).
+	"music_search":     {tokensPerSecond: 0.5, burst: 15}, // 30/min, burst 15
+	"music_pick":       {tokensPerSecond: 0.2, burst: 10}, // 12/min, burst 10
 	"chat":             {tokensPerSecond: 1.0, burst: 10},
 	// "typing…" — the app sends at most one every few seconds while
 	// somebody types; anything faster is not a person.

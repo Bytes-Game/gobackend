@@ -109,6 +109,16 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "a photo challenge needs its photo", http.StatusBadRequest)
 		return
 	}
+	// The free song under the video, if any. See free_music.go.
+	music, msg := musicForPost(payload.MusicTrackID)
+	if msg == "" && isPhoto && music != nil {
+		msg = "a photo has no sound to put a song under"
+	}
+	if msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	payload.musicTrack = music
 
 	// What the app says the video runs to. Checked here so an obviously
 	// over-long upload is turned away before the server fetches any of it;
@@ -241,6 +251,7 @@ func GetChallengeDetailHandler(w http.ResponseWriter, r *http.Request) {
 	if responses == nil {
 		responses = []ChallengeResponse{}
 	}
+	fillResponseMusic(responses)
 
 	votes := GetVoteSummary(id)
 	if votes == nil {
@@ -325,6 +336,16 @@ func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload.MediaType = answerType
+	// The free song under the answer, if any. See free_music.go.
+	music, msg := musicForPost(payload.MusicTrackID)
+	if msg == "" && answerType == mediaPhoto && music != nil {
+		msg = "a photo has no sound to put a song under"
+	}
+	if msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	payload.musicTrack = music
 
 	// Tier-1 structural validation: duration bounds, video dedupe, one-per-challenge,
 	// challenge-still-open, per-user rate limit. Cheap checks that fire on every upload.

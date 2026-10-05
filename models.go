@@ -199,12 +199,17 @@ type Challenge struct {
 	ID string `json:"id"`
 	// What the post is made of: "photo", or a video when empty. An answer is
 	// always the same kind as its challenge. See photo_posts.go.
-	MediaType       string        `json:"mediaType,omitempty"`
-	CreatorID       string        `json:"creatorId"`
-	CreatorUsername string        `json:"creatorUsername"`
-	CreatorLeague   string        `json:"creatorLeague"`
-	VideoURL        string        `json:"videoUrl"`
-	VideoVariants   VideoVariants `json:"videoVariants,omitempty"`
+	MediaType string `json:"mediaType,omitempty"`
+	// The free song under the video, if it has one, with the credit its
+	// licence asks for; TopResponseMusic is the top answer's. See
+	// free_music.go.
+	Music            *MusicCredit  `json:"music,omitempty"`
+	TopResponseMusic *MusicCredit  `json:"topResponseMusic,omitempty"`
+	CreatorID        string        `json:"creatorId"`
+	CreatorUsername  string        `json:"creatorUsername"`
+	CreatorLeague    string        `json:"creatorLeague"`
+	VideoURL         string        `json:"videoUrl"`
+	VideoVariants    VideoVariants `json:"videoVariants,omitempty"`
 	// HLS master manifest URL (.m3u8). Set by the background transcode
 	// worker once it has produced the segmented bitrate ladder for this
 	// challenge. When non-empty, the client should prefer this over
@@ -370,6 +375,8 @@ type ChallengeResponse struct {
 	Likes             int           `json:"likes"`
 	Views             int           `json:"views"`
 	CreatedAt         string        `json:"createdAt"`
+	// The free song under this answer, if any. See free_music.go.
+	Music *MusicCredit `json:"music,omitempty"`
 	// Validation + community moderation fields
 	DurationMs     int     `json:"durationMs,omitempty"`
 	Caption        string  `json:"caption,omitempty"`
@@ -401,6 +408,11 @@ type CreateChallengePayload struct {
 	// (MediaType "photo") the photo. See photo_posts.go.
 	VideoURL  string `json:"videoUrl"`
 	MediaType string `json:"mediaType,omitempty"`
+	// The free song mixed into the video, by its id in the music library
+	// (POST /music/tracks). Empty for none. See free_music.go.
+	MusicTrackID string `json:"musicTrackId,omitempty"`
+	// The song once checked, for the insert. Set by the handler.
+	musicTrack *int64
 	// How many days voting runs once somebody accepts. At least seven, at
 	// most thirty; zero means seven. See clampBattleDays.
 	BattleDays int `json:"battleDays,omitempty"`
@@ -520,7 +532,10 @@ type AcceptChallengePayload struct {
 	VideoURL    string `json:"videoUrl"`
 	// "photo" for a photo answer, which a photo challenge needs; empty for a
 	// video. See photo_posts.go.
-	MediaType     string        `json:"mediaType,omitempty"`
+	MediaType string `json:"mediaType,omitempty"`
+	// The free song mixed into the answer, as for a challenge.
+	MusicTrackID  string `json:"musicTrackId,omitempty"`
+	musicTrack    *int64
 	VideoVariants VideoVariants `json:"videoVariants,omitempty"` // optional multi-bitrate variants from device-side transcode
 	ThumbnailURL  string        `json:"thumbnailUrl"`
 	// Tier-1 validation fields — required so the server can enforce length limits
