@@ -31,10 +31,12 @@ package main
 // How the server spends Openverse's allowance. Without an account it allows
 // 200 searches a day, from the whole server — fine for testing, not for an
 // app. With a free registered account (OPENVERSE_CLIENT_ID and
-// OPENVERSE_CLIENT_SECRET) it allows thousands. Either way every answer is
-// kept for six hours (musicCache), so the hundredth person to search
-// "happy" costs nothing, and when the allowance runs out the picker still
-// shows the songs people here have already used, and says search is busy.
+// OPENVERSE_CLIENT_SECRET) it allows 10,000. Either way every answer is
+// saved (music_searches) and used again for 30 days, by everybody, across
+// restarts — so the hundredth person to search "happy" costs nothing, and
+// neither does the first one next week. When the allowance runs out the
+// picker still shows saved answers and the songs people here have used, and
+// says search is busy.
 
 import (
 	"context"
@@ -358,7 +360,12 @@ func openverseTrack(ctx context.Context, id string) (MusicTrack, error) {
 
 var errMusicNotFree = errors.New("this song is not free to use")
 
-// ── The six-hour memory of searches ────────────────────────────────────────
+// ── Remembered searches ────────────────────────────────────────────────────
+//
+// Two layers. The server's memory answers the same search again within six
+// hours without a trip to the database; it is lost on every restart (and
+// Render restarts a sleeping server often). The database keeps every answer
+// for 30 days, for everybody, however often the server restarts.
 
 type musicCacheEntry struct {
 	at   time.Time
@@ -375,26 +382,45 @@ const (
 	musicCacheMax = 2000
 )
 
-// searchFreeMusic is [openverseSearch], remembered. When Openverse cannot
-// answer, a remembered answer is used however old it is, and the second
-// result says so.
+// searchFreeMusic is [openverseSearch], remembered: in memory for six hours,
+// saved in the database for 30 days. When Openverse cannot answer, a
+// remembered answer is used however old it is, and the second result says
+// so.
 func searchFreeMusic(ctx context.Context, q string, page int) (musicPage, bool, error) {
-	key := strings.ToLower(q) + "|" + strconv.Itoa(page)
+	query := strings.ToLower(q)
+	key := query + "|" + strconv.Itoa(page)
 	musicCache.Lock()
 	hit, ok := musicCache.m[key]
 	musicCache.Unlock()
 	if ok && time.Since(hit.at) < musicCacheFor {
 		return hit.page, false, nil
 	}
+	saved, savedAt, isSaved := loadSavedMusic(ctx, query, page)
+	if isSaved && time.Since(savedAt) < musicSavedFor {
+		rememberMusic(key, saved)
+		return saved, false, nil
+	}
 	fresh, err := openverseSearch(ctx, q, page)
 	if err != nil {
-		if ok {
+		switch {
+		case ok:
 			log.Printf("[music] search %q page %d: %v — showing what it found "+
 				"%s ago", q, page, err, time.Since(hit.at).Round(time.Minute))
 			return hit.page, true, nil
+		case isSaved:
+			log.Printf("[music] search %q page %d: %v — showing the answer saved "+
+				"%s ago", q, page, err, time.Since(savedAt).Round(time.Hour))
+			return saved, true, nil
 		}
 		return musicPage{}, false, err
 	}
+	saveMusicSearch(ctx, query, page, fresh)
+	rememberMusic(key, fresh)
+	return fresh, false, nil
+}
+
+// rememberMusic keeps [p] in the server's memory under [key].
+func rememberMusic(key string, p musicPage) {
 	musicCache.Lock()
 	if len(musicCache.m) >= musicCacheMax {
 		var oldest string
@@ -406,9 +432,170 @@ func searchFreeMusic(ctx context.Context, q string, page int) (musicPage, bool, 
 		}
 		delete(musicCache.m, oldest)
 	}
-	musicCache.m[key] = musicCacheEntry{at: time.Now(), page: fresh}
+	musicCache.m[key] = musicCacheEntry{at: time.Now(), page: p}
 	musicCache.Unlock()
-	return fresh, false, nil
+}
+
+// How long a saved answer is used before Openverse is asked again, so new
+// songs turn up and songs that have gone away drop out.
+const musicSavedFor = 30 * 24 * time.Hour
+
+// musicSavedMax is the most searches kept. One is a list of 20 song ids, a
+// kilobyte or so; the songs are kept once each however many searches found
+// them. A variable so tests can make it small.
+var musicSavedMax = 5000
+
+// loadSavedMusic is the saved answer to [query] page [page], and when it was
+// fetched. (Songs taken down since are left out by the search handler, as
+// they are from a fresh answer: see withoutBlocked.)
+func loadSavedMusic(ctx context.Context, query string, page int) (musicPage, time.Time, bool) {
+	if db == nil {
+		return musicPage{}, time.Time{}, false
+	}
+	var ids []string
+	var hasMore bool
+	var fetched time.Time
+	err := db.QueryRowContext(ctx, `
+		SELECT source_ids, has_more, fetched_at FROM music_searches
+		 WHERE query = $1 AND page = $2`, query, page).
+		Scan(pq.Array(&ids), &hasMore, &fetched)
+	if errors.Is(err, sql.ErrNoRows) {
+		return musicPage{}, time.Time{}, false
+	}
+	if queryFailed("reading a saved music search",
+		"Openverse is asked instead, spending one of the day's searches", err) {
+		return musicPage{}, time.Time{}, false
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT `+musicTrackColumns+`
+		  FROM music_tracks
+		 WHERE source = $1 AND source_id = ANY($2::text[])
+		 ORDER BY array_position($2::text[], source_id)`,
+		musicSourceOpenverse, pq.Array(ids))
+	if queryFailed("reading the songs of a saved music search",
+		"Openverse is asked instead, spending one of the day's searches", err) {
+		return musicPage{}, time.Time{}, false
+	}
+	defer rows.Close()
+	tracks := make([]MusicTrack, 0, len(ids))
+	bad := 0
+	for rows.Next() {
+		t, err := scanMusicTrack(rows.Scan)
+		if scanFailed("a song of a saved music search", err, &bad) {
+			continue
+		}
+		// Our id is for songs somebody picked; a search result has none.
+		if t.UseCount == 0 {
+			t.ID = ""
+		}
+		tracks = append(tracks, t)
+	}
+	if err := rows.Err(); err != nil {
+		queryFailed("reading the songs of a saved music search", "some are missing", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE music_searches SET used_at = NOW(), times_used = times_used + 1
+		 WHERE query = $1 AND page = $2`, query, page); err != nil {
+		queryFailed("noting a saved music search was used",
+			"it may be dropped sooner than it should when space runs short", err)
+	}
+	return musicPage{Tracks: tracks, HasMore: hasMore}, fetched, true
+}
+
+// saveMusicSearch keeps Openverse's answer [p] to [query] page [page]: its
+// songs once each in music_tracks, and the list of them here.
+func saveMusicSearch(ctx context.Context, query string, page int, p musicPage) {
+	if db == nil {
+		return
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if queryFailed("saving a music search", "the next person to search it "+
+		"spends another of the day's searches", err) {
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	ids := make([]string, 0, len(p.Tracks))
+	for _, t := range p.Tracks {
+		if _, err := tx.ExecContext(ctx, musicTrackUpsert,
+			t.Source, t.SourceID, t.Title, t.Artist, t.DurationMs, t.AudioURL, t.License,
+			t.LicenseVersion, t.LicenseURL, t.SourceURL, t.Provider, t.Attribution,
+			pq.Array(nonNilStrings(t.Genres))); err != nil {
+			queryFailed("saving a song from a music search", "the search is not "+
+				"saved, and the next person to search it spends another search", err)
+			return
+		}
+		ids = append(ids, t.SourceID)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO music_searches (query, page, source_ids, has_more)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (query, page) DO UPDATE SET
+			source_ids = EXCLUDED.source_ids, has_more = EXCLUDED.has_more,
+			fetched_at = NOW(), used_at = NOW(),
+			times_used = music_searches.times_used + 1`,
+		query, page, pq.Array(ids), p.HasMore); err != nil {
+		queryFailed("saving a music search", "the next person to search it "+
+			"spends another of the day's searches", err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		queryFailed("saving a music search", "the next person to search it "+
+			"spends another of the day's searches", err)
+		return
+	}
+	maybePruneSavedMusic(ctx)
+}
+
+var musicPrune struct {
+	sync.Mutex
+	last time.Time
+}
+
+// maybePruneSavedMusic runs [pruneSavedMusic] at most once an hour.
+func maybePruneSavedMusic(ctx context.Context) {
+	musicPrune.Lock()
+	due := time.Since(musicPrune.last) > time.Hour
+	if due {
+		musicPrune.last = time.Now()
+	}
+	musicPrune.Unlock()
+	if due {
+		pruneSavedMusic(ctx)
+	}
+}
+
+// pruneSavedMusic keeps the saved searches to [musicSavedMax], dropping the
+// ones used least recently, and removes the songs nothing needs any more:
+// in no saved search, never posted, not taken down, and not seen for a week
+// (so one somebody has just picked is never removed under them).
+func pruneSavedMusic(ctx context.Context) {
+	res, err := db.ExecContext(ctx, `
+		DELETE FROM music_searches
+		 WHERE (query, page) IN (
+			SELECT query, page FROM music_searches
+			 ORDER BY used_at DESC, query, page
+			OFFSET $1)`, musicSavedMax)
+	if queryFailed("dropping the oldest saved music searches",
+		"the saved searches grow past their limit", err) || res == nil {
+		return
+	}
+	searches, _ := res.RowsAffected()
+	res, err = db.ExecContext(ctx, `
+		DELETE FROM music_tracks m
+		 WHERE m.use_count = 0 AND NOT m.blocked
+		   AND m.seen_at < NOW() - INTERVAL '7 days'
+		   AND NOT EXISTS (SELECT 1 FROM music_searches s WHERE m.source_id = ANY(s.source_ids))
+		   AND NOT EXISTS (SELECT 1 FROM challenges c WHERE c.music_track_id = m.id)
+		   AND NOT EXISTS (SELECT 1 FROM challenge_responses r WHERE r.music_track_id = m.id)`)
+	if queryFailed("removing songs no saved search needs",
+		"they stay, taking a little space", err) || res == nil {
+		return
+	}
+	songs, _ := res.RowsAffected()
+	if searches > 0 || songs > 0 {
+		log.Printf("[music] kept the saved searches to %d: dropped %d searches "+
+			"and %d songs nothing needed", musicSavedMax, searches, songs)
+	}
 }
 
 // ── Songs people here have used ────────────────────────────────────────────
@@ -504,18 +691,7 @@ func withoutBlocked(ctx context.Context, tracks []MusicTrack) []MusicTrack {
 // recordMusicTrack keeps [t] (read fresh from Openverse) and answers it
 // with our own id. A song taken down here is refused.
 func recordMusicTrack(ctx context.Context, t MusicTrack) (MusicTrack, error) {
-	row := db.QueryRowContext(ctx, `
-		INSERT INTO music_tracks
-			(source, source_id, title, artist, duration_ms, audio_url, license,
-			 license_version, license_url, source_url, provider, attribution, genres)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-		ON CONFLICT (source, source_id) DO UPDATE SET
-			title = EXCLUDED.title, artist = EXCLUDED.artist,
-			duration_ms = EXCLUDED.duration_ms, audio_url = EXCLUDED.audio_url,
-			license = EXCLUDED.license, license_version = EXCLUDED.license_version,
-			license_url = EXCLUDED.license_url, source_url = EXCLUDED.source_url,
-			provider = EXCLUDED.provider, attribution = EXCLUDED.attribution,
-			genres = EXCLUDED.genres
+	row := db.QueryRowContext(ctx, musicTrackUpsert+`
 		RETURNING `+musicTrackColumns+`, blocked`,
 		t.Source, t.SourceID, t.Title, t.Artist, t.DurationMs, t.AudioURL, t.License,
 		t.LicenseVersion, t.LicenseURL, t.SourceURL, t.Provider, t.Attribution,
@@ -534,6 +710,22 @@ func recordMusicTrack(ctx context.Context, t MusicTrack) (MusicTrack, error) {
 }
 
 var errMusicBlocked = errors.New("this song has been taken down here")
+
+// musicTrackUpsert keeps a song read from Openverse: new, or brought up to
+// date. Whether it is taken down, and how often it is used, are ours, and
+// left as they are.
+const musicTrackUpsert = `
+	INSERT INTO music_tracks
+		(source, source_id, title, artist, duration_ms, audio_url, license,
+		 license_version, license_url, source_url, provider, attribution, genres)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+	ON CONFLICT (source, source_id) DO UPDATE SET
+		title = EXCLUDED.title, artist = EXCLUDED.artist,
+		duration_ms = EXCLUDED.duration_ms, audio_url = EXCLUDED.audio_url,
+		license = EXCLUDED.license, license_version = EXCLUDED.license_version,
+		license_url = EXCLUDED.license_url, source_url = EXCLUDED.source_url,
+		provider = EXCLUDED.provider, attribution = EXCLUDED.attribution,
+		genres = EXCLUDED.genres, seen_at = NOW()`
 
 func nonNilStrings(s []string) []string {
 	if s == nil {
