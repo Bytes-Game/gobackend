@@ -181,6 +181,7 @@ func TestLists_FriendsOnlyStayClosedAndShowFaces(t *testing.T) {
 	resetActionLimiters(t)
 	seedNotifyPeople(t)
 	cid := postChallenge(t, "friends", nil)
+	waitFriendsTold(t, cid, 2)
 	if _, err := db.Exec(`INSERT INTO challenge_likes (challenge_id, user_id) VALUES ($1, $2)`,
 		cid, nfFriendA); err != nil {
 		t.Fatal(err)
@@ -319,6 +320,7 @@ func TestAbout_FriendsOnlyStaysClosed(t *testing.T) {
 	resetActionLimiters(t)
 	seedNotifyPeople(t)
 	cid := postChallenge(t, "friends", nil)
+	waitFriendsTold(t, cid, 2)
 	if code, _ := askAbout(t, nfStranger, cid, ""); code != 404 {
 		t.Errorf("a stranger asking about a friends-only video got %d, want 404", code)
 	}

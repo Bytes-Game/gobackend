@@ -109,6 +109,31 @@ func waitInbox(t *testing.T, user, want int) []InboxItem {
 	}
 }
 
+// waitFriendsTold waits until the background telling of a friends-only
+// post has queued [want] pushes — the last thing it does for each friend.
+//
+// A test that posts one and finishes sooner leaves that telling running
+// into the next test, after this test's database is gone. It then crashes
+// the whole run (it did, in CI), and which test it takes down is luck.
+func waitFriendsTold(t *testing.T, cid string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM notification_outbox
+		                        WHERE dedupe_key = $1`, "friend_challenge:"+cid).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after 3s only %d of %d friends were told about challenge %s", n, want, cid)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func TestFriendsOnly_EveryFriendIsToldAndNobodyElse(t *testing.T) {
 	defer withDB(t)()
 	resetRedis(t)
@@ -365,8 +390,7 @@ func TestInbox_MarkReadClearsTheCount(t *testing.T) {
 	resetRedis(t)
 	resetActionLimiters(t)
 	seedNotifyPeople(t)
-	postChallenge(t, "friends", nil)
-	waitInbox(t, nfFriendA, 1)
+	waitFriendsTold(t, postChallenge(t, "friends", nil), 2)
 	if _, unread := inbox(t, nfFriendA); unread != 1 {
 		t.Fatalf("unread %d, want 1", unread)
 	}
