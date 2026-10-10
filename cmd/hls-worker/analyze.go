@@ -113,6 +113,14 @@ type videoAnalysis struct {
 	// matchSection in understand.go.
 	QuestionMatch string `json:"questionMatch,omitempty"`
 
+	// A sentence or two saying what happens in the video, for the app's
+	// "What is this video about?", from whichever understanding pass ran.
+	// See understoodAbout in understand.go.
+	About string `json:"about,omitempty"`
+	// What the model went on for About: "said" (the words in the video) or
+	// "shown" (its pictures, for one that says nothing).
+	AboutFrom string `json:"aboutFrom,omitempty"`
+
 	// Which passes actually ran, so the backend can tell "quiet video" from
 	// "we never listened".
 	Passes []string `json:"passes,omitempty"`
@@ -233,6 +241,10 @@ func analyzeVideo(ctx context.Context, src, question string) videoAnalysis {
 		// understand.go.
 		a.Topics = read.Topics
 		a.QuestionMatch = read.Match
+		a.About = read.About
+		if read.About != "" {
+			a.AboutFrom = "said"
+		}
 	}
 
 	// And the other half: for a video that said nothing, LOOK at it.
@@ -260,6 +272,10 @@ func analyzeVideo(ctx context.Context, src, question string) videoAnalysis {
 			}
 			if seen.Match != "" {
 				a.QuestionMatch = seen.Match
+			}
+			if seen.About != "" {
+				a.About = seen.About
+				a.AboutFrom = "shown"
 			}
 		}
 	}

@@ -109,6 +109,31 @@ func waitInbox(t *testing.T, user, want int) []InboxItem {
 	}
 }
 
+// waitFriendsTold waits until the background telling of a friends-only
+// post has queued [want] pushes — the last thing it does for each friend.
+//
+// A test that posts one and finishes sooner leaves that telling running
+// into the next test, after this test's database is gone. It then crashes
+// the whole run (it did, in CI), and which test it takes down is luck.
+func waitFriendsTold(t *testing.T, cid string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM notification_outbox
+		                        WHERE dedupe_key = $1`, "friend_challenge:"+cid).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after 3s only %d of %d friends were told about challenge %s", n, want, cid)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func TestFriendsOnly_EveryFriendIsToldAndNobodyElse(t *testing.T) {
 	defer withDB(t)()
 	resetRedis(t)
@@ -280,7 +305,7 @@ func TestAccepting_BothPlayersAreToldDifferentThings(t *testing.T) {
 	}
 }
 
-func TestVoting_TellsNobodyButThePlayersCanSeeWhoVoted(t *testing.T) {
+func TestVoting_TellsNobodyButAnyoneWatchingCanSeeWhoVoted(t *testing.T) {
 	defer withDB(t)()
 	resetRedis(t)
 	resetActionLimiters(t)
@@ -315,10 +340,12 @@ func TestVoting_TellsNobodyButThePlayersCanSeeWhoVoted(t *testing.T) {
 		_ = json.Unmarshal(rec.Body.Bytes(), &body)
 		return rec.Code, body.Sides
 	}
-	for _, player := range []int{nfCreator, nfAnswerer} {
-		code, sides := voters(player)
+	// Open to anyone who may watch it, the way Instagram shows who liked a
+	// post — the players, and people who are not in the battle at all.
+	for _, viewer := range []int{nfCreator, nfAnswerer, nfVoter, nfStranger} {
+		code, sides := voters(viewer)
 		if code != 200 || len(sides) != 2 {
-			t.Fatalf("player %d cannot see the votes: %d %+v", player, code, sides)
+			t.Fatalf("user %d cannot see the votes: %d %+v", viewer, code, sides)
 		}
 		if len(sides[0].Voters) != 0 || len(sides[1].Voters) != 1 ||
 			sides[1].Voters[0].Username != nfName(nfVoter) ||
@@ -326,14 +353,9 @@ func TestVoting_TellsNobodyButThePlayersCanSeeWhoVoted(t *testing.T) {
 			t.Fatalf("the vote is on the wrong side: %+v", sides)
 		}
 	}
-	for _, outsider := range []int{nfVoter, nfStranger} {
-		if code, _ := voters(outsider); code != 403 {
-			t.Errorf("user %d is not in the battle but got %d", outsider, code)
-		}
-	}
 }
 
-func TestLikers_OnlyThePosterSeesWhoLiked(t *testing.T) {
+func TestLikers_AnyoneWatchingSeesWhoLiked(t *testing.T) {
 	defer withDB(t)()
 	resetRedis(t)
 	resetActionLimiters(t)
@@ -355,12 +377,11 @@ func TestLikers_OnlyThePosterSeesWhoLiked(t *testing.T) {
 		_ = json.Unmarshal(rec.Body.Bytes(), &body)
 		return rec.Code, body.Likers
 	}
-	code, people := likers(nfCreator)
-	if code != 200 || len(people) != 1 || people[0].Username != nfName(nfFriendA) {
-		t.Fatalf("the poster cannot see who liked: %d %+v", code, people)
-	}
-	if code, _ := likers(nfFriendA); code != 403 {
-		t.Errorf("someone else could see who liked: %d", code)
+	for _, viewer := range []int{nfCreator, nfFriendA, nfStranger} {
+		code, people := likers(viewer)
+		if code != 200 || len(people) != 1 || people[0].Username != nfName(nfFriendA) {
+			t.Fatalf("user %d cannot see who liked: %d %+v", viewer, code, people)
+		}
 	}
 }
 
@@ -369,8 +390,7 @@ func TestInbox_MarkReadClearsTheCount(t *testing.T) {
 	resetRedis(t)
 	resetActionLimiters(t)
 	seedNotifyPeople(t)
-	postChallenge(t, "friends", nil)
-	waitInbox(t, nfFriendA, 1)
+	waitFriendsTold(t, postChallenge(t, "friends", nil), 2)
 	if _, unread := inbox(t, nfFriendA); unread != 1 {
 		t.Fatalf("unread %d, want 1", unread)
 	}

@@ -38,6 +38,11 @@ type User struct {
 	// in /profile so the client can render the "2FA on" badge in
 	// the settings sheet without a second round-trip.
 	TwoFactorEnabled bool `json:"twoFactorEnabled,omitempty"`
+	// AvatarURL is their profile photo; empty for none. ProfileTag is the
+	// word they picked for what their profile is about; empty for none.
+	// See profile_photo.go.
+	AvatarURL  string `json:"avatarUrl,omitempty"`
+	ProfileTag string `json:"profileTag,omitempty"`
 }
 
 // SearchResponse wraps search results with total count for pagination.

@@ -782,3 +782,99 @@ func TestMatch_OnlyThreeAnswersCount(t *testing.T) {
 		t.Errorf("an answer to a question nobody asked was taken: %q", got)
 	}
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// ABOUT: THE SENTENCE A VIEWER READS
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Unlike the tags and topics, this is read word for word by a person, under
+// somebody else's video. So what reaches them is shaped: one tidy paragraph,
+// never the model's placeholder, never a runaway.
+
+func TestAbout_KeepsTheSentenceTidied(t *testing.T) {
+	got := understoodAbout(`{"categories": ["food"], "feelings": [], "topics": ["recipe"], ` +
+		`"about": "  A man makes  chai on a  street stall and says it is the best in the city. "}`)
+	want := "A man makes chai on a street stall and says it is the best in the city."
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestAbout_IsNothingWhenTheModelCouldNotTell(t *testing.T) {
+	for _, said := range []string{`""`, `"..."`, `"none"`, `"Unknown."`, `"n/a"`, `"other"`} {
+		raw := `{"categories": ["other"], "feelings": [], "topics": [], "about": ` + said + `}`
+		if got := understoodAbout(raw); got != "" {
+			t.Errorf("the model said %s and %q would be shown to a viewer as "+
+				"if it described the video", said, got)
+		}
+	}
+	if got := understoodAbout("no json here at all"); got != "" {
+		t.Errorf("an answer with no JSON became %q", got)
+	}
+}
+
+func TestAbout_ARunawayIsCutAtItsLastFullSentence(t *testing.T) {
+	long := strings.Repeat("She dances in the rain and the crowd joins in. ", 12)
+	got := understoodAbout(`{"categories": ["dance"], "about": "` + long + `"}`)
+	if n := len([]rune(got)); n > understandAboutMaxLen || n == 0 {
+		t.Fatalf("got %d runes, want at most %d and more than none", n, understandAboutMaxLen)
+	}
+	if !strings.HasSuffix(got, ".") {
+		t.Errorf("cut mid-sentence: %q", got)
+	}
+}
+
+func TestAbout_BothPromptsAskForIt(t *testing.T) {
+	// The reading pass and the looking pass are the two places it can come
+	// from: a talking video only ever gets the first, a silent one only the
+	// second. A prompt that stops asking is a feature that silently stops.
+	for name, p := range map[string]string{
+		"reading": buildUnderstandPrompt("a man explains how to make chai at home", ""),
+		"looking": buildFramesPrompt(""),
+	} {
+		if !strings.Contains(p, `"about": "..."`) {
+			t.Errorf("the %s prompt does not ask for the about field", name)
+		}
+		if !strings.Contains(p, "never invent names") {
+			t.Errorf("the %s prompt does not forbid making things up", name)
+		}
+	}
+}
+
+func TestAbout_TheAnswerHasRoomForIt(t *testing.T) {
+	// An answer cut short is not JSON, and then every field is lost, not just
+	// the sentence. 96 tokens was room for the labels alone.
+	if understandMaxOutput < 160 {
+		t.Fatalf("understandMaxOutput is %d: too little room for the labels "+
+			"plus two sentences", understandMaxOutput)
+	}
+}
+
+func TestAbout_ReachesWhatIsSentBack(t *testing.T) {
+	// The sentence is only worth anything if it lands in the analysis the
+	// backend stores. Read with comments stripped, so a comment describing
+	// the wire cannot stand in for the wire itself.
+	raw, err := os.ReadFile("analyze.go")
+	if err != nil {
+		t.Fatalf("read analyze.go: %v", err)
+	}
+	var code strings.Builder
+	for _, line := range strings.Split(string(raw), "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		code.WriteString(line + "\n")
+	}
+	src := code.String()
+	for _, want := range []string{
+		"`json:\"about,omitempty\"`",
+		"a.About = read.About",
+		"a.About = seen.About",
+		"`json:\"aboutFrom,omitempty\"`",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("analyze.go no longer has %s, so the about sentence never "+
+				"reaches the backend", want)
+		}
+	}
+}
