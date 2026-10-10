@@ -328,3 +328,77 @@ func TestAbout_FriendsOnlyStaysClosed(t *testing.T) {
 		t.Errorf("a friend asking got %d", code)
 	}
 }
+
+// pendingDeletion says whether [prefix] is queued for removal from storage.
+func pendingDeletion(t *testing.T, prefix string) bool {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pending_media_deletions
+	                        WHERE object_prefix = $1`, prefix).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n > 0
+}
+
+func TestProfilePhoto_AReplacedPhotoIsRemovedFromStorage(t *testing.T) {
+	defer withDB(t)()
+	resetRedis(t)
+	resetActionLimiters(t)
+	seedNotifyPeople(t)
+	base := withPhotoStorage(t)
+	uid := strconv.Itoa(nfCreator)
+	defer db.Exec(`UPDATE users SET avatar_url = '' WHERE id = $1`, nfCreator)
+	defer db.Exec(`DELETE FROM pending_media_deletions WHERE object_prefix LIKE $1`, "u/"+uid+"/%")
+	db.Exec(`DELETE FROM pending_media_deletions WHERE object_prefix LIKE $1`, "u/"+uid+"/%")
+
+	first := base + "/u/" + uid + "/upA/photo.jpg"
+	second := base + "/u/" + uid + "/upB/photo.jpg"
+	if code := patchProfile(t, nfCreator, map[string]any{"avatarUrl": first}); code != 200 {
+		t.Fatalf("first photo answered %d", code)
+	}
+	if pendingDeletion(t, "u/"+uid+"/upA/") {
+		t.Fatal("the photo in use was queued for removal")
+	}
+	if code := patchProfile(t, nfCreator, map[string]any{"avatarUrl": second}); code != 200 {
+		t.Fatalf("second photo answered %d", code)
+	}
+	if !pendingDeletion(t, "u/"+uid+"/upA/") {
+		t.Error("the replaced photo stays online")
+	}
+	if pendingDeletion(t, "u/"+uid+"/upB/") {
+		t.Error("the new photo was queued for removal")
+	}
+	// Taken away altogether: that one goes too.
+	if code := patchProfile(t, nfCreator, map[string]any{"avatarUrl": ""}); code != 200 {
+		t.Fatalf("removing answered %d", code)
+	}
+	if !pendingDeletion(t, "u/"+uid+"/upB/") {
+		t.Error("the removed photo stays online")
+	}
+}
+
+func TestAccountDelete_EverythingTheyUploadedIsQueuedForRemoval(t *testing.T) {
+	defer withDB(t)()
+	resetRedis(t)
+	const gone = 9711
+	if _, err := db.Exec(`INSERT INTO users (id, username, password, avatar_url)
+	                       VALUES ($1, 'leaving_user', 'x', 'https://media.example/u/9711/a/photo.jpg')
+	                       ON CONFLICT (id) DO NOTHING`, gone); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Exec(`DELETE FROM pending_media_deletions WHERE object_prefix = 'u/9711/'`)
+
+	r := withAuth(httptest.NewRequest("DELETE", "/api/v1/users/9711", nil), "9711", "leaving_user")
+	r = mux.SetURLVars(r, map[string]string{"id": "9711"})
+	w := httptest.NewRecorder()
+	DeleteAccountHandler(w, r)
+	if w.Code != 200 {
+		t.Fatalf("delete answered %d: %s", w.Code, w.Body.String())
+	}
+	if _, found := GetUserByID("9711"); found {
+		t.Fatal("the account is still there")
+	}
+	if !pendingDeletion(t, "u/9711/") {
+		t.Error("their uploads — profile photo, chat photos — stay in storage")
+	}
+}

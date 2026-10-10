@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -86,6 +87,9 @@ func validateChallengeResponseSubmission(payload AcceptChallengePayload, challen
 	}
 	if challenge.Status == "removed" {
 		return fmt.Errorf("this challenge has been removed")
+	}
+	if challenge.ClosedToBattles {
+		return errors.New(notOpenToBattles)
 	}
 
 	// --- Same user can't reuse the same video on any challenge ---

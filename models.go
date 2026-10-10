@@ -230,8 +230,14 @@ type Challenge struct {
 	Visibility     string   `json:"visibility"`          // "arena" or "friends"
 	VisibleTo      []string `json:"visibleTo,omitempty"` // friends IDs (empty = all friends)
 	Status         string   `json:"status"`              // "open", "active", "completed", "expired"
-	Likes          int      `json:"likes"`
-	Views          int      `json:"views"`
+	// ClosedToBattles says nobody may answer this post: the owner made it a
+	// normal post. Absent (false) means open to battles, which is how every
+	// post worked before the switch existed — so a list that forgets to
+	// fill it errs towards the old behaviour, and answering is refused by
+	// the server anyway. See battles_open.go.
+	ClosedToBattles bool `json:"closedToBattles,omitempty"`
+	Likes           int  `json:"likes"`
+	Views           int  `json:"views"`
 	// Live count of comments on this challenge. Computed from
 	// challenge_comments at the feed-handler boundary so the reels right-rail
 	// can render the same digit the comment sheet shows. Omitempty keeps the
@@ -431,11 +437,16 @@ type CreateChallengePayload struct {
 	ThumbnailURL  string        `json:"thumbnailUrl"`
 	Prefix        string        `json:"prefix"`
 	Subject       string        `json:"subject"`
-	Visibility    string        `json:"visibility"`  // "arena" or "friends"
-	VisibleTo     []string      `json:"visibleTo"`   // friend IDs (empty = all)
-	Category      string        `json:"category"`    // "comedy","motivation","sports","dance",etc.
-	EmotionTags   []string      `json:"emotionTags"` // ["happy","intense","inspiring"]
-	EnergyLevel   string        `json:"energyLevel"` // "low","medium","high"
+	Visibility    string        `json:"visibility"` // "arena" or "friends"
+	VisibleTo     []string      `json:"visibleTo"`  // friend IDs (empty = all)
+	// OpenToBattles: whether anyone may answer it with their own video.
+	// Absent means yes — older apps do not send it. A post that is not open
+	// needs no question opener: Subject is then its caption, and Prefix may
+	// be empty. See battles_open.go.
+	OpenToBattles *bool    `json:"openToBattles,omitempty"`
+	Category      string   `json:"category"`    // "comedy","motivation","sports","dance",etc.
+	EmotionTags   []string `json:"emotionTags"` // ["happy","intense","inspiring"]
+	EnergyLevel   string   `json:"energyLevel"` // "low","medium","high"
 	// Tags are the creator's own words for what the video is about. Cleaned
 	// and capped on the way in — see content_tags.go. They pick the category
 	// when the creator did not choose one, and they pull videos that share a

@@ -148,7 +148,9 @@ func notifyUser(n InboxNote) {
 // challengeTitle is how a challenge is quoted in a notification.
 func challengeTitle(prefix, subject string) string {
 	t := strings.TrimSpace(prefix + " " + subject)
-	if t != "" && !strings.HasSuffix(t, "?") {
+	// A question ends in "?". A normal post has no opener — its subject is
+	// its caption (battles_open.go) — and is not a question.
+	if strings.TrimSpace(prefix) != "" && t != "" && !strings.HasSuffix(t, "?") {
 		t += "?"
 	}
 	return truncateText(t, 80)

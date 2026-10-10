@@ -162,6 +162,7 @@ func penaltyRating(rating, penalty int) int {
 // nothing — a video is never checked against a blank.
 func jobQuestion(table string, id int) string {
 	var prefix, subject string
+	open := true
 	var err error
 	if table == "challenge_responses" {
 		err = db.QueryRow(`
@@ -171,11 +172,16 @@ func jobQuestion(table string, id int) string {
 			 WHERE cr.id = $1`, id).Scan(&prefix, &subject)
 	} else {
 		err = db.QueryRow(`
-			SELECT COALESCE(prefix, ''), COALESCE(subject, '')
-			  FROM challenges WHERE id = $1`, id).Scan(&prefix, &subject)
+			SELECT COALESCE(prefix, ''), COALESCE(subject, ''), open_to_battles
+			  FROM challenges WHERE id = $1`, id).Scan(&prefix, &subject, &open)
 	}
 	if queryFailed(fmt.Sprintf("jobQuestion: reading the challenge for %s id=%d", table, id),
 		"the worker is not asked whether this video matches its challenge", err) {
+		return ""
+	}
+	// A normal post's words are a caption, not a challenge: there is nothing
+	// for its video to match, and nobody to mislead. See battles_open.go.
+	if !open {
 		return ""
 	}
 	return challengeTitle(prefix, subject)
@@ -603,10 +609,11 @@ func ReportOffTopicHandler(w http.ResponseWriter, r *http.Request) {
 // what to tell the person.
 func reportOffTopic(ctx context.Context, uid, cid, rid int) (int, string, error) {
 	var owner int
+	open := true
 	var err error
 	if rid == 0 {
 		err = db.QueryRowContext(ctx, `
-			SELECT creator_id FROM challenges WHERE id = $1`, cid).Scan(&owner)
+			SELECT creator_id, open_to_battles FROM challenges WHERE id = $1`, cid).Scan(&owner, &open)
 	} else {
 		err = db.QueryRowContext(ctx, `
 			SELECT responder_id FROM challenge_responses
@@ -620,6 +627,10 @@ func reportOffTopic(ctx context.Context, uid, cid, rid int) (int, string, error)
 	}
 	if owner == uid {
 		return http.StatusForbidden, "You can't report your own video.", nil
+	}
+	if !open {
+		return http.StatusConflict, "This is a normal post, not a challenge, so " +
+			"there is nothing for it to match.", nil
 	}
 
 	if rid == 0 {

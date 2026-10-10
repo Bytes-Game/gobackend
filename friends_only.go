@@ -136,6 +136,16 @@ func notifyFriendsOfChallenge(c Challenge) {
 		body = fmt.Sprintf("challenged you: “%s”", title)
 		pushTitle = fmt.Sprintf("%s challenged you", c.CreatorUsername)
 	}
+	// A normal post is not a challenge, and must not say it is. See
+	// battles_open.go.
+	if c.ClosedToBattles {
+		body = fmt.Sprintf("shared a post with friends: “%s”", title)
+		pushTitle = fmt.Sprintf("%s shared a post with friends", c.CreatorUsername)
+		if picked {
+			body = fmt.Sprintf("shared a post with you: “%s”", title)
+			pushTitle = fmt.Sprintf("%s shared a post with you", c.CreatorUsername)
+		}
+	}
 	for _, f := range people {
 		notifyUser(InboxNote{
 			UserID:      f.id,
