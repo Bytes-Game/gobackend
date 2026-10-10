@@ -223,7 +223,7 @@ func TestCounts_EveryScreenGetsTheSameCounts(t *testing.T) {
 	}
 }
 
-func TestCounts_WhoLikedVotedShared_ForThePeopleInIt(t *testing.T) {
+func TestCounts_WhoLikedVotedShared_ForAnyoneWatching(t *testing.T) {
 	defer withDB(t)()
 	cid, rid := liveBattle(t)
 	ridN, _ := strconv.Atoi(rid)
@@ -267,7 +267,9 @@ func TestCounts_WhoLikedVotedShared_ForThePeopleInIt(t *testing.T) {
 		{"votes", nil, []string{"voter6301"}},
 		{"shares", []string{"voter6302"}, nil},
 	} {
-		for _, viewer := range []string{"1", "2"} { // the poster and the answerer
+		// The poster, the answerer, and somebody outside the battle: open
+		// to anyone who may watch it, the way Instagram shows who liked.
+		for _, viewer := range []string{"1", "2", "6301"} {
 			code, sides := ask(viewer, c.what)
 			if code != http.StatusOK || len(sides) != 2 {
 				t.Fatalf("%s for user %s: %d, %d sides", c.what, viewer, code, len(sides))
@@ -279,9 +281,6 @@ func TestCounts_WhoLikedVotedShared_ForThePeopleInIt(t *testing.T) {
 				t.Errorf("%s on the answer: %v, want %v", c.what, got, c.answer)
 			}
 		}
-	}
-	if code, _ := ask("6301", "likes"); code != http.StatusForbidden {
-		t.Errorf("someone outside the battle got %d, want 403", code)
 	}
 	if code, _ := ask("1", "anything"); code != http.StatusBadRequest {
 		t.Errorf("an unknown list got %d, want 400", code)

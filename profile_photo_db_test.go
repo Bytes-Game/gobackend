@@ -226,6 +226,28 @@ func TestLists_FriendsOnlyStayClosedAndShowFaces(t *testing.T) {
 	if code := voters(nfFriendB); code != 200 {
 		t.Errorf("a friend asking who voted got %d", code)
 	}
+
+	// The list the app actually opens from the numbers under a reel.
+	peopleList := func(viewer int) (int, []PeopleSide) {
+		req := withAuth(httptest.NewRequest("GET", "/api/v1/challenges/"+cid+"/people?what=likes", nil),
+			strconv.Itoa(viewer), nfName(viewer))
+		req = mux.SetURLVars(req, map[string]string{"id": cid})
+		rec := httptest.NewRecorder()
+		ChallengePeopleHandler(rec, req)
+		var body struct {
+			Sides []PeopleSide `json:"sides"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		return rec.Code, body.Sides
+	}
+	code, sides := peopleList(nfFriendB)
+	if code != 200 || len(sides) != 1 || len(sides[0].People) != 1 ||
+		sides[0].People[0].AvatarURL != "https://media.example/u/9402/a/photo.jpg" {
+		t.Fatalf("a friend opening the likes list: %d %+v", code, sides)
+	}
+	if code, _ := peopleList(nfStranger); code != 404 {
+		t.Errorf("a stranger opening the likes list of a friends-only video got %d, want 404", code)
+	}
 }
 
 func askAbout(t *testing.T, viewer int, cid, rid string) (int, VideoAbout) {

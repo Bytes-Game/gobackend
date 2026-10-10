@@ -286,24 +286,24 @@ func peopleBySide(cid int, what string) ([]*PeopleSide, error) {
 	switch what {
 	case "likes":
 		prows, err = db.Query(`
-			SELECT 0, u.id::text, u.username, COALESCE(u.league, ''),
+			SELECT 0, u.id::text, u.username, COALESCE(u.league, ''), u.avatar_url,
 			       COALESCE(cl.created_at, NOW())
 			  FROM challenge_likes cl
 			  JOIN users u ON u.id = cl.user_id
 			 WHERE cl.challenge_id = $1
 			UNION ALL
 			SELECT crl.response_id, u.id::text, u.username, COALESCE(u.league, ''),
-			       COALESCE(crl.created_at, NOW())
+			       u.avatar_url, COALESCE(crl.created_at, NOW())
 			  FROM challenge_response_likes crl
 			  JOIN challenge_responses cr ON cr.id = crl.response_id
 			  JOIN users u ON u.id = crl.user_id
 			 WHERE cr.challenge_id = $1
-			 ORDER BY 5 DESC
+			 ORDER BY 6 DESC
 			 LIMIT 2000`, cid)
 	case "votes":
 		prows, err = db.Query(`
 			SELECT COALESCE(cv.response_id, 0), u.id::text, u.username,
-			       COALESCE(u.league, ''), cv.created_at
+			       COALESCE(u.league, ''), u.avatar_url, cv.created_at
 			  FROM challenge_votes cv
 			  JOIN users u ON u.id = cv.voter_id
 			 WHERE cv.challenge_id = $1
@@ -312,7 +312,7 @@ func peopleBySide(cid int, what string) ([]*PeopleSide, error) {
 	default: // shares
 		prows, err = db.Query(`
 			SELECT vs.response_id, u.id::text, u.username, COALESCE(u.league, ''),
-			       vs.created_at
+			       u.avatar_url, vs.created_at
 			  FROM video_shares vs
 			  JOIN users u ON u.id = vs.user_id
 			 WHERE vs.challenge_id = $1
@@ -329,7 +329,7 @@ func peopleBySide(cid int, what string) ([]*PeopleSide, error) {
 		var p PersonAt
 		var at time.Time
 		if scanFailed("someone on a "+what+" list",
-			prows.Scan(&rid, &p.UserID, &p.Username, &p.League, &at), &bad) {
+			prows.Scan(&rid, &p.UserID, &p.Username, &p.League, &p.AvatarURL, &at), &bad) {
 			continue
 		}
 		p.At = at.UTC().Format(time.RFC3339)
@@ -348,9 +348,10 @@ func (e *listError) Error() string { return e.msg }
 
 // GET /api/v1/challenges/{id}/people?what=likes|votes|shares
 //
-// Who liked each video, who voted for whom, or who shared — for the people
-// in it: whoever posted it, and on a battle whoever answered. Everyone else
-// sees the counts, not the names.
+// Who liked each video, who voted for whom, or who shared — for anyone who
+// may watch it, the way Instagram shows who liked a post (see voters.go).
+// A friends-only video stays closed to everyone it is not for. Each person
+// carries their profile photo.
 func ChallengePeopleHandler(w http.ResponseWriter, r *http.Request) {
 	viewer := authUserID(r)
 	cid, err := strconv.Atoi(mux.Vars(r)["id"])
@@ -363,13 +364,7 @@ func ChallengePeopleHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errUnknownList.Error(), http.StatusBadRequest)
 		return
 	}
-	creator, answerers, ok := battlePlayers(cid)
-	if !ok {
-		http.Error(w, "no such video", http.StatusNotFound)
-		return
-	}
-	if viewer != creator && !answerers[viewer] {
-		http.Error(w, "only the people in this video can see who", http.StatusForbidden)
+	if !mayWatchList(w, viewer, cid) {
 		return
 	}
 	sides, err := peopleBySide(cid, what)
