@@ -237,26 +237,31 @@ func TestOpenToBattles_EveryListSaysSo(t *testing.T) {
 		t.Fatalf("the battle page: %+v", detail)
 	}
 
-	// Not one of the owner's open challenges, in the count or the tab.
-	ctx := context.Background()
-	summary, err := loadBattleSummary(ctx, nfCreator, false)
-	if err != nil {
-		t.Fatal(err)
+	// Not one of the owner's open challenges, in the count or the tab: the
+	// profile's Open tab, asked the way the app asks.
+	tabReq := withAuth(httptest.NewRequest("GET",
+		"/api/v1/users/"+strconv.Itoa(nfCreator)+"/battles?tab=open", nil),
+		strconv.Itoa(nfCreator), nfName(nfCreator))
+	tabReq = mux.SetURLVars(tabReq, map[string]string{"id": strconv.Itoa(nfCreator)})
+	tabRec := httptest.NewRecorder()
+	UserBattlesHandler(tabRec, tabReq)
+	var tab struct {
+		Summary BattleSummary `json:"summary"`
+		Battles []BattleCard  `json:"battles"`
 	}
-	if summary.Counts["open"] != 1 {
-		t.Errorf("open challenges counted %d, want just the real one", summary.Counts["open"])
+	if err := json.Unmarshal(tabRec.Body.Bytes(), &tab); err != nil {
+		t.Fatalf("the Open tab answered %d: %s", tabRec.Code, tabRec.Body.String())
 	}
-	cards, err := loadBattleCards(ctx, db, nfCreator, "open", false, 50, 0)
-	if err != nil {
-		t.Fatal(err)
+	if tab.Summary.Counts["open"] != 1 {
+		t.Errorf("open challenges counted %d, want just the real one", tab.Summary.Counts["open"])
 	}
-	for _, card := range cards {
+	for _, card := range tab.Battles {
 		if card.ChallengeID == closed.ID {
 			t.Errorf("the normal post is in the Open tab: %+v", card)
 		}
 	}
-	if len(cards) != 1 {
-		t.Errorf("the Open tab has %d, want the one challenge", len(cards))
+	if len(tab.Battles) != 1 {
+		t.Errorf("the Open tab has %d, want the one challenge", len(tab.Battles))
 	}
 
 	// Not in the arena's list of live contests.
