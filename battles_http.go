@@ -168,7 +168,7 @@ func loadBattleSummary(ctx context.Context, uid int, visitor bool) (BattleSummar
 	err = db.QueryRowContext(ctx, `
 		SELECT
 		  (SELECT COUNT(*) FROM challenges c
-		    WHERE c.creator_id = $1 AND c.status = 'open'`+battleVisitorClause+`),
+		    WHERE c.creator_id = $1 AND c.status = 'open' AND c.open_to_battles`+battleVisitorClause+`),
 		  (SELECT COUNT(*) FROM challenges c
 		    WHERE c.status = 'active' AND c.resolved_at IS NULL
 		      AND (c.creator_id = $1 OR EXISTS (SELECT 1 FROM challenge_responses cr
@@ -226,7 +226,7 @@ func loadBattleCards(ctx context.Context, q querier, uid int, tab string, visito
 			       COALESCE(c.video_url, ''), 'creator', c.status, '', c.created_at,
 			       c.voting_ends_at, NULL::timestamptz, 0::real, 0::real, '', 0
 			  FROM challenges c
-			 WHERE c.creator_id = $1 AND c.status = 'open'`+battleVisitorClause+`
+			 WHERE c.creator_id = $1 AND c.status = 'open' AND c.open_to_battles`+battleVisitorClause+`
 			 ORDER BY c.created_at DESC
 			 LIMIT $3 OFFSET $4`, uid, visitor, limit, offset)
 	case "live":

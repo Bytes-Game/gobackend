@@ -1785,11 +1785,11 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 	// though somebody had made a claim. See migrations/010.
 	creatorCategory := usableCategory(strings.ToLower(strings.TrimSpace(payload.Category)))
 	err = db.QueryRow(
-		`INSERT INTO challenges (creator_id, video_url, video_variants, thumbnail_url, prefix, subject, visibility, category, creator_category, category_source, emotion_tags, custom_tags, energy_level, battle_days, media_type, music_track_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id, created_at`,
+		`INSERT INTO challenges (creator_id, video_url, video_variants, thumbnail_url, prefix, subject, visibility, category, creator_category, category_source, emotion_tags, custom_tags, energy_level, battle_days, media_type, music_track_id, open_to_battles)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id, created_at`,
 		creatorID, payload.VideoURL, variantsJSON, payload.ThumbnailURL, payload.Prefix, payload.Subject, payload.Visibility,
 		category, creatorCategory, categorySourceAtUpload(creatorCategory, category), emotionJSON, tagsJSON, energyLevel,
-		clampBattleDays(payload.BattleDays), mediaType, payload.musicTrack,
+		clampBattleDays(payload.BattleDays), mediaType, payload.musicTrack, payload.openToBattles(),
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return Challenge{}, err
@@ -1826,6 +1826,7 @@ func CreateChallenge(payload CreateChallengePayload) (Challenge, error) {
 		Subject:         payload.Subject,
 		Visibility:      payload.Visibility,
 		Status:          "open",
+		ClosedToBattles: !payload.openToBattles(),
 		Category:        category,
 		EmotionTags:     emotions,
 		Tags:            tags,
@@ -1862,7 +1863,8 @@ SELECT c.id, c.creator_id, u.username, u.league,
 	COALESCE(c.video_variants, '{}'::jsonb)::text AS video_variants,
 	CASE WHEN COALESCE(c.hls_manifest_url, '') = 'PENDING' THEN ''
 	     ELSE COALESCE(c.hls_manifest_url, '') END AS hls_manifest_url,
-	COALESCE(c.media_type, 'video') AS media_type
+	COALESCE(c.media_type, 'video') AS media_type,
+	c.open_to_battles
 FROM challenges c
 JOIN users u ON c.creator_id = u.id
 LEFT JOIN (SELECT challenge_id, COUNT(*) AS cnt FROM challenge_likes GROUP BY challenge_id) lc ON lc.challenge_id = c.id
@@ -1880,19 +1882,23 @@ func queryChallenges(query string, args ...interface{}) []Challenge {
 	defer rows.Close()
 
 	var result []Challenge
+	// A row that cannot be read was dropped without a word, which looks
+	// exactly like a list with nothing in it. Now it says so.
+	bad := 0
 	for rows.Next() {
 		var id, creatorID, views, likes, respCount int
 		var username, league, videoURL, thumbURL, prefix, subject, visibility, status string
 		var categoryStr, energyStr, variantsJSON, manifestURL, mediaType string
 		var emotionJSON []byte
 		var createdAt time.Time
+		var openToBattles bool
 
-		if rows.Scan(&id, &creatorID, &username, &league,
+		if !scanFailed("queryChallenges: a post in a list", rows.Scan(&id, &creatorID, &username, &league,
 			&videoURL, &thumbURL,
 			&prefix, &subject, &visibility, &status, &views,
 			&likes, &respCount, &createdAt,
 			&categoryStr, &emotionJSON, &energyStr,
-			&variantsJSON, &manifestURL, &mediaType) == nil {
+			&variantsJSON, &manifestURL, &mediaType, &openToBattles), &bad) {
 
 			var emotions []string
 			json.Unmarshal(emotionJSON, &emotions)
@@ -1922,6 +1928,7 @@ func queryChallenges(query string, args ...interface{}) []Challenge {
 				Subject:         subject,
 				Visibility:      visibility,
 				Status:          status,
+				ClosedToBattles: !openToBattles,
 				Views:           views,
 				Likes:           likes,
 				ResponseCount:   respCount,
@@ -1945,7 +1952,7 @@ func queryChallenges(query string, args ...interface{}) []Challenge {
 func GetArenaChallenges() []Challenge {
 	return queryChallenges(challengeBaseQuery + `
 	  WHERE c.visibility = 'arena' 
-	  	AND (c.status IN ('active','completed') OR (c.status = 'open' AND c.created_at > NOW() - INTERVAL '24 hours'))
+	  	AND (c.status IN ('active','completed') OR (c.status = 'open' AND c.open_to_battles AND c.created_at > NOW() - INTERVAL '24 hours'))
 	  ORDER BY c.created_at DESC`)
 }
 
@@ -1995,7 +2002,7 @@ func GetFriendsChallenges(userID string) []Challenge {
 		NOT EXISTS (SELECT 1 FROM challenge_visible_to WHERE challenge_id = c.id)
 		OR c.id IN (SELECT challenge_id FROM challenge_visible_to WHERE user_id = $1)
 	  )
-	  AND (c.status IN ('active','completed') OR (c.status = 'open' AND c.created_at > NOW() - INTERVAL '24 hours'))
+	  AND (c.status IN ('active','completed') OR (c.status = 'open' AND c.open_to_battles AND c.created_at > NOW() - INTERVAL '24 hours'))
 	ORDER BY c.created_at DESC`
 	return queryChallenges(query, uid)
 }

@@ -600,6 +600,8 @@ func main() {
 	api.HandleFunc("/challenges/{id}/voters", authed(ChallengeVotersHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/likers", authed(ChallengeLikersHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/about", authed(VideoAboutHandler)).Methods("GET", "OPTIONS")
+	// The owner opens their post to battles, or closes it. battles_open.go.
+	api.HandleFunc("/challenges/{id}/battles", authed(SetOpenToBattlesHandler)).Methods("PATCH", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/people", authed(ChallengePeopleHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/share", authed(ShareChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/{id}", GetChallengeDetailHandler).Methods("GET", "OPTIONS")

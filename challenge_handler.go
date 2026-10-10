@@ -91,11 +91,11 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	// The creator is the authenticated user, never a client-supplied id.
 	payload.CreatorID = authUserID(r)
 
-	if payload.Prefix == "" || payload.Subject == "" {
-		http.Error(w, "prefix and subject are required", http.StatusBadRequest)
-		return
-	}
-	if msg := challengeWordsTooLong(payload.Prefix, payload.Subject); msg != "" {
+	// A post open to battles is a question and needs both halves; a normal
+	// post needs only its caption. See battles_open.go.
+	payload.Prefix = strings.TrimSpace(payload.Prefix)
+	payload.Subject = strings.TrimSpace(payload.Subject)
+	if msg := postWordsRefusal(payload.Prefix, payload.Subject, payload.openToBattles()); msg != "" {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
@@ -185,7 +185,11 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	// the next typer who matches it gets it ranked higher. Fire-and-
 	// forget: a hiccup in the suggest index never blocks the create
 	// response.
-	go recordSubjectUsage(challenge.Subject, challenge.Visibility, challenge.Status)
+	// A normal post's caption is not a challenge subject, and would fill the
+	// subject suggestions with other people's captions.
+	if !challenge.ClosedToBattles {
+		go recordSubjectUsage(challenge.Subject, challenge.Visibility, challenge.Status)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -275,6 +279,11 @@ func GetChallengeDetailHandler(w http.ResponseWriter, r *http.Request) {
 			canAccept = false
 			leagueMsg = err.Error()
 		}
+	}
+	// A normal post cannot be answered by anybody. See battles_open.go.
+	if challenge.ClosedToBattles {
+		canAccept = false
+		leagueMsg = notOpenToBattles
 	}
 
 	// The top answer and the viewer's own like, save and vote, as every feed

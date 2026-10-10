@@ -64,6 +64,7 @@ func markViewerState(viewerID string, chs []*Challenge) {
 	fillCounts(chs)
 	fillMediaTypes(chs)
 	fillMusic(chs)
+	fillBattlesOpen(chs)
 	viewer, err := strconv.Atoi(viewerID)
 	if err != nil || viewer <= 0 {
 		return

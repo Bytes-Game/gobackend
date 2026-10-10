@@ -87,6 +87,9 @@ func validateChallengeResponseSubmission(payload AcceptChallengePayload, challen
 	if challenge.Status == "removed" {
 		return fmt.Errorf("this challenge has been removed")
 	}
+	if challenge.ClosedToBattles {
+		return fmt.Errorf(notOpenToBattles)
+	}
 
 	// --- Same user can't reuse the same video on any challenge ---
 	rid, err := strconv.Atoi(payload.ResponderID)
