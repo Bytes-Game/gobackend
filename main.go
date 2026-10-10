@@ -532,6 +532,13 @@ func main() {
 
 	api := r.PathPrefix("/api/v1").Subrouter()
 	api.HandleFunc("/users", GetAllUsersHandler).Methods("GET", "OPTIONS")
+	// Fixed names under /users/ go BEFORE /users/{username}: the router takes
+	// the first route that matches, and {username} matches any word. Below
+	// it, GET /users/suggested looked up an account called "suggested" and
+	// answered 404. See TestRoutes_UsersFixedNamesAreReachable.
+	api.HandleFunc("/users/avatars", authed(UserAvatarsHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/users/similar", authed(SimilarUsersHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/users/suggested", authed(SuggestedUsersHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/users/{username}", GetUserHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/follow", authed(HandleFollowEvent)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/unfollow", authed(HandleUnfollowEvent)).Methods("POST", "OPTIONS")
@@ -592,6 +599,7 @@ func main() {
 	// poster only). See voters.go.
 	api.HandleFunc("/challenges/{id}/voters", authed(ChallengeVotersHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/likers", authed(ChallengeLikersHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/challenges/{id}/about", authed(VideoAboutHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/{id}/people", authed(ChallengePeopleHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/challenges/share", authed(ShareChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/challenges/{id}", GetChallengeDetailHandler).Methods("GET", "OPTIONS")
@@ -608,6 +616,7 @@ func main() {
 	api.HandleFunc("/events", authed(TrackEventHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/events/batch", authed(TrackBatchEventsHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/profile", authed(UserProfileHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/profile/tags", ProfileTagsHandler).Methods("GET", "OPTIONS")
 	// Challenge-creation autocomplete. Two surfaces — prefix (small,
 	// curated, in-memory) and subject (large, Meilisearch-backed +
 	// popularity-ranked). See suggest_handlers.go for the ranking.
@@ -649,8 +658,6 @@ func main() {
 	api.HandleFunc("/users/{id}/totp/disable", authed(DisableTOTPHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/experiments", ExperimentsListHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/experiments/results", authed(ExperimentResultsHandler)).Methods("GET", "OPTIONS")
-	api.HandleFunc("/users/similar", authed(SimilarUsersHandler)).Methods("GET", "OPTIONS")
-	api.HandleFunc("/users/suggested", authed(SuggestedUsersHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/suggestions/accepted", authed(SuggestionAcceptedHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/watch", authed(HandleWatchEvent)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/report", authed(HandleReportEvent)).Methods("POST", "OPTIONS")

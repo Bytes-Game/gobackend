@@ -280,7 +280,7 @@ func TestAccepting_BothPlayersAreToldDifferentThings(t *testing.T) {
 	}
 }
 
-func TestVoting_TellsNobodyButThePlayersCanSeeWhoVoted(t *testing.T) {
+func TestVoting_TellsNobodyButAnyoneWatchingCanSeeWhoVoted(t *testing.T) {
 	defer withDB(t)()
 	resetRedis(t)
 	resetActionLimiters(t)
@@ -315,10 +315,12 @@ func TestVoting_TellsNobodyButThePlayersCanSeeWhoVoted(t *testing.T) {
 		_ = json.Unmarshal(rec.Body.Bytes(), &body)
 		return rec.Code, body.Sides
 	}
-	for _, player := range []int{nfCreator, nfAnswerer} {
-		code, sides := voters(player)
+	// Open to anyone who may watch it, the way Instagram shows who liked a
+	// post — the players, and people who are not in the battle at all.
+	for _, viewer := range []int{nfCreator, nfAnswerer, nfVoter, nfStranger} {
+		code, sides := voters(viewer)
 		if code != 200 || len(sides) != 2 {
-			t.Fatalf("player %d cannot see the votes: %d %+v", player, code, sides)
+			t.Fatalf("user %d cannot see the votes: %d %+v", viewer, code, sides)
 		}
 		if len(sides[0].Voters) != 0 || len(sides[1].Voters) != 1 ||
 			sides[1].Voters[0].Username != nfName(nfVoter) ||
@@ -326,14 +328,9 @@ func TestVoting_TellsNobodyButThePlayersCanSeeWhoVoted(t *testing.T) {
 			t.Fatalf("the vote is on the wrong side: %+v", sides)
 		}
 	}
-	for _, outsider := range []int{nfVoter, nfStranger} {
-		if code, _ := voters(outsider); code != 403 {
-			t.Errorf("user %d is not in the battle but got %d", outsider, code)
-		}
-	}
 }
 
-func TestLikers_OnlyThePosterSeesWhoLiked(t *testing.T) {
+func TestLikers_AnyoneWatchingSeesWhoLiked(t *testing.T) {
 	defer withDB(t)()
 	resetRedis(t)
 	resetActionLimiters(t)
@@ -355,12 +352,11 @@ func TestLikers_OnlyThePosterSeesWhoLiked(t *testing.T) {
 		_ = json.Unmarshal(rec.Body.Bytes(), &body)
 		return rec.Code, body.Likers
 	}
-	code, people := likers(nfCreator)
-	if code != 200 || len(people) != 1 || people[0].Username != nfName(nfFriendA) {
-		t.Fatalf("the poster cannot see who liked: %d %+v", code, people)
-	}
-	if code, _ := likers(nfFriendA); code != 403 {
-		t.Errorf("someone else could see who liked: %d", code)
+	for _, viewer := range []int{nfCreator, nfFriendA, nfStranger} {
+		code, people := likers(viewer)
+		if code != 200 || len(people) != 1 || people[0].Username != nfName(nfFriendA) {
+			t.Fatalf("user %d cannot see who liked: %d %+v", viewer, code, people)
+		}
 	}
 }
 

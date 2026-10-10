@@ -128,16 +128,19 @@ Unlike the categories, these are NOT a list to choose from. Write whatever
 fits, in two or three words each. Name what you can SEE: the object, the food,
 the place, the activity. For example: %s.
 
+ABOUT — one or two short, plain sentences telling a viewer what the video shows, the way you would tell a friend. Say only what you can see in the frames: never invent names, places or what anybody says. If you cannot tell what the video is about, write "".
+
 How to judge:
 - These frames are from ONE video. Judge the video as a whole, not each frame separately.
 - Nobody speaks in this video, or nothing they said could be made out. The pictures are all the evidence there is.
 - If the frames are too dark, too blurred, or too ordinary to tell what the video is about, answer "other" with no topics. A person, a room or a street on its own is not a subject.
 - "other" is a correct and useful answer for the CATEGORY. A wrong category is worse than "other", because the app will show this video to people who asked for something else. Topics are different: nothing is filed by them, so name anything you can genuinely see.
 - Write topics in English, so the same subject reads the same way across the app.
+- Write the about sentences in English too, so every viewer can read them.
 
 %s
 Answer with one line of JSON and nothing else:
-{"categories": ["..."], "feelings": ["..."], "topics": ["..."]%s}
+{"categories": ["..."], "feelings": ["..."], "topics": ["..."], "about": "..."%s}
 `
 
 // understandContentFromFrames looks at a video and returns the tags a model
@@ -191,6 +194,7 @@ func understandContentFromFrames(ctx context.Context, src string, dur float64, q
 		Tags:   understoodTags(answer),
 		Topics: understoodTopics(answer),
 		Match:  understoodMatch(question, answer),
+		About:  understoodAbout(answer),
 	}, true
 }
 

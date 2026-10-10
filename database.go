@@ -998,19 +998,22 @@ func applyFollows(users []User, rows *sql.Rows) {
 // migration that added the column default.
 func GetUserByUsername(username string) (User, bool) {
 	var id, wins, losses, rating, draws int
-	var uname, pw, fullName, bio, visibility, settings, league string
+	var uname, pw, fullName, bio, visibility, settings, league, avatar, tag string
 	err := db.QueryRow(
 		`SELECT id, username, password, full_name,
 		        COALESCE(bio,''), COALESCE(visibility,'public'),
 		        COALESCE(settings::text,'{}'),
-		        wins, losses, league, rating, draws
+		        wins, losses, league, rating, draws,
+		        avatar_url, profile_tag
 		   FROM users WHERE username = $1`,
 		username,
-	).Scan(&id, &uname, &pw, &fullName, &bio, &visibility, &settings, &wins, &losses, &league, &rating, &draws)
+	).Scan(&id, &uname, &pw, &fullName, &bio, &visibility, &settings, &wins, &losses, &league, &rating, &draws, &avatar, &tag)
 	if err != nil {
 		return User{}, false
 	}
-	return readUser(id, uname, pw, fullName, bio, visibility, settings, wins, losses, league, rating, draws), true
+	u := readUser(id, uname, pw, fullName, bio, visibility, settings, wins, losses, league, rating, draws)
+	u.AvatarURL, u.ProfileTag = avatar, tag
+	return u, true
 }
 
 // GetUserByID returns a fully enriched user, looked up by string ID.
@@ -1020,19 +1023,22 @@ func GetUserByID(idStr string) (User, bool) {
 		return User{}, false
 	}
 	var wins, losses, rating, draws int
-	var uname, pw, fullName, bio, visibility, settings, league string
+	var uname, pw, fullName, bio, visibility, settings, league, avatar, tag string
 	err = db.QueryRow(
 		`SELECT id, username, password, full_name,
 		        COALESCE(bio,''), COALESCE(visibility,'public'),
 		        COALESCE(settings::text,'{}'),
-		        wins, losses, league, rating, draws
+		        wins, losses, league, rating, draws,
+		        avatar_url, profile_tag
 		   FROM users WHERE id = $1`,
 		idInt,
-	).Scan(&idInt, &uname, &pw, &fullName, &bio, &visibility, &settings, &wins, &losses, &league, &rating, &draws)
+	).Scan(&idInt, &uname, &pw, &fullName, &bio, &visibility, &settings, &wins, &losses, &league, &rating, &draws, &avatar, &tag)
 	if err != nil {
 		return User{}, false
 	}
-	return readUser(idInt, uname, pw, fullName, bio, visibility, settings, wins, losses, league, rating, draws), true
+	u := readUser(idInt, uname, pw, fullName, bio, visibility, settings, wins, losses, league, rating, draws)
+	u.AvatarURL, u.ProfileTag = avatar, tag
+	return u, true
 }
 
 // UserExists checks whether a username is already taken.

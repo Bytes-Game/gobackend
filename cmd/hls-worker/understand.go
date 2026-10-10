@@ -87,10 +87,14 @@ const (
 // and truncateForModel below keeps the transcript inside it.
 const understandContextTokens = 4096
 
-// understandMaxOutput bounds the answer. It is one line of JSON; anything
-// longer means the model is rambling and the parse will take the last object
-// it finds anyway.
-const understandMaxOutput = 96
+// understandMaxOutput bounds the answer. It is one line of JSON with a
+// sentence or two in it (see aboutSection); anything longer means the model
+// is rambling and the parse will take the last object it finds anyway.
+//
+// It was 96 before the answer carried a sentence. A two-sentence "about"
+// plus the labels comes to around 120 tokens, and an answer cut short is
+// not JSON at all — every field of it is lost, not just the sentence.
+const understandMaxOutput = 200
 
 // understandThreads is HALF the runner's cores, not all of them.
 //
@@ -240,16 +244,19 @@ Unlike the categories, these are NOT a list to choose from. Write whatever
 fits, in two or three words each. Be specific: name the thing, the practice,
 the place, the situation. For example: %s.
 
+ABOUT — one or two short, plain sentences telling a viewer what happens in the video and what is said in it, the way you would tell a friend. Say only what the transcript shows: never invent names, places or events. If you cannot tell what the video is about, write "".
+
 How to judge:
 - The transcript may be in any language and WILL contain transcription mistakes. Judge what the speaker means, not how words are spelled.
 - Text in brackets like (music playing), (dramatic music), (door squeaking) is the transcriber describing SOUND, not somebody speaking. A transcript that is only bracketed sounds means nobody said anything: answer "other" with no topics.
 - A few words, or words with no subject, means you cannot tell. Answer "other" with no topics.
 - "other" is a correct and useful answer for the CATEGORY. A wrong category is worse than "other", because the app will show this video to people who asked for something else. Topics are different: nothing is filed by them, so name anything the video is genuinely about.
 - Write topics in English even when the video is in another language, so the same subject reads the same way across the app.
+- Write the about sentences in English too, so every viewer can read them.
 
 %s
 Answer with one line of JSON and nothing else:
-{"categories": ["..."], "feelings": ["..."], "topics": ["..."]%s}
+{"categories": ["..."], "feelings": ["..."], "topics": ["..."], "about": "..."%s}
 
 Transcript:
 %s
@@ -261,6 +268,7 @@ type understandReply struct {
 	Categories []string `json:"categories"`
 	Feelings   []string `json:"feelings"`
 	Topics     []string `json:"topics"`
+	About      string   `json:"about"`
 	Matches    string   `json:"matches"`
 }
 
@@ -286,6 +294,11 @@ type understood struct {
 	// asks: "yes", "no" or "unsure". Empty when there was no challenge to
 	// ask about, or the model did not say. See matchSection.
 	Match string
+
+	// About is a sentence or two saying what happens in the video, for the
+	// app's "What is this video about?". Empty when the model could not
+	// tell. See understoodAbout.
+	About string
 }
 
 // understandContent reads what the video said and returns the tags a model
@@ -341,6 +354,7 @@ func understandContent(ctx context.Context, a videoAnalysis, question string) (u
 		Tags:   understoodTags(answer),
 		Topics: understoodTopics(answer),
 		Match:  understoodMatch(question, answer),
+		About:  understoodAbout(answer),
 	}, true
 }
 
@@ -544,4 +558,50 @@ func understoodTopics(raw string) []string {
 	// Order as the model gave them: it puts the main subject first, and that
 	// ordering is information a sort would throw away.
 	return out
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ABOUT: WHAT A VIEWER IS TOLD
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The app has a "What is this video about?" button, like the one Instagram
+// answers with its own model. This is the answer: a sentence or two, written
+// once by the worker while it reads the video anyway, so a tap costs nothing.
+//
+// Unlike the tags, nothing ranks on it. Unlike the topics, a person reads it,
+// word for word, under somebody else's video. So it is shaped hard: one tidy
+// paragraph, never a runaway, and nothing at all rather than the model's
+// placeholder when it could not tell. The app says it was written by AI and
+// can be wrong.
+
+// understandAboutMaxLen bounds the answer, in runes. Two plain sentences are
+// well under it; a model writing an essay is cut at its last full sentence.
+const understandAboutMaxLen = 280
+
+// understoodAbout pulls the sentence out of the model's answer, tidied, or ""
+// when it said nothing usable.
+func understoodAbout(raw string) string {
+	m := lastJSONObject.FindAllString(raw, -1)
+	if len(m) == 0 {
+		return ""
+	}
+	var reply understandReply
+	if err := json.Unmarshal([]byte(m[len(m)-1]), &reply); err != nil {
+		return ""
+	}
+	a := strings.Join(strings.Fields(reply.About), " ")
+	a = strings.Trim(a, `"' `)
+	switch strings.ToLower(strings.TrimRight(a, ".")) {
+	case "", "...", "…", "none", "unknown", "n/a", "other":
+		return ""
+	}
+	r := []rune(a)
+	if len(r) <= understandAboutMaxLen {
+		return a
+	}
+	cut := string(r[:understandAboutMaxLen])
+	if i := strings.LastIndexAny(cut, ".!?"); i > understandAboutMaxLen/3 {
+		return cut[:i+1]
+	}
+	return strings.TrimSpace(cut) + "…"
 }

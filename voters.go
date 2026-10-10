@@ -2,10 +2,21 @@ package main
 
 // voters.go — who voted for whom in a battle, and who liked a video.
 //
-// For the people it is about, and nobody else: the two players in a battle
-// can see who voted and for which of them; whoever posted a video can see
-// who liked it. Nobody is TOLD when a vote comes in — that was a stream of
-// pings on any live battle — the list is there to open when they want it.
+// For anyone who may watch the video, the way Instagram shows who liked a
+// post: tap the number, see the people. It used to be only the battle's
+// players and the poster; the owner asked for it open. A friends-only video
+// stays closed to everyone it is not for (mayWatch), the same rule that
+// decides who can watch it at all.
+//
+// Nobody is TOLD when a vote comes in — that was a stream of pings on any
+// live battle — the list is there to open when they want it.
+//
+// Each person carries their profile photo, so the list shows faces.
+
+// mayWatchList answers whether [viewer] may see the lists on challenge
+// [cid], writing the refusal itself when not. A video they may not watch
+// is "no such video" rather than "forbidden": saying it exists would tell
+// them a friends-only video is there.
 
 import (
 	"net/http"
@@ -17,10 +28,29 @@ import (
 
 // PersonAt is someone on one of these lists, and when.
 type PersonAt struct {
-	UserID   string `json:"userId"`
-	Username string `json:"username"`
-	League   string `json:"league,omitempty"`
-	At       string `json:"at"`
+	UserID    string `json:"userId"`
+	Username  string `json:"username"`
+	League    string `json:"league,omitempty"`
+	AvatarURL string `json:"avatarUrl,omitempty"`
+	At        string `json:"at"`
+}
+
+func mayWatchList(w http.ResponseWriter, viewer string, cid int) bool {
+	vid, err := strconv.Atoi(viewer)
+	if err != nil {
+		http.Error(w, "sign in", http.StatusUnauthorized)
+		return false
+	}
+	ok, err := mayWatch(vid, cid)
+	if queryFailed("checking who may see a video's lists", "refusing the list", err) {
+		http.Error(w, "could not check the video", http.StatusInternalServerError)
+		return false
+	}
+	if !ok {
+		http.Error(w, "no such video", http.StatusNotFound)
+		return false
+	}
+	return true
 }
 
 // VoterSide is one side of a battle and the people who voted for it.
@@ -57,8 +87,8 @@ func battlePlayers(challengeID int) (creatorID string, answerers map[string]bool
 	return strconv.Itoa(creator), answerers, true
 }
 
-// GET /api/v1/challenges/{id}/voters — who voted for whom. Only for the
-// battle's own players.
+// GET /api/v1/challenges/{id}/voters — who voted for whom. For anyone who
+// may watch the battle.
 func ChallengeVotersHandler(w http.ResponseWriter, r *http.Request) {
 	viewer := authUserID(r)
 	cid, err := strconv.Atoi(mux.Vars(r)["id"])
@@ -66,14 +96,12 @@ func ChallengeVotersHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sign in, with a challenge id", http.StatusBadRequest)
 		return
 	}
-	creator, answerers, ok := battlePlayers(cid)
+	creator, _, ok := battlePlayers(cid)
 	if !ok {
 		http.Error(w, "no such challenge", http.StatusNotFound)
 		return
 	}
-	if viewer != creator && !answerers[viewer] {
-		http.Error(w, "only the people in this battle can see who voted",
-			http.StatusForbidden)
+	if !mayWatchList(w, viewer, cid) {
 		return
 	}
 
@@ -112,7 +140,7 @@ func ChallengeVotersHandler(w http.ResponseWriter, r *http.Request) {
 	// A vote with no answer id is a vote for the creator (migration 011).
 	vrows, err := db.Query(`
 		SELECT COALESCE(cv.response_id::text, ''), u.id::text, u.username,
-		       COALESCE(u.league, ''), cv.created_at
+		       COALESCE(u.league, ''), u.avatar_url, cv.created_at
 		  FROM challenge_votes cv
 		  JOIN users u ON u.id = cv.voter_id
 		 WHERE cv.challenge_id = $1
@@ -129,7 +157,7 @@ func ChallengeVotersHandler(w http.ResponseWriter, r *http.Request) {
 		var p PersonAt
 		var at time.Time
 		if scanFailed("a vote in a battle",
-			vrows.Scan(&resp, &p.UserID, &p.Username, &p.League, &at), &bad) {
+			vrows.Scan(&resp, &p.UserID, &p.Username, &p.League, &p.AvatarURL, &at), &bad) {
 			continue
 		}
 		p.At = at.UTC().Format(time.RFC3339)
@@ -146,8 +174,8 @@ func ChallengeVotersHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sides": sides})
 }
 
-// GET /api/v1/challenges/{id}/likers — who liked it. Only for whoever
-// posted it.
+// GET /api/v1/challenges/{id}/likers — who liked it. For anyone who may
+// watch it.
 func ChallengeLikersHandler(w http.ResponseWriter, r *http.Request) {
 	viewer := authUserID(r)
 	cid, err := strconv.Atoi(mux.Vars(r)["id"])
@@ -155,20 +183,12 @@ func ChallengeLikersHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sign in, with a challenge id", http.StatusBadRequest)
 		return
 	}
-	var creator int
-	err = db.QueryRow(`SELECT creator_id FROM challenges WHERE id = $1`,
-		cid).Scan(&creator)
-	if queryFailed("finding who posted a video", "refusing the list", err) {
-		http.Error(w, "no such video", http.StatusNotFound)
-		return
-	}
-	if strconv.Itoa(creator) != viewer {
-		http.Error(w, "only whoever posted it can see who liked it",
-			http.StatusForbidden)
+	if !mayWatchList(w, viewer, cid) {
 		return
 	}
 	rows, err := db.Query(`
-		SELECT u.id::text, u.username, COALESCE(u.league, ''), cl.created_at
+		SELECT u.id::text, u.username, COALESCE(u.league, ''), u.avatar_url,
+		       cl.created_at
 		  FROM challenge_likes cl
 		  JOIN users u ON u.id = cl.user_id
 		 WHERE cl.challenge_id = $1
@@ -185,7 +205,7 @@ func ChallengeLikersHandler(w http.ResponseWriter, r *http.Request) {
 		var p PersonAt
 		var at time.Time
 		if scanFailed("someone who liked a video",
-			rows.Scan(&p.UserID, &p.Username, &p.League, &at), &bad) {
+			rows.Scan(&p.UserID, &p.Username, &p.League, &p.AvatarURL, &at), &bad) {
 			continue
 		}
 		p.At = at.UTC().Format(time.RFC3339)

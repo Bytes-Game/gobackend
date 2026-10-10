@@ -42,6 +42,9 @@ func UpdateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 		Bio        *string                 `json:"bio,omitempty"`
 		Visibility *string                 `json:"visibility,omitempty"`
 		Settings   *map[string]any `json:"settings,omitempty"`
+		// Profile photo and tag; see profile_photo.go. "" clears either.
+		AvatarURL  *string `json:"avatarUrl,omitempty"`
+		ProfileTag *string `json:"profileTag,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
@@ -65,6 +68,7 @@ func UpdateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 	// switches in a minute is ordinary there, and was refused here.
 	action := "profile_edit"
 	if payload.FullName == nil && payload.Bio == nil && payload.Visibility == nil &&
+		payload.AvatarURL == nil && payload.ProfileTag == nil &&
 		payload.Settings != nil {
 		action = "settings"
 	}
@@ -92,6 +96,14 @@ func UpdateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if payload.AvatarURL != nil && !validProfilePhoto(uid, *payload.AvatarURL) {
+		http.Error(w, "that photo was not uploaded by you", http.StatusBadRequest)
+		return
+	}
+	if payload.ProfileTag != nil && !validProfileTag(*payload.ProfileTag) {
+		http.Error(w, "that is not one of the profile tags", http.StatusBadRequest)
+		return
+	}
 
 	// Build dynamic UPDATE. Anything not sent stays unchanged — we
 	// don't issue an UPDATE for a missing field.
@@ -111,6 +123,16 @@ func UpdateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 	if payload.Visibility != nil {
 		sets = append(sets, "visibility = $"+strconv.Itoa(idx))
 		args = append(args, *payload.Visibility)
+		idx++
+	}
+	if payload.AvatarURL != nil {
+		sets = append(sets, "avatar_url = $"+strconv.Itoa(idx))
+		args = append(args, *payload.AvatarURL)
+		idx++
+	}
+	if payload.ProfileTag != nil {
+		sets = append(sets, "profile_tag = $"+strconv.Itoa(idx))
+		args = append(args, *payload.ProfileTag)
 		idx++
 	}
 	if payload.Settings != nil {
