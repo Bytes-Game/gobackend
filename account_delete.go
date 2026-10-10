@@ -62,6 +62,13 @@ func DeleteAccountHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Everything they ever uploaded, in one go: posts and answers (already
+	// queued with each challenge above), and what hangs off no challenge —
+	// profile photos, chat photos and voice messages. All of it lives under
+	// their own folder, u/<id>/. A deleted person's face must not stay
+	// online at an address somebody kept.
+	enqueueMediaDeletions([]string{"u/" + userID + "/"})
+
 	// 2) Everything else in one transaction. Order doesn't matter (no
 	// FK chains between these), but the users row goes last so a crash
 	// mid-way leaves a recoverable half-cleaned account rather than an

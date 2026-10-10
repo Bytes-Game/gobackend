@@ -164,11 +164,25 @@ func UpdateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args = append(args, pathIDInt)
+	// The photo being replaced, so its file can go once the new one is
+	// saved: an old profile picture should not stay online at its address
+	// after somebody changed or removed it.
+	oldAvatar := ""
+	if payload.AvatarURL != nil {
+		err := db.QueryRow(`SELECT avatar_url FROM users WHERE id = $1`, pathIDInt).Scan(&oldAvatar)
+		queryFailed("reading the profile photo about to be replaced",
+			"its file stays in storage", err)
+	}
 	query := "UPDATE users SET " + strings.Join(sets, ", ") + " WHERE id = $" + strconv.Itoa(idx)
 	res, err := db.Exec(query, args...)
 	if err != nil {
 		http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if payload.AvatarURL != nil && oldAvatar != "" && oldAvatar != *payload.AvatarURL {
+		if cfg, err := profilePhotoStorage(); err == nil {
+			enqueueMediaDeletions([]string{mediaPrefixFromPublicURL(cfg, oldAvatar)})
+		}
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
