@@ -633,20 +633,20 @@ func TestResolve_DecidesOnceAndUpdatesTheRecords(t *testing.T) {
 		return r
 	}
 	creator, responder := read(1), read(2)
-	if creator.wins != 1 || creator.rating != 1016 || creator.league != "Bronze" {
+	if creator.wins != 1 || creator.rating != 1040 || creator.league != "Bronze" {
 		t.Errorf("creator after winning: %+v", creator)
 	}
-	if responder.losses != 1 || responder.rating != 984 {
+	if responder.losses != 1 || responder.rating != 990 {
 		t.Errorf("responder after losing: %+v", responder)
 	}
 	// And what a profile reads back, which is a different query.
-	if u, ok := GetUserByID("1"); !ok || u.Rating != 1016 || u.League != "Bronze" || u.Wins != 1 {
+	if u, ok := GetUserByID("1"); !ok || u.Rating != 1040 || u.League != "Bronze" || u.Wins != 1 {
 		t.Errorf("the creator's profile shows rating %d, league %q, %d wins — "+
 			"want what the battle just wrote", u.Rating, u.League, u.Wins)
 	}
-	if u, ok := GetUserByUsername("liker2"); !ok || u.Rating != 984 || u.Losses != 1 {
+	if u, ok := GetUserByUsername("liker2"); !ok || u.Rating != 990 || u.Losses != 1 {
 		t.Errorf("looked up by name, the responder shows rating %d and %d losses, "+
-			"want 984 and 1 (found: %v)", u.Rating, u.Losses, ok)
+			"want 990 and 1 (found: %v)", u.Rating, u.Losses, ok)
 	}
 	var status string
 	var outcomes int
@@ -733,12 +733,12 @@ func TestResolve_BoughtVotesCostRatingAndLeaveAStrike(t *testing.T) {
 		return a
 	}
 	cheat, clean := read(1), read(2)
-	if !cheat.flagged || cheat.strikes != 1 || cheat.rating != 1000-16-integrityPenalty {
+	if !cheat.flagged || cheat.strikes != 1 || cheat.rating != 1000-10-integrityPenalty {
 		t.Errorf("the side whose every vote was bought: %+v — want flagged, one "+
 			"strike, and the loss plus the %d penalty (rating %d)",
-			cheat, integrityPenalty, 1000-16-integrityPenalty)
+			cheat, integrityPenalty, 1000-10-integrityPenalty)
 	}
-	if clean.flagged || clean.strikes != 0 || clean.rating != 1016 {
+	if clean.flagged || clean.strikes != 0 || clean.rating != 1040 {
 		t.Errorf("the clean side: %+v — want no flag, no strike, and the plain win", clean)
 	}
 }
@@ -753,9 +753,10 @@ func TestDecay_ATopRatingHasToBeDefended(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	seed(5301, 1300, 10*24*time.Hour) // idle
-	seed(5302, 1300, 2*24*time.Hour)  // battling
-	seed(5303, 1210, 10*24*time.Hour) // idle, just above the line
+	seed(5301, 4010, 10*24*time.Hour) // idle, just inside Platinum
+	seed(5302, 4010, 2*24*time.Hour)  // battling
+	seed(5303, 3010, 10*24*time.Hour) // idle, just above the line
+	seed(5304, 2900, 30*24*time.Hour) // idle, but under the line: Silver
 
 	ctx := context.Background()
 	if _, err := decayIdleRatings(ctx); err != nil {
@@ -769,19 +770,23 @@ func TestDecay_ATopRatingHasToBeDefended(t *testing.T) {
 		}
 		return r, l
 	}
-	if r, l := rating(5301); r != 1285 || l != "Gold" {
-		t.Errorf("an idle 1300 is now %d (%s), want 1285 and the league to follow", r, l)
+	if r, l := rating(5301); r != 4010-decayPerWeek || l != "Gold" {
+		t.Errorf("an idle 4,010 is now %d (%s), want %d and the league to follow",
+			r, l, 4010-decayPerWeek)
 	}
-	if r, _ := rating(5302); r != 1300 {
+	if r, _ := rating(5302); r != 4010 {
 		t.Errorf("somebody who battled this week lost rating: %d", r)
 	}
 	if r, _ := rating(5303); r != decayAbove {
 		t.Errorf("decay went below its floor: %d", r)
 	}
+	if r, _ := rating(5304); r != 2900 {
+		t.Errorf("an idle Silver player lost points: %d — only Gold and up drain", r)
+	}
 	if _, err := decayIdleRatings(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if r, _ := rating(5301); r != 1285 {
+	if r, _ := rating(5301); r != 4010-decayPerWeek {
 		t.Errorf("charged twice in one week: %d", r)
 	}
 }
@@ -1116,10 +1121,10 @@ func TestResolve_TheLeagueFollowsThePointsUpAndDown(t *testing.T) {
 	defer withDB(t)()
 	cid, _ := liveBattle(t)
 	// The creator is just under Silver; the answerer just inside it.
-	if _, err := db.Exec(`UPDATE users SET rating = 1040, wins = 3, league = 'Bronze' WHERE id = 1`); err != nil {
+	if _, err := db.Exec(`UPDATE users SET rating = 1970, wins = 3, league = 'Bronze' WHERE id = 1`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE users SET rating = 1060, wins = 3, league = 'Silver' WHERE id = 2`); err != nil {
+	if _, err := db.Exec(`UPDATE users SET rating = 2005, wins = 3, league = 'Silver' WHERE id = 2`); err != nil {
 		t.Fatal(err)
 	}
 	for _, v := range []int{5301, 5302} {
@@ -1144,10 +1149,11 @@ func TestResolve_TheLeagueFollowsThePointsUpAndDown(t *testing.T) {
 		}
 		return rating, league
 	}
-	if r, l := read(1); r < 1050 || l != "Silver" {
-		t.Errorf("the winner crossed into Silver's points but is %d (%s)", r, l)
+	// A Bronze win is worth 40; a Silver loss costs 15.
+	if r, l := read(1); r != 2010 || l != "Silver" {
+		t.Errorf("the winner went 1,970 → %d (%s), want 2,010 and Silver", r, l)
 	}
-	if r, l := read(2); r >= 1050 || l != "Bronze" {
-		t.Errorf("the loser fell under Silver's points but is %d (%s)", r, l)
+	if r, l := read(2); r != 1990 || l != "Bronze" {
+		t.Errorf("the loser went 2,005 → %d (%s), want 1,990 and Bronze", r, l)
 	}
 }

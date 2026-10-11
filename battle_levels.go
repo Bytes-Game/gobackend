@@ -3,11 +3,26 @@ package main
 // battle_levels.go — who may battle whom.
 //
 // Battles are between people with about the same number of points, so they
-// stay fair: you can answer a challenge from anybody within 50 points of
-// you, above or below. Somebody on 1,000 points can take on anybody from
-// 950 to 1,050. As your points climb towards the next league, the people
-// just inside it come within reach — and when you cross its line you are
-// in it (leagueFor, after every battle).
+// stay fair. How close depends on the league: the higher it is, the closer
+// you have to be.
+//
+//	Bronze    within 50 points, above or below
+//	Silver    within 40
+//	Gold      within 30
+//	Platinum  within 20
+//	Diamond   within 10
+//	Ace       within 5
+//
+// Somebody in Bronze on 1,000 points can take on anybody from 950 to 1,050.
+// As your points climb towards the next league, the people just inside it
+// come within reach — and when you cross its line you are in it (leagueFor,
+// after every battle).
+//
+// When two leagues meet, the higher league's rule applies. A Bronze player
+// on 1,980 and a Silver player on 2,025 are 45 apart: inside Bronze's 50
+// but outside Silver's 40, so they may not battle. That way the answer is
+// the same whoever posted the challenge, and nobody in a league is ever in
+// a battle wider than that league allows.
 //
 // Except between friends. Friends can battle at any level. "Friends" means
 // both people chose it, so a stranger cannot make themselves your friend to
@@ -44,9 +59,17 @@ var leagueTier = map[string]int{
 	"Ace":      6,
 }
 
-// battleRange is how many points apart two players may be and still battle,
-// either way.
-const battleRange = 50
+// battleWindow is how many points apart, either way, players in each league
+// may be and still battle. Somebody with no battle decided yet counts as
+// Bronze: everybody starts at the bottom.
+var battleWindow = map[string]int{
+	"Bronze":   50,
+	"Silver":   40,
+	"Gold":     30,
+	"Platinum": 20,
+	"Diamond":  10,
+	"Ace":      5,
+}
 
 // pointsOf is somebody's points: their rating, or the starting rating for a
 // row that has none yet.
@@ -57,13 +80,20 @@ func pointsOf(rating int) int {
 	return rating
 }
 
+// windowBetween is how far apart two players may be and still battle: the
+// window of the higher player's league. Windows only narrow going up, so
+// that is the stricter of the two.
+func windowBetween(a, b int) int {
+	return battleWindow[leagueOfPoints(max(a, b))]
+}
+
 // inRange is whether two players' points are close enough to battle.
 func inRange(theirs, yours int) bool {
 	gap := theirs - yours
 	if gap < 0 {
 		gap = -gap
 	}
-	return gap <= battleRange
+	return gap <= windowBetween(theirs, yours)
 }
 
 // withCommas writes 1180 as "1,180".
@@ -95,11 +125,18 @@ func aPlayerIn(league string) string {
 // outOfRangeWords says, for the person trying to answer, why they cannot
 // and what they can do instead.
 func outOfRangeWords(theirLeague string, theirs, yours int) string {
-	return fmt.Sprintf("This challenge is from %s with %s points. You have %s points, "+
-		"so you can battle players from %s to %s points, or friends at any level. "+
-		"Win battles to climb.",
-		aPlayerIn(theirLeague), withCommas(theirs), withCommas(yours),
-		withCommas(yours-battleRange), withCommas(yours+battleRange))
+	gap, more := theirs-yours, "more"
+	if gap < 0 {
+		gap, more = -gap, "fewer"
+	}
+	s := fmt.Sprintf("This challenge is from %s with %s points, %s %s than your %s. "+
+		"%s players battle within %d points, so you can't answer this one.",
+		aPlayerIn(theirLeague), withCommas(theirs), withCommas(gap), more, withCommas(yours),
+		leagueOfPoints(max(theirs, yours)), windowBetween(theirs, yours))
+	if theirs > yours {
+		return s + " Win battles to climb closer, or battle friends at any level."
+	}
+	return s + " You can still battle friends at any level."
 }
 
 // errNoPlayer is a level check for somebody the database does not have.

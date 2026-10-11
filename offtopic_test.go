@@ -32,14 +32,22 @@ func TestOffTopic_WhatTheEvidenceAddsUpTo(t *testing.T) {
 }
 
 func TestOffTopic_WhatEachLevelCosts(t *testing.T) {
-	if pointsFor(levelNone) != 0 || pointsFor(levelReported) != 25 || pointsFor(levelConfirmed) != 50 {
-		t.Errorf("levels cost %d, %d, %d — want 0, 25 and 50",
+	if pointsFor(levelNone) != 0 || pointsFor(levelReported) != 50 || pointsFor(levelConfirmed) != 100 {
+		t.Errorf("levels cost %d, %d, %d — want 0, 50 and 100",
 			pointsFor(levelNone), pointsFor(levelReported), pointsFor(levelConfirmed))
 	}
 	// Going from the smaller charge to the higher one charges the difference,
 	// so a video never costs more than the higher charge in all.
-	if d := pointsFor(levelConfirmed) - pointsFor(levelReported); d != 25 {
-		t.Errorf("topping up costs %d, want 25", d)
+	if d := pointsFor(levelConfirmed) - pointsFor(levelReported); d != 50 {
+		t.Errorf("topping up costs %d, want 50", d)
+	}
+	// Even the smaller charge costs more than any win pays, so a video that
+	// doesn't match never comes out ahead.
+	for league, st := range leagueStakes {
+		if penaltyReported <= st.win {
+			t.Errorf("in %s a win pays %d and a reported video costs only %d",
+				league, st.win, penaltyReported)
+		}
 	}
 	if penaltyRating(1000, 50) != 950 || penaltyRating(ratingFloor+3, 50) != ratingFloor {
 		t.Error("a charge takes the points off, never below the floor")

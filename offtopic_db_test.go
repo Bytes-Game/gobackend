@@ -339,7 +339,7 @@ func TestOffTopic_ReportingAVideoThatMatchesCostsTheReporter(t *testing.T) {
 	modelSays(t, "challenge", cid, "yes")
 	before := recordOf(t, 2)
 	code, out := report(t, "2", cid, "")
-	if code != http.StatusOK || !strings.Contains(out["message"].(string), "cost you 10 rating points") {
+	if code != http.StatusOK || !strings.Contains(out["message"].(string), "cost you 20 rating points") {
 		t.Errorf("the answerer's report: %d %v — want to be told what it cost", code, out)
 	}
 	if got, want := recordOf(t, 2), charged(before, falseReportPenalty, 0); got != want {
