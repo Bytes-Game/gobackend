@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"strconv"
 
+	"mymodule/internal/aboutline"
+
 	"github.com/gorilla/mux"
 )
 
@@ -96,7 +98,9 @@ func readVideoAbout(raw, topicsJSON []byte) VideoAbout {
 		return out
 	}
 	out.Looked = len(a.Passes) > 0
-	out.About = a.About
+	// Said plainly, the old answers too: they were stored before the worker
+	// learned to. See internal/aboutline.
+	out.About = aboutline.Plain(a.About)
 	if a.About != "" {
 		out.From = a.AboutFrom
 	}

@@ -243,6 +243,15 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A private account's videos are for its followers, in results as
+	// everywhere else. See private_accounts.go.
+	{
+		viewer := signedInUserID(r)
+		resp.Battles = dropHiddenCreatorChallenges(viewer, resp.Battles)
+		resp.Shorts = dropHiddenCreatorChallenges(viewer, resp.Shorts)
+		resp.Challenges = dropHiddenCreatorChallenges(viewer, resp.Challenges)
+	}
+
 	// Log impressions for the click-through learner — exactly what the
 	// client will render (skip rescued results: clicks on trending
 	// fallbacks shouldn't teach the ORIGINAL query anything). Top-10

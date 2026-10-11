@@ -228,17 +228,33 @@ func loadHomeFeedItemByID(itemType, id string) (HomeFeedItem, bool) {
 		err := db.QueryRow(`
 			SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 				c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
-				c.views, COALESCE(cl.likes, 0), c.created_at,
+				c.views,
+				(SELECT COUNT(*) FROM challenge_likes l WHERE l.challenge_id = c.id),
+				c.created_at,
 				(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id)
 			FROM challenges c
 			JOIN users u ON c.creator_id = u.id
-			LEFT JOIN (SELECT challenge_id, COUNT(*) AS likes FROM challenge_likes GROUP BY challenge_id) cl
-				ON cl.challenge_id = c.id
-			WHERE c.id = $1`, id).Scan(
+			WHERE c.id = $1
+			  AND `+searchableWhere("c"), id).Scan(
 			&ch.ID, &creatorID, &ch.CreatorUsername, &ch.CreatorLeague,
 			&ch.VideoURL, &ch.ThumbnailURL, &ch.Prefix, &ch.Subject,
 			&ch.Visibility, &ch.Status, &views, &likes, &createdAt, &respCount)
+		// Only what anybody may find. Everything that calls this hands the
+		// video to people who did not choose it — trending, "people who
+		// watched this also watched", the wildcard, a new person's first
+		// feed — and none of them checked. A friends-only video that its
+		// friends watched a lot used to trend, onto strangers' screens; a
+		// removed one stayed on the trending board until it decayed.
+		//
+		// Likes are counted for this one video. It used to count every
+		// video's likes and then pick this one out, once per trending item.
 		if err != nil {
+			// Gone, private, or removed is ordinary. Anything else is this
+			// server failing.
+			if !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("trending: could not load challenge %s, leaving it "+
+					"out of the feed: %v", id, err)
+			}
 			return HomeFeedItem{}, false
 		}
 		ch.CreatorID = itoa(creatorID)

@@ -5681,6 +5681,9 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		// You page — discovery only happened via Following, a
 		// chicken-and-egg lock. Guarantee the newest uploads a slot.
 		items = injectFreshUploads(userID, items, page)
+		// A private account's videos are for its followers. See
+		// private_accounts.go.
+		items = dropHiddenCreatorItems(userID, items)
 
 		// Same payload enrichment every other feed path runs. Without
 		// it, battles reached cold users with no topResponse* fields
@@ -6085,6 +6088,9 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// finalize must come first regardless: battle-ness is read from
 	// TopResponseVideoUrl, which finalizeFeedItems is what fills in.
 	rawCount := len(composed)
+	// A private account's videos are for its followers. After rawCount, so
+	// leaving them out never makes the feed say it has run out.
+	composed = dropHiddenCreatorScored(userID, composed)
 	finalizeFeedItemsScored(composed)
 	markViewerStateScored(userID, composed)
 	composed = spaceOutFeedKindsScored(composed)

@@ -139,6 +139,11 @@ func UserBattlesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cards, err := loadBattleCards(r.Context(), db, uid, tab, visitor, limit, offset)
+	// A private account's battles are for its followers; the record stays,
+	// the way a private profile still shows its counts.
+	if visitor && accountHiddenFrom(authUserID(r), strconv.Itoa(uid)) {
+		cards = nil
+	}
 	if err != nil {
 		queryFailed("battles tab "+tab+" for user "+strconv.Itoa(uid), "answered 500", err)
 		http.Error(w, "could not read these battles", http.StatusInternalServerError)

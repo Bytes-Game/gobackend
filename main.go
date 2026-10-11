@@ -613,7 +613,9 @@ func main() {
 	// Psychology-based recommendation engine (v2)
 	api.HandleFunc("/feed/smart", authed(SmartFeedHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/feed/following/v2", authed(FollowingFeedV2Handler)).Methods("GET", "OPTIONS")
-	api.HandleFunc("/feed/explore", authed(ExploreFeedHandler)).Methods("GET", "OPTIONS")
+	// POST is the search grid asking for its next batch, with the videos it
+	// already holds in the body. explore_grid.go.
+	api.HandleFunc("/feed/explore", authed(ExploreFeedHandler)).Methods("GET", "POST", "OPTIONS")
 	api.HandleFunc("/categories", CategoriesHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/events", authed(TrackEventHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/events/batch", authed(TrackBatchEventsHandler)).Methods("POST", "OPTIONS")
@@ -759,6 +761,10 @@ func main() {
 	// field simply says "unknown" rather than pretending.
 	buildCommit := buildCommitID()
 	startedAt := time.Now().UTC().Format(time.RFC3339)
+	// What a shared link or a scanned QR code opens: a person, or one video.
+	// No sign-in. public_pages.go.
+	r.HandleFunc("/u/{username}", PublicProfilePageHandler).Methods("GET", "HEAD")
+	r.HandleFunc("/v/{id:[0-9]+}", PublicVideoPageHandler).Methods("GET", "HEAD")
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
