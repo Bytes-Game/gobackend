@@ -15,16 +15,16 @@ import (
 )
 
 const (
-	lvGold     = 8401 // the challenge's creator
-	lvBronze   = 8402
-	lvSilver   = 8403
-	lvPlatinum = 8404
-	lvDiamond  = 8405
-	lvNew      = 8406 // no battle decided yet
+	lvGold    = 8401 // the challenge's creator: 1,200 points
+	lvClose   = 8402 // 1,160: 40 below
+	lvEdge    = 8403 // 1,250: exactly 50 above
+	lvJustOut = 8404 // 1,149: 51 below
+	lvFar     = 8405 // 1,600
+	lvNew     = 8406 // 1,000, no battle decided yet
 )
 
-// seedLevels makes one person in each league and a Gold player's challenge;
-// it answers the challenge's id.
+// seedLevels makes a Gold player on 1,200 points with a challenge, and
+// people at various distances from them; it answers the challenge's id.
 func seedLevels(t *testing.T, visibility string) string {
 	t.Helper()
 	for _, p := range []struct {
@@ -32,15 +32,15 @@ func seedLevels(t *testing.T, visibility string) string {
 		name             string
 	}{
 		{lvGold, 1200, 4, "gold_player"},
-		{lvBronze, 1000, 4, "bronze_player"},
-		{lvSilver, 1100, 4, "silver_player"},
-		{lvPlatinum, 1350, 4, "platinum_player"},
-		{lvDiamond, 1600, 4, "diamond_player"},
+		{lvClose, 1160, 4, "close_player"},
+		{lvEdge, 1250, 4, "edge_player"},
+		{lvJustOut, 1149, 4, "just_out"},
+		{lvFar, 1600, 4, "far_player"},
 		{lvNew, 1000, 0, "brand_new"},
 	} {
 		// The league column says Bronze for everybody, as it does for
 		// anybody whose battles have not been decided since it was added:
-		// the rule must go by the rating and the record, not by it.
+		// the rule goes by points, not by it.
 		if _, err := db.Exec(`
 			INSERT INTO users (id, username, password, rating, wins, league)
 			VALUES ($1, $2, 'x', $3, $4, 'Bronze') ON CONFLICT (id) DO NOTHING`,
@@ -90,7 +90,7 @@ func follow(t *testing.T, from, to int) {
 	}
 }
 
-func TestBattleLevels_OnlyTheNeighbouringLeaguesMayAnswer(t *testing.T) {
+func TestBattleLevels_OnlyWithin50PointsMayAnswer(t *testing.T) {
 	defer withDB(t)()
 	resetRedis(t)
 	resetActionLimiters(t)
@@ -101,11 +101,11 @@ func TestBattleLevels_OnlyTheNeighbouringLeaguesMayAnswer(t *testing.T) {
 		who   int
 		allow bool
 	}{
-		{"Silver, one below Gold", lvSilver, true},
-		{"Platinum, one above Gold", lvPlatinum, true},
-		{"Bronze, two below Gold", lvBronze, false},
-		{"Diamond, two above Gold", lvDiamond, false},
-		{"somebody with no battle decided yet", lvNew, false},
+		{"40 points below", lvClose, true},
+		{"exactly 50 points above", lvEdge, true},
+		{"51 points below", lvJustOut, false},
+		{"400 points above", lvFar, false},
+		{"somebody new, 200 points below", lvNew, false},
 	} {
 		code, body := levelAnswer(t, c.who, cid)
 		if c.allow && code != 201 {
@@ -117,16 +117,12 @@ func TestBattleLevels_OnlyTheNeighbouringLeaguesMayAnswer(t *testing.T) {
 	}
 
 	// And the refusal says, in words, what the person can do instead.
-	_, said := levelAnswer(t, lvBronze, cid)
-	for _, want := range []string{"Gold player", "You're in Bronze",
-		"Bronze and Silver", "friends at any level"} {
+	_, said := levelAnswer(t, lvJustOut, cid)
+	for _, want := range []string{"a Gold player with 1,200 points", "You have 1,149 points",
+		"from 1,099 to 1,199 points", "friends at any level"} {
 		if !strings.Contains(said, want) {
 			t.Errorf("the refusal %q does not say %q", said, want)
 		}
-	}
-	_, said = levelAnswer(t, lvNew, cid)
-	if !strings.Contains(said, "start in Bronze") {
-		t.Errorf("somebody new is told %q, not that they start in Bronze", said)
 	}
 }
 
@@ -135,12 +131,12 @@ func TestBattleLevels_TheBattlePageSaysSoBeforeAnybodyRecords(t *testing.T) {
 	resetRedis(t)
 	cid := seedLevels(t, "arena")
 
-	if ok, msg := detailSays(t, lvSilver, cid); !ok || msg != "" {
-		t.Errorf("a Silver player is told %v %q about a Gold challenge", ok, msg)
+	if ok, msg := detailSays(t, lvClose, cid); !ok || msg != "" {
+		t.Errorf("somebody 40 points away is told %v %q", ok, msg)
 	}
-	ok, msg := detailSays(t, lvBronze, cid)
-	if ok || !strings.Contains(msg, "Bronze and Silver") {
-		t.Errorf("a Bronze player is told %v %q about a Gold challenge", ok, msg)
+	ok, msg := detailSays(t, lvJustOut, cid)
+	if ok || !strings.Contains(msg, "1,099 to 1,199") {
+		t.Errorf("somebody 51 points away is told %v %q", ok, msg)
 	}
 	if ok, msg := detailSays(t, lvGold, cid); ok || !strings.Contains(msg, "your own") {
 		t.Errorf("the creator is told %v %q about their own challenge", ok, msg)
@@ -158,16 +154,16 @@ func TestBattleLevels_FriendsBattleAtAnyLevel(t *testing.T) {
 	cid := seedLevels(t, "arena")
 
 	// Following somebody is not enough: anybody can follow anybody.
-	follow(t, lvBronze, lvGold)
-	if code, body := levelAnswer(t, lvBronze, cid); code != 403 {
+	follow(t, lvJustOut, lvGold)
+	if code, body := levelAnswer(t, lvJustOut, cid); code != 403 {
 		t.Fatalf("a one-way follow got round the level rule: %d %s", code, body)
 	}
 	// Following each other is.
-	follow(t, lvGold, lvBronze)
-	if ok, msg := detailSays(t, lvBronze, cid); !ok {
+	follow(t, lvGold, lvJustOut)
+	if ok, msg := detailSays(t, lvJustOut, cid); !ok {
 		t.Errorf("friends are told they cannot battle: %q", msg)
 	}
-	if code, body := levelAnswer(t, lvBronze, cid); code != 201 {
+	if code, body := levelAnswer(t, lvJustOut, cid); code != 201 {
 		t.Errorf("friends could not battle across levels: %d %s", code, body)
 	}
 }
@@ -178,16 +174,16 @@ func TestBattleLevels_PickedByNameForAFriendsOnlyPostCounts(t *testing.T) {
 	resetActionLimiters(t)
 	cid := seedLevels(t, "friends")
 	// Both follow the creator, so both may see it; only one was picked.
-	follow(t, lvDiamond, lvGold)
-	follow(t, lvBronze, lvGold)
+	follow(t, lvFar, lvGold)
+	follow(t, lvJustOut, lvGold)
 	if _, err := db.Exec(`INSERT INTO challenge_visible_to (challenge_id, user_id)
-		VALUES ($1, $2), ($1, $3)`, cid, lvBronze, lvSilver); err != nil {
+		VALUES ($1, $2), ($1, $3)`, cid, lvJustOut, lvClose); err != nil {
 		t.Fatal(err)
 	}
-	if code, body := levelAnswer(t, lvBronze, cid); code != 201 {
+	if code, body := levelAnswer(t, lvJustOut, cid); code != 201 {
 		t.Errorf("somebody the creator picked by name was refused: %d %s", code, body)
 	}
-	if code, _ := levelAnswer(t, lvDiamond, cid); code == 201 {
+	if code, _ := levelAnswer(t, lvFar, cid); code == 201 {
 		t.Error("somebody not picked answered a friends-only post")
 	}
 }
@@ -220,14 +216,89 @@ func TestBattleLevels_NobodyAnswersAVideoTheyMayNotSee(t *testing.T) {
 	}
 }
 
-func TestBattleLevels_InReachInWords(t *testing.T) {
-	for tier, want := range map[int]string{
-		1: "Bronze and Silver",
-		3: "Silver, Gold and Platinum",
-		5: "Platinum and Diamond",
-	} {
-		if got := leaguesInReach(tier); got != want {
-			t.Errorf("tier %d: %q, want %q", tier, got, want)
+func TestBattleLevels_TheRefusalInWords(t *testing.T) {
+	got := outOfRangeWords("Ace", 1800, 1000)
+	want := "This challenge is from an Ace player with 1,800 points. You have 1,000 " +
+		"points, so you can battle players from 950 to 1,050 points, or friends at " +
+		"any level. Win battles to climb."
+	if got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+	if !strings.Contains(outOfRangeWords("Unranked", 1000, 1200), "a new player") {
+		t.Error("somebody with no battle decided is not called a new player")
+	}
+}
+
+// findChallenge walks a feed's JSON for the challenge with [id].
+func findChallenge(v any, id string) map[string]any {
+	switch x := v.(type) {
+	case map[string]any:
+		if x["id"] == id {
+			if _, ok := x["creatorId"]; ok {
+				return x
+			}
 		}
+		for _, e := range x {
+			if got := findChallenge(e, id); got != nil {
+				return got
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if got := findChallenge(e, id); got != nil {
+				return got
+			}
+		}
+	}
+	return nil
+}
+
+func TestBattleLevels_TheFeedSaysWhichAcceptButtonsAreOff(t *testing.T) {
+	defer withDB(t)()
+	resetRedis(t)
+	cid := seedLevels(t, "arena")
+	closed := gridVideo(t, lvGold, 0, "arena", "open")
+	if _, err := db.Exec(`UPDATE challenges SET open_to_battles = FALSE WHERE id = $1`, closed); err != nil {
+		t.Fatal(err)
+	}
+	// The For You feed, as the reel reads it.
+	feed := func(who int) any {
+		r := as(httptest.NewRequest("GET", "/api/v1/feed/smart?page=1&limit=30", nil), who)
+		w := httptest.NewRecorder()
+		SmartFeedHandler(w, r)
+		var got any
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("feed for %d: %d %s", who, w.Code, w.Body.String())
+		}
+		return got
+	}
+	far := findChallenge(feed(lvJustOut), cid)
+	if far == nil {
+		t.Fatal("the challenge is not in the feed, so nothing below says anything")
+	}
+	if why, _ := far["answerBlocked"].(string); !strings.Contains(why, "1,099 to 1,199") {
+		t.Errorf("somebody 51 points away is not told their Accept is off: %v", far["answerBlocked"])
+	}
+	near := findChallenge(feed(lvClose), cid)
+	if near == nil {
+		t.Fatal("the challenge is not in the near player's feed")
+	}
+	if why, ok := near["answerBlocked"]; ok {
+		t.Errorf("somebody 40 points away has their Accept off: %v", why)
+	}
+	// A post nobody can answer is not marked: there is no button to switch.
+	if got := findChallenge(feed(lvJustOut), closed); got != nil {
+		if _, ok := got["answerBlocked"]; ok {
+			t.Error("a post closed to battles was marked as well")
+		}
+	}
+	// Friends: the button is on at any distance.
+	follow(t, lvJustOut, lvGold)
+	follow(t, lvGold, lvJustOut)
+	resetRedis(t)
+	if got := findChallenge(feed(lvJustOut), cid); got == nil {
+		t.Fatal("the challenge left the feed after following")
+	} else if why, ok := got["answerBlocked"]; ok {
+		t.Errorf("a friend's Accept is off: %v", why)
 	}
 }

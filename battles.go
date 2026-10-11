@@ -72,11 +72,20 @@ func clampBattleDays(d int) int {
 
 // leagueFor names the league for a rating. Somebody with no decided battles
 // has not earned one yet, whatever their rating says.
+//
+// Everybody starts on 1,000 points, in Bronze. Each league is further from
+// the last than that one was from the one before — 50 points to Silver,
+// then 100 to Gold, 150 to Platinum, 200 to Diamond and 250 to Ace — so
+// every step up is harder than the one below it. It is worked out again
+// after every decided battle and every week of sitting out above 1,200
+// (decayIdleRatings), so the league goes down as well as up.
 func leagueFor(rating, decided int) string {
 	if decided <= 0 {
 		return "Unranked"
 	}
 	switch {
+	case rating >= 1750:
+		return "Ace"
 	case rating >= 1500:
 		return "Diamond"
 	case rating >= 1300:

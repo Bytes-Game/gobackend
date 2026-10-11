@@ -240,6 +240,11 @@ type Challenge struct {
 	// fill it errs towards the old behaviour, and answering is refused by
 	// the server anyway. See battles_open.go.
 	ClosedToBattles bool `json:"closedToBattles,omitempty"`
+	// AnswerBlocked is, for the person reading, why they may not answer
+	// this challenge — too many points apart and not friends — or "" when
+	// they may. The app switches its Accept button off when it is set. See
+	// markAnswerBlocks.
+	AnswerBlocked string `json:"answerBlocked,omitempty"`
 	Likes           int  `json:"likes"`
 	Views           int  `json:"views"`
 	// Live count of comments on this challenge. Computed from

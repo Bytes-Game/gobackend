@@ -69,6 +69,9 @@ func markViewerState(viewerID string, chs []*Challenge) {
 	if err != nil || viewer <= 0 {
 		return
 	}
+	// Which of these the reader may not answer, so each Accept button is on
+	// or off before anybody taps it. See battle_levels.go.
+	markAnswerBlocks(viewerID, chs)
 	byID := make(map[string][]*Challenge, len(chs))
 	byAnswer := make(map[string][]*Challenge)
 	challengeIDs := make([]int64, 0, len(chs))
