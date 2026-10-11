@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,7 +16,7 @@ import (
 )
 
 const (
-	lvGold    = 8401 // the challenge's creator: 1,200 points
+	lvHost    = 8401 // the challenge's creator: 1,200 points, in Bronze
 	lvClose   = 8402 // 1,160: 40 below
 	lvEdge    = 8403 // 1,250: exactly 50 above
 	lvJustOut = 8404 // 1,149: 51 below
@@ -23,15 +24,16 @@ const (
 	lvNew     = 8406 // 1,000, no battle decided yet
 )
 
-// seedLevels makes a Gold player on 1,200 points with a challenge, and
+// seedLevels makes a Bronze player on 1,200 points with a challenge, and
 // people at various distances from them; it answers the challenge's id.
+// Everybody here is in Bronze, so the window is 50 points.
 func seedLevels(t *testing.T, visibility string) string {
 	t.Helper()
 	for _, p := range []struct {
 		id, rating, wins int
 		name             string
 	}{
-		{lvGold, 1200, 4, "gold_player"},
+		{lvHost, 1200, 4, "host_player"},
 		{lvClose, 1160, 4, "close_player"},
 		{lvEdge, 1250, 4, "edge_player"},
 		{lvJustOut, 1149, 4, "just_out"},
@@ -48,7 +50,7 @@ func seedLevels(t *testing.T, visibility string) string {
 			t.Fatal(err)
 		}
 	}
-	return gridVideo(t, lvGold, 0, visibility, "open")
+	return gridVideo(t, lvHost, 0, visibility, "open")
 }
 
 // levelAnswer answers [cid] through the handler, as the app does.
@@ -118,8 +120,8 @@ func TestBattleLevels_OnlyWithin50PointsMayAnswer(t *testing.T) {
 
 	// And the refusal says, in words, what the person can do instead.
 	_, said := levelAnswer(t, lvJustOut, cid)
-	for _, want := range []string{"a Gold player with 1,200 points", "You have 1,149 points",
-		"from 1,099 to 1,199 points", "friends at any level"} {
+	for _, want := range []string{"a Bronze player with 1,200 points", "51 more than your 1,149",
+		"Bronze players battle within 50 points", "friends at any level"} {
 		if !strings.Contains(said, want) {
 			t.Errorf("the refusal %q does not say %q", said, want)
 		}
@@ -135,10 +137,10 @@ func TestBattleLevels_TheBattlePageSaysSoBeforeAnybodyRecords(t *testing.T) {
 		t.Errorf("somebody 40 points away is told %v %q", ok, msg)
 	}
 	ok, msg := detailSays(t, lvJustOut, cid)
-	if ok || !strings.Contains(msg, "1,099 to 1,199") {
+	if ok || !strings.Contains(msg, "within 50 points") {
 		t.Errorf("somebody 51 points away is told %v %q", ok, msg)
 	}
-	if ok, msg := detailSays(t, lvGold, cid); ok || !strings.Contains(msg, "your own") {
+	if ok, msg := detailSays(t, lvHost, cid); ok || !strings.Contains(msg, "your own") {
 		t.Errorf("the creator is told %v %q about their own challenge", ok, msg)
 	}
 	// Nobody signed in: nothing to say, and the page still opens.
@@ -154,12 +156,12 @@ func TestBattleLevels_FriendsBattleAtAnyLevel(t *testing.T) {
 	cid := seedLevels(t, "arena")
 
 	// Following somebody is not enough: anybody can follow anybody.
-	follow(t, lvJustOut, lvGold)
+	follow(t, lvJustOut, lvHost)
 	if code, body := levelAnswer(t, lvJustOut, cid); code != 403 {
 		t.Fatalf("a one-way follow got round the level rule: %d %s", code, body)
 	}
 	// Following each other is.
-	follow(t, lvGold, lvJustOut)
+	follow(t, lvHost, lvJustOut)
 	if ok, msg := detailSays(t, lvJustOut, cid); !ok {
 		t.Errorf("friends are told they cannot battle: %q", msg)
 	}
@@ -174,8 +176,8 @@ func TestBattleLevels_PickedByNameForAFriendsOnlyPostCounts(t *testing.T) {
 	resetActionLimiters(t)
 	cid := seedLevels(t, "friends")
 	// Both follow the creator, so both may see it; only one was picked.
-	follow(t, lvFar, lvGold)
-	follow(t, lvJustOut, lvGold)
+	follow(t, lvFar, lvHost)
+	follow(t, lvJustOut, lvHost)
 	if _, err := db.Exec(`INSERT INTO challenge_visible_to (challenge_id, user_id)
 		VALUES ($1, $2), ($1, $3)`, cid, lvJustOut, lvClose); err != nil {
 		t.Fatal(err)
@@ -193,7 +195,7 @@ func TestBattleLevels_NobodyAnswersTheirOwnChallenge(t *testing.T) {
 	resetRedis(t)
 	resetActionLimiters(t)
 	cid := seedLevels(t, "arena")
-	code, body := levelAnswer(t, lvGold, cid)
+	code, body := levelAnswer(t, lvHost, cid)
 	if code != 403 || !strings.Contains(body, "your own challenge") {
 		t.Errorf("the creator answered their own challenge: %d %s", code, body)
 	}
@@ -217,15 +219,89 @@ func TestBattleLevels_NobodyAnswersAVideoTheyMayNotSee(t *testing.T) {
 }
 
 func TestBattleLevels_TheRefusalInWords(t *testing.T) {
-	got := outOfRangeWords("Ace", 1800, 1000)
-	want := "This challenge is from an Ace player with 1,800 points. You have 1,000 " +
-		"points, so you can battle players from 950 to 1,050 points, or friends at " +
-		"any level. Win battles to climb."
+	got := outOfRangeWords("Gold", 3035, 2990)
+	want := "This challenge is from a Gold player with 3,035 points, 45 more than " +
+		"your 2,990. Gold players battle within 30 points, so you can't answer this " +
+		"one. Win battles to climb closer, or battle friends at any level."
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}
-	if !strings.Contains(outOfRangeWords("Unranked", 1000, 1200), "a new player") {
-		t.Error("somebody with no battle decided is not called a new player")
+	// Somebody far below: climbing would not help, so it is not suggested.
+	down := outOfRangeWords("Unranked", 1000, 1200)
+	for _, w := range []string{"a new player", "200 fewer than your 1,200",
+		"Bronze players battle within 50 points", "You can still battle friends"} {
+		if !strings.Contains(down, w) {
+			t.Errorf("%q does not say %q", down, w)
+		}
+	}
+	if strings.Contains(down, "climb") {
+		t.Errorf("somebody 200 points ABOVE the challenger is told to climb: %q", down)
+	}
+}
+
+// The window narrows each league up: 50, 40, 30, 20, 10, 10.
+func TestBattleLevels_TheWindowNarrowsEachLeagueUp(t *testing.T) {
+	for _, c := range []struct {
+		league string
+		points int
+		window int
+	}{
+		{"Bronze", 1500, 50}, {"Silver", 2500, 40}, {"Gold", 3500, 30},
+		{"Platinum", 4500, 20}, {"Diamond", 5500, 10}, {"Ace", 6500, 10},
+	} {
+		if !inRange(c.points+c.window, c.points) || !inRange(c.points-c.window, c.points) {
+			t.Errorf("%s: %d points either way was refused", c.league, c.window)
+		}
+		if inRange(c.points+c.window+1, c.points) || inRange(c.points-c.window-1, c.points) {
+			t.Errorf("%s: %d points either way was let in", c.league, c.window+1)
+		}
+	}
+}
+
+// Where two leagues meet, the higher one's rule applies — whoever posted.
+func TestBattleLevels_TheHigherLeaguesRuleApplies(t *testing.T) {
+	// Bronze 1,980 and Silver 2,025: 45 apart, inside Bronze's 50 but
+	// outside Silver's 40.
+	if inRange(2025, 1980) || inRange(1980, 2025) {
+		t.Error("a Silver player was put in a battle 45 points wide")
+	}
+	// 40 apart is inside Silver's rule, from either side.
+	if !inRange(2020, 1980) || !inRange(1980, 2020) {
+		t.Error("Bronze and Silver 40 points apart could not battle")
+	}
+	// Close to the next league you can reach into it.
+	if !inRange(2010, 1990) {
+		t.Error("a Bronze player 10 points under Silver could not battle into it")
+	}
+}
+
+// Through the real answer step: a Silver player's challenge is held to
+// Silver's 40, not Bronze's 50. If the league stopped reaching the window,
+// 45 points would get in here.
+func TestBattleLevels_ASilverChallengeTakesSilversWindow(t *testing.T) {
+	defer withDB(t)()
+	resetRedis(t)
+	resetActionLimiters(t)
+	for _, p := range []struct {
+		id, rating int
+		name       string
+	}{
+		{8411, 2500, "silver_host"}, {8412, 2540, "silver_near"}, {8413, 2545, "silver_out"},
+	} {
+		if _, err := db.Exec(`
+			INSERT INTO users (id, username, password, rating, wins, league)
+			VALUES ($1, $2, 'x', $3, 20, 'Silver') ON CONFLICT (id) DO NOTHING`,
+			p.id, p.name, p.rating); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cid := gridVideo(t, 8411, 0, "arena", "open")
+	code, body := levelAnswer(t, 8413, cid)
+	if code != 403 || !strings.Contains(body, "Silver players battle within 40 points") {
+		t.Errorf("45 points apart in Silver: %d %s", code, body)
+	}
+	if code, body := levelAnswer(t, 8412, cid); code != 201 {
+		t.Errorf("40 points apart in Silver was refused: %d %s", code, body)
 	}
 }
 
@@ -257,7 +333,7 @@ func TestBattleLevels_TheFeedSaysWhichAcceptButtonsAreOff(t *testing.T) {
 	defer withDB(t)()
 	resetRedis(t)
 	cid := seedLevels(t, "arena")
-	closed := gridVideo(t, lvGold, 0, "arena", "open")
+	closed := gridVideo(t, lvHost, 0, "arena", "open")
 	if _, err := db.Exec(`UPDATE challenges SET open_to_battles = FALSE WHERE id = $1`, closed); err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +352,7 @@ func TestBattleLevels_TheFeedSaysWhichAcceptButtonsAreOff(t *testing.T) {
 	if far == nil {
 		t.Fatal("the challenge is not in the feed, so nothing below says anything")
 	}
-	if why, _ := far["answerBlocked"].(string); !strings.Contains(why, "1,099 to 1,199") {
+	if why, _ := far["answerBlocked"].(string); !strings.Contains(why, "within 50 points") {
 		t.Errorf("somebody 51 points away is not told their Accept is off: %v", far["answerBlocked"])
 	}
 	near := findChallenge(feed(lvClose), cid)
@@ -293,12 +369,62 @@ func TestBattleLevels_TheFeedSaysWhichAcceptButtonsAreOff(t *testing.T) {
 		}
 	}
 	// Friends: the button is on at any distance.
-	follow(t, lvJustOut, lvGold)
-	follow(t, lvGold, lvJustOut)
+	follow(t, lvJustOut, lvHost)
+	follow(t, lvHost, lvJustOut)
 	resetRedis(t)
 	if got := findChallenge(feed(lvJustOut), cid); got == nil {
 		t.Fatal("the challenge left the feed after following")
 	} else if why, ok := got["answerBlocked"]; ok {
 		t.Errorf("a friend's Accept is off: %v", why)
+	}
+}
+
+// Migration 022 works everybody's league out again with the new lines, the
+// same way leagueFor does, and leaves people with no battle decided alone.
+func TestMigration022_EveryLeagueIsWorkedOutAgain(t *testing.T) {
+	defer withDB(t)()
+	type person struct {
+		id, rating, wins int
+		stale            string
+	}
+	people := []person{
+		{8421, 1100, 3, "Silver"},   // Silver under the old lines; Bronze now
+		{8422, 1100, 0, "Unranked"}, // nothing decided: left alone
+	}
+	// One point under every line and exactly on it, so a line in the
+	// migration that is off by any amount shows here.
+	id := 8430
+	for line := 2000; line <= 6000; line += 1000 {
+		people = append(people, person{id, line - 1, 3, "Ace"}, person{id + 1, line, 3, "Bronze"})
+		id += 2
+	}
+	for _, p := range people {
+		if _, err := db.Exec(`
+			INSERT INTO users (id, username, password, rating, wins, league)
+			VALUES ($1, $2, 'x', $3, $4, $5)`,
+			p.id, "m022_"+strconv.Itoa(p.id), p.rating, p.wins, p.stale); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sqlText, err := os.ReadFile("migrations/022_leagues_every_thousand_points.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(sqlText)); err != nil {
+		t.Fatalf("running migration 022: %v", err)
+	}
+	for _, p := range people {
+		var got string
+		if err := db.QueryRow(`SELECT league FROM users WHERE id = $1`, p.id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		want := leagueFor(p.rating, p.wins)
+		if p.wins == 0 {
+			want = p.stale
+		}
+		if got != want {
+			t.Errorf("%d points, %d wins: league %q after the migration, want %q",
+				p.rating, p.wins, got, want)
+		}
 	}
 }

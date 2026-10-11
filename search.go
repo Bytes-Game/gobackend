@@ -368,7 +368,7 @@ func rankSearchAccounts(query, userID string, following, fof map[string]bool, vi
 		return []User{}
 	}
 
-	// leagueTier returns 0 for empty/unknown leagues; valid tiers are 1..5.
+	// leagueTier returns 0 for empty/unknown leagues; valid tiers are 1..6.
 	viewerLeagueIdx := leagueTier[viewerLeague]
 
 	type scored struct {

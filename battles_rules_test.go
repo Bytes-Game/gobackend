@@ -17,16 +17,16 @@ func TestBattleLength_AtLeastAWeekAtMostAMonth(t *testing.T) {
 }
 
 func TestLeague_EarnedNotGiven(t *testing.T) {
-	if got := leagueFor(1600, 0); got != "Unranked" {
+	if got := leagueFor(5600, 0); got != "Unranked" {
 		t.Errorf("no decided battles gave %q — a league has to be earned", got)
 	}
 	cases := []struct {
 		rating int
 		want   string
 	}{
-		{900, "Bronze"}, {1049, "Bronze"}, {1050, "Silver"}, {1150, "Gold"},
-		{1300, "Platinum"}, {1500, "Diamond"}, {1749, "Diamond"}, {1750, "Ace"},
-		{2400, "Ace"},
+		{900, "Bronze"}, {1000, "Bronze"}, {1999, "Bronze"}, {2000, "Silver"},
+		{2999, "Silver"}, {3000, "Gold"}, {4000, "Platinum"}, {5000, "Diamond"},
+		{5999, "Diamond"}, {6000, "Ace"}, {9000, "Ace"},
 	}
 	for _, c := range cases {
 		if got := leagueFor(c.rating, 5); got != c.want {
@@ -34,10 +34,33 @@ func TestLeague_EarnedNotGiven(t *testing.T) {
 		}
 	}
 	// Every name here must be one matchmaking understands, or two players
-	// in real leagues get compared as "unknown".
-	for _, r := range []int{900, 1100, 1200, 1400, 1600, 1800} {
-		if _, ok := leagueTier[leagueFor(r, 1)]; !ok {
-			t.Errorf("%q is not in leagueTier", leagueFor(r, 1))
+	// in real leagues get compared as "unknown" — and one the battle window
+	// and the points table know, or a whole league battles nobody and wins
+	// nothing.
+	for _, r := range []int{1000, 2500, 3500, 4500, 5500, 6500} {
+		l := leagueFor(r, 1)
+		if _, ok := leagueTier[l]; !ok {
+			t.Errorf("%q is not in leagueTier", l)
+		}
+		if battleWindow[l] <= 0 {
+			t.Errorf("%q has no battle window", l)
+		}
+		if leagueStakes[l].win <= 0 || leagueStakes[l].loss <= 0 {
+			t.Errorf("%q has no points table", l)
+		}
+	}
+}
+
+// Every league is 1,000 points wide, from the 1,000 everybody starts on.
+func TestLeague_EveryLeagueIsAThousandPoints(t *testing.T) {
+	if got := leagueFor(ratingStart, 1); got != "Bronze" {
+		t.Fatalf("the starting points are in %q, want Bronze", got)
+	}
+	floor := ratingStart
+	for _, want := range []string{"Silver", "Gold", "Platinum", "Diamond", "Ace"} {
+		floor += 1000
+		if leagueFor(floor-1, 1) == want || leagueFor(floor, 1) != want {
+			t.Errorf("%s should start at exactly %d", want, floor)
 		}
 	}
 }
@@ -140,58 +163,99 @@ func TestStandings_VotesFirstThenLikesViewsShares(t *testing.T) {
 	}
 }
 
-func TestDecide_WinnerGainsWhatTheLoserLoses(t *testing.T) {
-	sides := []Standing{
-		{Username: "c", Role: "creator", Votes: 5, userID: 1},
-		{Username: "r", Role: "responder", Votes: 2, userID: 2, responseID: 9},
+// verdictsOf runs a battle between players on [points] where the first
+// side gets [votes][0] votes, and so on, and answers each side's change.
+func verdictsOf(t *testing.T, points []int, votes []float64) []battleVerdict {
+	t.Helper()
+	sides := make([]Standing, len(points))
+	records := map[int]competitor{}
+	for i := range points {
+		sides[i] = Standing{Votes: votes[i], userID: i + 1}
+		records[i+1] = competitor{Rating: points[i]}
 	}
-	got := decideBattle(sides, map[int]competitor{1: {Rating: 1000}, 2: {Rating: 1000}})
-	byUser := map[int]battleVerdict{}
+	got := decideBattle(sides, records)
+	byUser := make([]battleVerdict, len(points))
 	for _, v := range got {
-		byUser[v.userID] = v
+		byUser[v.userID-1] = v
 	}
-	w, l := byUser[1], byUser[2]
-	if w.Outcome != "won" || l.Outcome != "lost" {
-		t.Fatalf("outcomes %q / %q", w.Outcome, l.Outcome)
+	return byUser
+}
+
+func change(v battleVerdict) int { return v.RatingAfter - v.RatingBefore }
+
+func TestDecide_AWinAndALossInBronze(t *testing.T) {
+	vs := verdictsOf(t, []int{1000, 1000}, []float64{5, 2})
+	if vs[0].Outcome != "won" || vs[1].Outcome != "lost" {
+		t.Fatalf("outcomes %q / %q", vs[0].Outcome, vs[1].Outcome)
 	}
-	if w.RatingAfter-w.RatingBefore != 16 || l.RatingAfter-l.RatingBefore != -16 {
-		t.Errorf("equal ratings moved %+d / %+d, want +16 / -16",
-			w.RatingAfter-w.RatingBefore, l.RatingAfter-l.RatingBefore)
+	if change(vs[0]) != 40 || change(vs[1]) != -10 {
+		t.Errorf("in Bronze the points moved %+d / %+d, want +40 / -10",
+			change(vs[0]), change(vs[1]))
 	}
 }
 
-func TestDecide_BeatingSomebodyBetterIsWorthMore(t *testing.T) {
-	upset := decideBattle([]Standing{
-		{Votes: 3, userID: 1}, {Votes: 1, userID: 2},
-	}, map[int]competitor{1: {Rating: 1000}, 2: {Rating: 1400}})
-	expected := decideBattle([]Standing{
-		{Votes: 3, userID: 2}, {Votes: 1, userID: 1},
-	}, map[int]competitor{1: {Rating: 1000}, 2: {Rating: 1400}})
-	gain := func(vs []battleVerdict, id int) int {
-		for _, v := range vs {
-			if v.userID == id {
-				return v.RatingAfter - v.RatingBefore
-			}
+// Each league up a win is worth less and a loss costs more, so it takes a
+// better record to keep climbing.
+func TestDecide_EachLeagueUpIsHarder(t *testing.T) {
+	want := []struct {
+		league     string
+		points     int
+		win, loss  int
+		toClimbPct int // the share of battles you must win just to stay put
+	}{
+		{"Bronze", 1500, 40, 10, 20},
+		{"Silver", 2500, 35, 15, 30},
+		{"Gold", 3500, 30, 20, 40},
+		{"Platinum", 4500, 25, 25, 50},
+		{"Diamond", 5500, 20, 30, 60},
+		{"Ace", 6500, 15, 35, 70},
+	}
+	for _, w := range want {
+		// Through decideBattle, so a table nothing reads goes red here.
+		won := verdictsOf(t, []int{w.points, w.points}, []float64{3, 1})
+		if got := change(won[0]); got != w.win {
+			t.Errorf("a win in %s is worth %+d, want +%d", w.league, got, w.win)
 		}
-		t.Fatalf("no verdict for %d", id)
-		return 0
+		if got := change(won[1]); got != -w.loss {
+			t.Errorf("a loss in %s costs %+d, want -%d", w.league, got, w.loss)
+		}
+		if pct := 100 * w.loss / (w.win + w.loss); pct != w.toClimbPct {
+			t.Errorf("%s: you stay put winning %d%% of battles, want %d%%",
+				w.league, pct, w.toClimbPct)
+		}
 	}
-	if gain(upset, 1) <= gain(expected, 2) {
-		t.Errorf("an underdog's win (+%d) paid no more than a favourite's (+%d) — "+
-			"the top would be a place you keep without earning", gain(upset, 1), gain(expected, 2))
+}
+
+// What counts is the league each side is in, not the other side's.
+func TestDecide_EachSidePaysByTheirOwnLeague(t *testing.T) {
+	vs := verdictsOf(t, []int{1980, 2010}, []float64{4, 1})
+	if change(vs[0]) != 40 || change(vs[1]) != -15 {
+		t.Errorf("Bronze beat Silver: %+d / %+d, want +40 (a Bronze win) and "+
+			"-15 (a Silver loss)", change(vs[0]), change(vs[1]))
 	}
-	if gain(upset, 2) >= 0 {
-		t.Error("the favourite lost and their rating did not drop")
+}
+
+// One win is one win, however many sides there were.
+func TestDecide_ABattleWithSeveralAnswers(t *testing.T) {
+	vs := verdictsOf(t, []int{1000, 1000, 1000}, []float64{5, 3, 1})
+	if change(vs[0]) != 40 || change(vs[1]) != -10 || change(vs[2]) != -10 {
+		t.Errorf("three sides moved %+d / %+d / %+d, want +40 / -10 / -10",
+			change(vs[0]), change(vs[1]), change(vs[2]))
 	}
 }
 
 func TestDecide_TiesDrawAndNothingMeansNoResult(t *testing.T) {
-	draw := decideBattle([]Standing{
-		{Votes: 2, Likes: 1, userID: 1}, {Votes: 2, Likes: 1, userID: 2},
-	}, map[int]competitor{1: {Rating: 1000}, 2: {Rating: 1000}})
-	for _, v := range draw {
-		if v.Outcome != "draw" || v.RatingAfter != v.RatingBefore {
-			t.Errorf("an exact tie gave %q, %d→%d", v.Outcome, v.RatingBefore, v.RatingAfter)
+	// A draw is worth half a win and half a loss: still worth something
+	// in Bronze, nothing in Platinum, and it costs in Ace.
+	for points, want := range map[int]int{1000: 15, 4500: 0, 6500: -10} {
+		draw := decideBattle([]Standing{
+			{Votes: 2, Likes: 1, userID: 1}, {Votes: 2, Likes: 1, userID: 2},
+		}, map[int]competitor{1: {Rating: points}, 2: {Rating: points}})
+		for _, v := range draw {
+			if v.Outcome != "draw" || change(v) != want {
+				t.Errorf("an exact tie on %d gave %q, %+d — want a draw, %+d",
+					points, v.Outcome, change(v), want)
+			}
 		}
 	}
 	none := decideBattle([]Standing{{userID: 1}, {userID: 2}},
@@ -214,12 +278,23 @@ func TestDecide_BoughtVotesCostEvenAWinner(t *testing.T) {
 			if !v.Flagged {
 				t.Fatal("six of ten votes removed and the side was not flagged")
 			}
-			if v.RatingAfter != 1000+16-integrityPenalty {
+			if v.RatingAfter != 1000+40-integrityPenalty {
 				t.Errorf("flagged winner ended on %d, want the win minus the penalty (%d)",
-					v.RatingAfter, 1000+16-integrityPenalty)
+					v.RatingAfter, 1000+40-integrityPenalty)
+			}
+			if v.RatingAfter >= v.RatingBefore {
+				t.Errorf("a win with bought votes still paid: %d → %d",
+					v.RatingBefore, v.RatingAfter)
 			}
 		} else if v.Flagged {
 			t.Error("the clean side was flagged")
+		}
+	}
+	// In every league: buying votes costs more than the win could pay.
+	for league, st := range leagueStakes {
+		if integrityPenalty <= st.win {
+			t.Errorf("in %s a win pays %d and bought votes cost only %d",
+				league, st.win, integrityPenalty)
 		}
 	}
 	// Two removed out of twenty is noise, not a scheme.

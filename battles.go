@@ -44,18 +44,18 @@ const (
 
 	ratingStart = 1000
 	ratingFloor = 100
-	eloK        = 32.0
 
-	// A rating above this drains while its owner does not battle.
-	decayAbove = 1200
-	// How much a week off costs, and how often it is charged.
-	decayPerWeek = 15
+	// A rating above this — the start of Gold — drains while its owner does
+	// not battle.
+	decayAbove = 3000
+	// How much a week off costs: about one lost battle.
+	decayPerWeek = 25
 
 	// Removed votes that make a participant look like they bought them: at
 	// least this many, and at least this share of everything cast for them.
 	flagMinRemoved   = 3
 	flagMinShare     = 0.30
-	integrityPenalty = 25
+	integrityPenalty = 50
 )
 
 // clampBattleDays keeps a requested length inside the rules. Zero means "the
@@ -73,30 +73,72 @@ func clampBattleDays(d int) int {
 // leagueFor names the league for a rating. Somebody with no decided battles
 // has not earned one yet, whatever their rating says.
 //
-// Everybody starts on 1,000 points, in Bronze. Each league is further from
-// the last than that one was from the one before — 50 points to Silver,
-// then 100 to Gold, 150 to Platinum, 200 to Diamond and 250 to Ace — so
-// every step up is harder than the one below it. It is worked out again
-// after every decided battle and every week of sitting out above 1,200
-// (decayIdleRatings), so the league goes down as well as up.
+// It is worked out again after every decided battle and every week of
+// sitting out from Gold up (decayIdleRatings), so the league goes down as
+// well as up.
 func leagueFor(rating, decided int) string {
 	if decided <= 0 {
 		return "Unranked"
 	}
+	return leagueOfPoints(rating)
+}
+
+// leagueOfPoints is the league a number of points falls in. Every league is
+// 1,000 points wide, starting from the 1,000 everybody begins on: Bronze up
+// to 2,000, then Silver, Gold, Platinum, Diamond, and Ace from 6,000.
+//
+// Each one is harder to climb than the last in two ways. A win is worth
+// less and a loss costs more (leagueStakes), and you may only battle people
+// closer to your own points (battleWindow).
+func leagueOfPoints(points int) string {
 	switch {
-	case rating >= 1750:
+	case points >= 6000:
 		return "Ace"
-	case rating >= 1500:
+	case points >= 5000:
 		return "Diamond"
-	case rating >= 1300:
+	case points >= 4000:
 		return "Platinum"
-	case rating >= 1150:
+	case points >= 3000:
 		return "Gold"
-	case rating >= 1050:
+	case points >= 2000:
 		return "Silver"
 	default:
 		return "Bronze"
 	}
+}
+
+// stakes is what one battle is worth: points for a win, points off for a loss.
+type stakes struct{ win, loss int }
+
+// leagueStakes is what a battle is worth in each league. Each league up, a
+// win is worth 5 fewer points and a loss costs 5 more, so it takes a better
+// record to keep climbing: in Bronze you go up if you win 1 battle in 5; in
+// Silver 3 in 10, Gold 2 in 5, Platinum half, Diamond 3 in 5, and in Ace you
+// need 7 in 10 just to stay where you are.
+//
+// What counts is the league your points are in when the battle is decided.
+var leagueStakes = map[string]stakes{
+	"Bronze":   {40, 10},
+	"Silver":   {35, 15},
+	"Gold":     {30, 20},
+	"Platinum": {25, 25},
+	"Diamond":  {20, 30},
+	"Ace":      {15, 35},
+}
+
+// pointsFrom is what [outcome] does to somebody on [points]. A draw is worth
+// half a win and half a loss.
+func pointsFrom(outcome string, points int) int {
+	st := leagueStakes[leagueOfPoints(points)]
+	switch outcome {
+	case "won":
+		return st.win
+	case "lost":
+		return -st.loss
+	case "draw":
+		return (st.win - st.loss) / 2
+	}
+	return 0
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -668,11 +710,6 @@ type battleVerdict struct {
 	Flagged      bool
 }
 
-// expected is the Elo chance that a beats b.
-func expected(a, b float64) float64 {
-	return 1 / (1 + math.Pow(10, (b-a)/400))
-}
-
 // decideBattle turns final standings into outcomes and new ratings.
 //
 // Top score wins, everyone below loses. Several sides tied on top draw with
@@ -680,10 +717,12 @@ func expected(a, b float64) float64 {
 // not one genuine vote, like, view or share — means no result: nobody's
 // record changes for a battle nobody took part in.
 //
-// Ratings move by Elo: beating somebody rated above you gains more than
-// beating somebody below you, and losing to somebody below you costs more.
-// It is what makes the top a place you have to keep earning. A participant
-// flagged for bought votes (see flagMinRemoved) also pays integrityPenalty.
+// Points move by the league each side is in (leagueStakes): one win, one
+// loss or one draw each, however many sides the battle had. Everybody
+// battling is within a few points of each other (battleWindow), so who
+// they beat makes no difference worth counting. A participant flagged for
+// bought votes (see flagMinRemoved) also pays integrityPenalty — more than
+// any win is worth, so buying votes never pays.
 func decideBattle(sides []Standing, records map[int]competitor) []battleVerdict {
 	out := make([]battleVerdict, len(sides))
 	ranked := append([]Standing(nil), sides...)
@@ -702,50 +741,24 @@ func decideBattle(sides []Standing, records map[int]competitor) []battleVerdict 
 		return out
 	}
 
-	var top []int
+	top := 0
 	for i := range out {
 		if out[i].Rank == 1 {
-			top = append(top, i)
-		}
-	}
-	delta := make([]float64, len(out))
-	for i := range out {
-		if out[i].Rank == 1 {
-			if len(top) > 1 {
-				out[i].Outcome = "draw"
-			} else {
-				out[i].Outcome = "won"
-			}
-			continue
-		}
-		out[i].Outcome = "lost"
-	}
-	// Winners (or those tied on top) against everyone below them. With a tie
-	// on top the gain is shared, so a three-way draw does not triple it.
-	share := 1.0 / float64(len(top))
-	for _, w := range top {
-		for l := range out {
-			if out[l].Rank == 1 {
-				continue
-			}
-			e := expected(float64(out[w].RatingBefore), float64(out[l].RatingBefore))
-			d := eloK * (1 - e) * share
-			delta[w] += d
-			delta[l] -= d
-		}
-	}
-	// Tied on top: a draw pulls ratings toward each other.
-	for a := 0; a < len(top); a++ {
-		for b := a + 1; b < len(top); b++ {
-			i, j := top[a], top[b]
-			e := expected(float64(out[i].RatingBefore), float64(out[j].RatingBefore))
-			d := eloK * (0.5 - e)
-			delta[i] += d
-			delta[j] -= d
+			top++
 		}
 	}
 	for i := range out {
-		after := out[i].RatingBefore + int(math.Round(delta[i]))
+		switch {
+		case out[i].Rank != 1:
+			out[i].Outcome = "lost"
+		case top > 1:
+			out[i].Outcome = "draw"
+		default:
+			out[i].Outcome = "won"
+		}
+	}
+	for i := range out {
+		after := out[i].RatingBefore + pointsFrom(out[i].Outcome, out[i].RatingBefore)
 		if out[i].RemovedVotes >= flagMinRemoved &&
 			float64(out[i].RemovedVotes) >= flagMinShare*float64(out[i].RawVotes) {
 			out[i].Flagged = true

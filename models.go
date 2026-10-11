@@ -18,8 +18,9 @@ type User struct {
 	Losses        int      `json:"losses"`
 	League        string   `json:"league"`
 	// Draws and Rating come from decided battles — see battles.go. Rating
-	// starts at 1000 and moves by Elo, so a loss costs and nobody keeps the
-	// top without battling.
+	// is a player's points: everybody starts on 1000, a win adds and a loss
+	// takes away, by how much depending on their league, and nobody keeps
+	// the top without battling.
 	Draws  int `json:"draws"`
 	Rating int `json:"rating"`
 	// Bio is shown on the profile page. Empty string means "user

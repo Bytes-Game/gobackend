@@ -92,7 +92,7 @@ const (
 
 	// What reporting the other side of your own battle costs, when the model
 	// finds the video does match.
-	falseReportPenalty = 10
+	falseReportPenalty = 20
 
 	// Kinds of notification, as the app reads them.
 	noteOffTopicWarning = "off_topic_warning"
