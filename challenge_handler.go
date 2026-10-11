@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,46 +13,6 @@ import (
 
 	"github.com/gorilla/mux"
 )
-
-// leagueTier maps league names to numeric tiers for matchmaking comparison.
-// Users can only challenge within ±2 tiers for fair play.
-var leagueTier = map[string]int{
-	"Bronze":   1,
-	"Silver":   2,
-	"Gold":     3,
-	"Platinum": 4,
-	"Diamond":  5,
-}
-
-const maxLeagueDiff = 2 // Maximum league tier difference allowed for challenges
-
-// checkLeagueEligibility verifies two users are within the allowed league range.
-// Returns nil if eligible, or an error describing why not.
-func checkLeagueEligibility(userID1, userID2 string) error {
-	user1, found1 := GetUserByID(userID1)
-	user2, found2 := GetUserByID(userID2)
-	if !found1 || !found2 {
-		return fmt.Errorf("user not found")
-	}
-
-	tier1, ok1 := leagueTier[user1.League]
-	tier2, ok2 := leagueTier[user2.League]
-	if !ok1 {
-		tier1 = 1 // Default to Bronze if unknown
-	}
-	if !ok2 {
-		tier2 = 1
-	}
-
-	diff := math.Abs(float64(tier1 - tier2))
-	if diff > maxLeagueDiff {
-		return fmt.Errorf(
-			"league mismatch: %s (%s) cannot challenge %s (%s) — max %d tier difference allowed",
-			user1.Username, user1.League, user2.Username, user2.League, maxLeagueDiff,
-		)
-	}
-	return nil
-}
 
 // ------------------------------------------------------------------------------------
 // Challenge HTTP handlers
@@ -235,8 +194,9 @@ func GetFriendsChallengesHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetChallengeDetailHandler returns a challenge with all its responses.
-// GET /api/v1/challenges/{id}?userId=x
-// If userId is provided, includes league eligibility check in response.
+// GET /api/v1/challenges/{id}
+// For somebody signed in, also whether they may answer it (canAccept) and,
+// if not, why (leagueMessage).
 func GetChallengeDetailHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
@@ -270,23 +230,16 @@ func GetChallengeDetailHandler(w http.ResponseWriter, r *http.Request) {
 		votes = []VoteSummary{}
 	}
 
-	// Check league eligibility for the AUTHENTICATED viewer. Advisory
-	// only (drives the client's canAccept flag; AcceptChallengeHandler
-	// re-checks authoritatively), but it used to read userId from the
-	// query string — the one identity-shaped input in the codebase not
-	// derived from the token. Token first; query-param fallback kept for
-	// the public (unauthed) detail route where there is no token.
+	// Whether the viewer may answer it, and if not, why — so the app can say
+	// so before somebody records a whole video, not after. Advisory: the
+	// accept handler checks again. Only for somebody signed in: this route
+	// is open, and it used to take the viewer from ?userId=, which is
+	// anybody's.
 	canAccept := true
 	leagueMsg := ""
-	viewerID := authUserID(r)
-	if viewerID == "" {
-		viewerID = r.URL.Query().Get("userId")
-	}
-	if viewerID != "" {
-		if err := checkLeagueEligibility(challenge.CreatorID, viewerID); err != nil {
-			canAccept = false
-			leagueMsg = err.Error()
-		}
+	if msg := battleRefusal(challenge, signedInUserID(r)); msg != "" {
+		canAccept = false
+		leagueMsg = msg
 	}
 	// A normal post cannot be answered by anybody. See battles_open.go.
 	if challenge.ClosedToBattles {
@@ -314,7 +267,7 @@ func GetChallengeDetailHandler(w http.ResponseWriter, r *http.Request) {
 
 // AcceptChallengeHandler lets a user respond to a challenge.
 // POST /api/v1/challenges/accept
-// Enforces league-restricted matchmaking: responder must be within ±2 league tiers of creator.
+// Holds the answer to the battle rules in battle_levels.go.
 func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	var payload AcceptChallengePayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -332,14 +285,21 @@ func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// League restriction: verify the responder is within ±2 tiers of the challenge creator
 	challenge, found := GetChallengeByID(payload.ChallengeID)
 	if !found {
 		http.Error(w, "Challenge not found", http.StatusNotFound)
 		return
 	}
-	if err := checkLeagueEligibility(challenge.CreatorID, payload.ResponderID); err != nil {
-		http.Error(w, err.Error(), http.StatusForbidden)
+	// Only a video they may see. Not allowed reads the same as not there,
+	// as on the battle page.
+	if !viewerMayWatch(payload.ResponderID, challenge.ID) {
+		http.Error(w, "Challenge not found", http.StatusNotFound)
+		return
+	}
+	// Not their own, and about their level unless they are friends. See
+	// battle_levels.go.
+	if msg := battleRefusal(challenge, payload.ResponderID); msg != "" {
+		http.Error(w, msg, http.StatusForbidden)
 		return
 	}
 	// A photo challenge is answered with a photo, a video with a video.
