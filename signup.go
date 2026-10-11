@@ -6,91 +6,184 @@ package main
 // worked only for seeded users — a launch blocker), tokens hard-expired
 // after 7 days with no refresh path (forcing re-login), and the
 // cold-start ranker had no explicit interest signal to work from.
+//
+// What a new account must have is in account_rules.go.
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"net/http"
-	"regexp"
 	"strings"
+	"time"
+
+	"github.com/lib/pq"
 )
 
-var usernameRe = regexp.MustCompile(`^[a-z0-9_.]{3,20}$`)
+// signupRequest is what the sign-up form sends.
+type signupRequest struct {
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	FullName    string `json:"fullName"`
+	Email       string `json:"email"`
+	BirthDate   string `json:"birthDate"` // YYYY-MM-DD
+	AcceptTerms bool   `json:"acceptTerms"`
+}
 
-// SignupHandler — POST /signup {username, password}.
-// Mirrors LoginHandler's response shape ({user, token, allUsers:[]})
-// so the client's post-auth path is identical for both flows.
+// newAccount is a sign-up that passed every rule, ready to store.
+type newAccount struct {
+	username, password, fullName, email string
+	birthDate                           time.Time
+}
+
+// checkSignup applies every rule in account_rules.go to a sign-up, in the
+// order the form shows them, and says which box is wrong first. [now] is
+// passed in so tests can fix the day.
+func checkSignup(in signupRequest, now time.Time) (newAccount, *fieldError) {
+	username := strings.ToLower(strings.TrimSpace(in.Username))
+	fullName, why := cleanFullName(in.FullName)
+	if why != "" {
+		return newAccount{}, refuse("fullName", why)
+	}
+	if why := usernameProblem(username); why != "" {
+		return newAccount{}, refuse("username", why)
+	}
+	email, why := cleanEmail(in.Email)
+	if why != "" {
+		return newAccount{}, refuse("email", why)
+	}
+	born, why := parseBirthDate(in.BirthDate, now)
+	if why != "" {
+		return newAccount{}, refuse("birthDate", why)
+	}
+	if why := passwordProblem(in.Password, username); why != "" {
+		return newAccount{}, refuse("password", why)
+	}
+	if !in.AcceptTerms {
+		return newAccount{}, refuse("terms", "Please agree to the Terms of Service and the Privacy Policy.")
+	}
+	if fullName == "" {
+		fullName = username
+	}
+	return newAccount{username: username, password: in.Password, fullName: fullName,
+		email: email, birthDate: born}, nil
+}
+
+// writeFieldError sends a refusal the form can put under the right box.
+func writeFieldError(w http.ResponseWriter, status int, e *fieldError) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(e)
+}
+
+// emailTaken is whether an account already uses [email] (already lower
+// case). A database that cannot answer says no and logs it: the unique
+// index still refuses a second account at the insert.
+func emailTaken(email string) bool {
+	var taken bool
+	err := db.QueryRow(`SELECT EXISTS (SELECT 1 FROM users WHERE lower(email) = $1)`, email).
+		Scan(&taken)
+	if queryFailed("checking whether an account already uses an email",
+		"letting the sign-up try; the database still refuses a second account", err) {
+		return false
+	}
+	return taken
+}
+
+// SignupHandler — POST /signup.
+//
+// Creates the account and signs the person in: the answer has the same
+// shape as /login ({user, token, allUsers}), so the app's next steps are
+// the same for both. A refusal says which box is wrong ({field, error}).
 func SignupHandler(w http.ResponseWriter, r *http.Request) {
 	if db == nil {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	var creds struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-		FullName string `json:"fullName"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
+	var in signupRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&in); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	creds.Username = strings.ToLower(strings.TrimSpace(creds.Username))
 
-	// Anonymous rate limit — the "signup" row has been in
-	// actionLimitTable all along, unused until now.
-	if !allowAction("", "signup") {
+	// How many accounts may be made. Per internet address, by the hour and
+	// by the day, so one machine cannot open hundreds; and for the whole
+	// platform, as a ceiling that holds even if the address is faked (see
+	// clientIP). This used to be one bucket shared by the whole platform:
+	// three sign-ups a minute, for everybody — the fourth person to try at
+	// launch would have been turned away.
+	ip := clientIP(r)
+	if !allowAction("ip:"+ip, "signup") || !allowAction("ip:"+ip, "signup_day") ||
+		!allowAction("", "signup_all") {
+		log.Printf("sign-up rate limited from %s", ip)
 		writeRateLimited(w, "signup")
 		return
 	}
 
-	if !usernameRe.MatchString(creds.Username) {
-		http.Error(w, "username must be 3-20 chars: a-z, 0-9, _ or .", http.StatusBadRequest)
+	acct, bad := checkSignup(in, time.Now())
+	if bad != nil {
+		writeFieldError(w, http.StatusBadRequest, bad)
 		return
 	}
-	if len(creds.Password) < 6 {
-		http.Error(w, "password must be at least 6 characters", http.StatusBadRequest)
+	if UserExists(acct.username) {
+		writeFieldError(w, http.StatusConflict, refuse("username", "That username is taken."))
 		return
 	}
-	if UserExists(creds.Username) {
-		http.Error(w, "username already taken", http.StatusConflict)
+	if emailTaken(acct.email) {
+		writeFieldError(w, http.StatusConflict,
+			refuse("email", "An account already uses this email. Try signing in."))
 		return
 	}
 
-	hash, err := hashPassword(creds.Password)
+	hash, err := hashPassword(acct.password)
 	if err != nil {
+		log.Printf("sign-up: could not hash the password for %q: %v", acct.username, err)
 		http.Error(w, "signup failed", http.StatusInternalServerError)
 		return
 	}
-	fullName := strings.TrimSpace(creds.FullName)
-	if fullName == "" {
-		fullName = creds.Username
-	}
-	// password column stays '' — bcrypt-only from day one (the plaintext
-	// column exists solely for the legacy lazy-migration path).
+	// The plaintext password column stays '' — bcrypt only, from day one.
 	var id string
 	err = db.QueryRow(`
-		INSERT INTO users (username, password, password_hash, full_name, wins, losses, league)
-		VALUES ($1, '', $2, $3, 0, 0, 'Bronze')
+		INSERT INTO users (username, password, password_hash, full_name, email,
+		                   birth_date, terms_accepted_at, wins, losses, league)
+		VALUES ($1, '', $2, $3, $4, $5, NOW(), 0, 0, 'Bronze')
 		RETURNING CAST(id AS TEXT)`,
-		creds.Username, hash, fullName).Scan(&id)
+		acct.username, hash, acct.fullName, acct.email, acct.birthDate).Scan(&id)
 	if err != nil {
-		// Unique-violation race (two signups, same name) lands here too.
-		log.Printf("signup insert failed for %q: %v", creds.Username, err)
-		http.Error(w, "username already taken", http.StatusConflict)
+		// Two sign-ups racing for one name or one email land here.
+		// Anything else is the server's problem, not the person's, and is
+		// said as one: "username taken" for a fault elsewhere would send
+		// them off picking name after name that can never work.
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+			switch {
+			case strings.Contains(pqErr.Constraint, "email"):
+				writeFieldError(w, http.StatusConflict,
+					refuse("email", "An account already uses this email. Try signing in."))
+				return
+			case strings.Contains(pqErr.Constraint, "username"):
+				writeFieldError(w, http.StatusConflict, refuse("username", "That username is taken."))
+				return
+			}
+		}
+		log.Printf("sign-up insert failed for %q: %v", acct.username, err)
+		http.Error(w, "signup failed", http.StatusInternalServerError)
 		return
 	}
 
-	token, err := issueToken(id, creds.Username)
+	token, err := issueToken(id, acct.username)
 	if err != nil {
-		log.Printf("signup token issuance failed for %s: %v", creds.Username, err)
+		log.Printf("sign-up token issuance failed for %s: %v", acct.username, err)
 		http.Error(w, "Signup succeeded but login is temporarily unavailable", http.StatusInternalServerError)
 		return
 	}
 
-	user, _ := GetUserByUsername(creds.Username)
+	user, _ := GetUserByUsername(acct.username)
 	go IndexUser(user) // searchable immediately
 
-	log.Printf("New user signed up: %s (id=%s)", creds.Username, id)
+	log.Printf("New user signed up: %s (id=%s)", acct.username, id)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -101,16 +194,38 @@ func SignupHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // UsernameAvailableHandler — GET /signup/available?username=x.
-// Powers the signup form's live availability check.
+// Powers the form's live check: whether the name is allowed, whether it is
+// free, and if not, why, in words for the person typing.
 func UsernameAvailableHandler(w http.ResponseWriter, r *http.Request) {
 	name := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("username")))
-	valid := usernameRe.MatchString(name)
+	why := usernameProblem(name)
+	valid := why == ""
 	available := valid && db != nil && !UserExists(name)
+	if valid && !available {
+		why = "That username is taken."
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"valid":     valid,
 		"available": available,
+		"reason":    why,
 	})
+}
+
+// usernameForEmail is the username of the account that uses [email], or ""
+// when none does. For signing in with an email instead of a username.
+func usernameForEmail(email string) string {
+	var name string
+	err := db.QueryRow(`SELECT username FROM users WHERE lower(email) = lower($1)`,
+		strings.TrimSpace(email)).Scan(&name)
+	if err == sql.ErrNoRows {
+		return ""
+	}
+	if queryFailed("finding the account for an email at sign-in",
+		"treating it as no account; the sign-in fails", err) {
+		return ""
+	}
+	return name
 }
 
 // RefreshTokenHandler — POST /api/v1/auth/refresh (authed).

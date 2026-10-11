@@ -115,6 +115,16 @@ func parseToken(tokenStr string) (*authClaims, error) {
 	if claims.Subject == "" {
 		return nil, errors.New("token missing subject")
 	}
+	// Signed in before the password last changed: signed out. See
+	// token_cutoff.go. A token with no issue time is treated as older than
+	// any change.
+	issued := time.Time{}
+	if claims.IssuedAt != nil {
+		issued = claims.IssuedAt.Time
+	}
+	if signedInBeforeCutoff(claims.Subject, issued) {
+		return nil, errors.New("signed out: the password was changed after this sign-in")
+	}
 	return claims, nil
 }
 

@@ -49,6 +49,15 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	// Short-circuit is deliberate: when the username bucket is already empty
 	// we return without spending an IP token, so one hammered account cannot
 	// exhaust the address budget for everyone else behind that NAT.
+	// An email signs in as the account that uses it. Looked up first, so
+	// the account has one guessing budget however it is named. An email
+	// nobody uses fails below exactly as a wrong password does, so this
+	// says nothing about which emails have accounts.
+	if strings.Contains(creds.Username, "@") {
+		if name := usernameForEmail(creds.Username); name != "" {
+			creds.Username = name
+		}
+	}
 	rlUser := strings.ToLower(strings.TrimSpace(creds.Username))
 	if !allowAction("user:"+rlUser, "login") || !allowAction("ip:"+clientIP(r), "login") {
 		log.Printf("Login rate limited for user %q from %s.", rlUser, clientIP(r))
@@ -380,6 +389,7 @@ func startLimiterJanitor() {
 // X-Forwarded-For ("client, proxy1, …"); we take the left-most entry. Falls back
 // to the RemoteAddr host (port stripped) for direct/local connections.
 func clientIP(r *http.Request) string {
+	noteForwardedShape(r)
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		if i := strings.IndexByte(xff, ','); i >= 0 {
 			return strings.TrimSpace(xff[:i])
@@ -744,6 +754,9 @@ func main() {
 	r.HandleFunc("/signup/available", UsernameAvailableHandler).Methods("GET", "OPTIONS")
 	// Token refresh (authed) — active users never hit the 7-day expiry.
 	api.HandleFunc("/auth/refresh", authed(RefreshTokenHandler)).Methods("POST", "OPTIONS")
+	// Change your password; every other phone is signed out. See
+	// change_password.go.
+	api.HandleFunc("/auth/password", authed(ChangePasswordHandler)).Methods("POST", "OPTIONS")
 	// Onboarding interest picker → seeds CategoryAffinity for cold start.
 	api.HandleFunc("/profile/interests", authed(SeedInterestsHandler)).Methods("POST", "OPTIONS")
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
