@@ -182,3 +182,12 @@ See `migrations/README.md` for the rules.
 the half it cannot see is the newer half. A test that greps `database.go` for
 a column will not find one added by a migration, and will confidently report
 that the column does not exist.
+
+---
+
+## Before release
+
+The owner's before-release list (app id, signing key, build settings, and
+`APP_DOWNLOAD_URL` on Render for the shared web pages) is kept in the
+Frontend repo's CLAUDE.md, under "Before release". Give it to them when they
+say they are about to release, and not before.
