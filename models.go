@@ -10,6 +10,10 @@ type User struct {
 	FullName      string   `json:"fullName"`
 	Followers     int      `json:"followers"`
 	FollowingList []string `json:"followingList"`
+	// Following is how many people they follow. Sent on its own because the
+	// list itself is left out for a private account the viewer does not
+	// follow (showUserTo), and the count should still show.
+	Following int `json:"following"`
 	Wins          int      `json:"wins"`
 	Losses        int      `json:"losses"`
 	League        string   `json:"league"`

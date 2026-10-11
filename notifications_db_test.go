@@ -54,9 +54,7 @@ func seedNotifyPeople(t *testing.T) {
 func postChallenge(t *testing.T, visibility string, visibleTo []string) string {
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{
-		// Nothing listens here, so the size check cannot measure it and
-		// lets it through at once.
-		"videoUrl":   "http://127.0.0.1:1/clip.mp4",
+		"videoUrl":   testUpload(nfCreator, "720p.mp4"),
 		"prefix":     "Who can",
 		"subject":    fmt.Sprintf("juggle %d", time.Now().UnixNano()%100000),
 		"visibility": visibility,
@@ -265,7 +263,7 @@ func TestPublicPost_TellsNobody(t *testing.T) {
 func answer(t *testing.T, cid string) string {
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{
-		"challengeId": cid, "videoUrl": "http://127.0.0.1:1/answer.mp4",
+		"challengeId": cid, "videoUrl": testUpload(nfAnswerer, "720p.mp4"),
 		"durationMs": 5000,
 	})
 	r := withAuth(httptest.NewRequest("POST", "/api/v1/challenges/accept", bytes.NewReader(body)),

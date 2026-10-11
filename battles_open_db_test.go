@@ -24,7 +24,7 @@ import (
 func postNormal(t *testing.T, prefix, caption, visibility string) (int, Challenge, string) {
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{
-		"videoUrl":      "http://127.0.0.1:1/clip.mp4",
+		"videoUrl":      testUpload(nfCreator, "720p.mp4"),
 		"prefix":        prefix,
 		"subject":       caption,
 		"visibility":    visibility,
@@ -55,8 +55,7 @@ func flipBattles(t *testing.T, as int, cid string, open bool) int {
 func tryAnswer(t *testing.T, cid string) (int, string) {
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{
-		"challengeId": cid, "videoUrl": "http://127.0.0.1:1/answer-" +
-			strconv.FormatInt(time.Now().UnixNano(), 10) + ".mp4",
+		"challengeId": cid, "videoUrl": testUpload(nfAnswerer, "720p.mp4"),
 		"durationMs": 5000,
 	})
 	r := withAuth(httptest.NewRequest("POST", "/api/v1/challenges/accept", bytes.NewReader(body)),
@@ -138,7 +137,7 @@ func TestOpenToBattles_WhatAPostNeedsToSay(t *testing.T) {
 	resetActionLimiters(t)
 	// A post open to battles is still a question with both halves.
 	body, _ := json.Marshal(map[string]any{
-		"videoUrl": "http://127.0.0.1:1/clip.mp4", "prefix": "", "subject": "pranks",
+		"videoUrl": testUpload(nfCreator, "720p.mp4"), "prefix": "", "subject": "pranks",
 		"visibility": "arena", "openToBattles": true,
 	})
 	r := withAuth(httptest.NewRequest("POST", "/api/v1/challenges", bytes.NewReader(body)),

@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -450,6 +452,25 @@ func collapseDynamicPath(p string) string {
 		}
 	}
 	return "other"
+}
+
+// metricsGuard keeps the server's own numbers — how busy each address is,
+// how often each one fails — for whoever runs it. They used to be open to
+// anybody, which is a map of the server for somebody looking for a way in.
+//
+// A scraper sends METRICS_TOKEN as a bearer token. With no METRICS_TOKEN
+// set, nobody gets them: the page answers "not found", the same as an
+// address that does not exist.
+func metricsGuard(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		want := os.Getenv("METRICS_TOKEN")
+		got := bearerToken(r)
+		if want == "" || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			http.NotFound(w, r)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // MetricsHandler returns the Prometheus /metrics handler.

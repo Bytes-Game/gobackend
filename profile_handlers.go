@@ -221,10 +221,18 @@ func GetFollowersHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := parseIntOrDefault(r.URL.Query().Get("limit"), 30, 100)
 	page := parseIntOrDefault(r.URL.Query().Get("page"), 1, 1_000_000)
+	// A private account's lists are for the people it lets in, as its
+	// videos are. Nobody else is told who is in them.
+	viewer := signedInUserID(r)
+	if accountHiddenFrom(viewer, id) {
+		writeJSON(w, http.StatusOK, []User{})
+		return
+	}
 	users := GetFollowers(id, limit, (page-1)*limit)
 	if users == nil {
 		users = []User{}
 	}
+	showUsersTo(viewer, users)
 	writeJSON(w, http.StatusOK, users)
 }
 
@@ -237,10 +245,18 @@ func GetFollowingHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := parseIntOrDefault(r.URL.Query().Get("limit"), 30, 100)
 	page := parseIntOrDefault(r.URL.Query().Get("page"), 1, 1_000_000)
+	// A private account's lists are for the people it lets in, as its
+	// videos are. Nobody else is told who is in them.
+	viewer := signedInUserID(r)
+	if accountHiddenFrom(viewer, id) {
+		writeJSON(w, http.StatusOK, []User{})
+		return
+	}
 	users := GetFollowing(id, limit, (page-1)*limit)
 	if users == nil {
 		users = []User{}
 	}
+	showUsersTo(viewer, users)
 	writeJSON(w, http.StatusOK, users)
 }
 

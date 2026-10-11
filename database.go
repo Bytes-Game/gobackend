@@ -893,6 +893,7 @@ func readUser(id int, username, pw, fullName, bio, visibility, settingsJSON stri
 	if u.FollowingList == nil {
 		u.FollowingList = []string{}
 	}
+	u.Following = len(u.FollowingList)
 
 	// TOTP-enabled flag — sourced from the dedicated user_totp table
 	// (see least-privilege rationale in the table comment). EXISTS
@@ -986,6 +987,7 @@ func applyFollows(users []User, rows *sql.Rows) {
 		if users[i].FollowingList == nil {
 			users[i].FollowingList = []string{}
 		}
+		users[i].Following = len(users[i].FollowingList)
 	}
 }
 

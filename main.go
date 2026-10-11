@@ -118,6 +118,7 @@ func GetAllUsersHandler(w http.ResponseWriter, r *http.Request) {
 	if users == nil {
 		users = []User{}
 	}
+	showUsersTo(signedInUserID(r), users)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(users); err != nil {
 		http.Error(w, "Failed to encode users", http.StatusInternalServerError)
@@ -134,6 +135,7 @@ func GetUserHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
+	showUserTo(signedInUserID(r), &user)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(user); err != nil {
@@ -747,8 +749,9 @@ func main() {
 	r.HandleFunc("/ws/{username}", WebsocketHandler).Methods("GET")
 	r.HandleFunc("/search", SearchHandler).Methods("GET", "OPTIONS")
 
-	// Prometheus metrics endpoint — scrape target.
-	r.Handle("/metrics", MetricsHandler()).Methods("GET")
+	// Prometheus metrics endpoint — scrape target. Only with METRICS_TOKEN;
+	// see metricsGuard.
+	r.Handle("/metrics", metricsGuard(MetricsHandler())).Methods("GET")
 
 	// Health check endpoint for Render and uptime monitors
 	// Health also says WHICH build is answering.
