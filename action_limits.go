@@ -90,7 +90,16 @@ var actionLimitTable = map[string]actionLimitConfig{
 	// Auth — login / signup attempts. Anything more than a few per
 	// minute from one account is a credential-stuffing attempt.
 	"login":            {tokensPerSecond: 0.1, burst: 5},          // 6/min
-	"signup":           {tokensPerSecond: 0.05, burst: 3},         // 3/min
+	// New accounts, per internet address: 10 an hour and 50 a day. More
+	// than one person can share an address (a school, a café, a phone
+	// network), so not fewer. signup_all is the whole platform: 600 an
+	// hour, a ceiling that holds even when the address is faked.
+	"signup":           {tokensPerSecond: 10.0 / 3600, burst: 10},
+	"signup_day":       {tokensPerSecond: 50.0 / 86400, burst: 50},
+	"signup_all":       {tokensPerSecond: 600.0 / 3600, burst: 100},
+	// Changing your password: 5 an hour. Each one checks the old password,
+	// so it is also a way to guess it.
+	"password_change":  {tokensPerSecond: 5.0 / 3600, burst: 5},
 }
 
 // actionLimiterRegistry holds one rateLimiter per action key. Created
