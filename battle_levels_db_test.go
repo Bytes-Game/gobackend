@@ -239,7 +239,7 @@ func TestBattleLevels_TheRefusalInWords(t *testing.T) {
 	}
 }
 
-// The window narrows each league up: 50, 40, 30, 20, 10, 10.
+// The window narrows each league up: 50, 40, 30, 20, 10, 5.
 func TestBattleLevels_TheWindowNarrowsEachLeagueUp(t *testing.T) {
 	for _, c := range []struct {
 		league string
@@ -247,7 +247,7 @@ func TestBattleLevels_TheWindowNarrowsEachLeagueUp(t *testing.T) {
 		window int
 	}{
 		{"Bronze", 1500, 50}, {"Silver", 2500, 40}, {"Gold", 3500, 30},
-		{"Platinum", 4500, 20}, {"Diamond", 5500, 10}, {"Ace", 6500, 10},
+		{"Platinum", 4500, 20}, {"Diamond", 5500, 10}, {"Ace", 6500, 5},
 	} {
 		if !inRange(c.points+c.window, c.points) || !inRange(c.points-c.window, c.points) {
 			t.Errorf("%s: %d points either way was refused", c.league, c.window)
@@ -268,6 +268,11 @@ func TestBattleLevels_TheHigherLeaguesRuleApplies(t *testing.T) {
 	// 40 apart is inside Silver's rule, from either side.
 	if !inRange(2020, 1980) || !inRange(1980, 2020) {
 		t.Error("Bronze and Silver 40 points apart could not battle")
+	}
+	// Diamond 5,995 and Ace 6,003: 8 apart, inside Diamond's 10 but
+	// outside Ace's 5.
+	if inRange(6003, 5995) || inRange(5995, 6003) {
+		t.Error("an Ace player was put in a battle 8 points wide")
 	}
 	// Close to the next league you can reach into it.
 	if !inRange(2010, 1990) {

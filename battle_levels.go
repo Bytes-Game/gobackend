@@ -11,7 +11,7 @@ package main
 //	Gold      within 30
 //	Platinum  within 20
 //	Diamond   within 10
-//	Ace       within 10
+//	Ace       within 5
 //
 // Somebody in Bronze on 1,000 points can take on anybody from 950 to 1,050.
 // As your points climb towards the next league, the people just inside it
@@ -68,7 +68,7 @@ var battleWindow = map[string]int{
 	"Gold":     30,
 	"Platinum": 20,
 	"Diamond":  10,
-	"Ace":      10,
+	"Ace":      5,
 }
 
 // pointsOf is somebody's points: their rating, or the starting rating for a
