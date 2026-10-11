@@ -60,7 +60,7 @@ func answerAs(t *testing.T, srv *httptest.Server, as int, body string) (int, str
 
 const photoChallengeBody = `{"prefix":"Who looks","subject":"better in red",` +
 	`"visibility":"arena","mediaType":"photo",` +
-	`"videoUrl":"https://cdn/u/1/a/photo.jpg","thumbnailUrl":"https://cdn/u/1/a/default.jpg"}`
+	`"videoUrl":"http://127.0.0.1:1/u/9502/a/photo.jpg","thumbnailUrl":"http://127.0.0.1:1/u/9502/a/default.jpg"}`
 
 func TestPhotoChallengeIsPostedAsAPhoto(t *testing.T) {
 	srv := photoSetup(t)
@@ -76,7 +76,7 @@ func TestPhotoChallengeIsPostedAsAPhoto(t *testing.T) {
 		ch.ID).Scan(&kind, &url); err != nil {
 		t.Fatal(err)
 	}
-	if kind != mediaPhoto || url != "https://cdn/u/1/a/photo.jpg" {
+	if kind != mediaPhoto || url != "http://127.0.0.1:1/u/9502/a/photo.jpg" {
 		t.Errorf("stored as %q at %q", kind, url)
 	}
 }
@@ -99,7 +99,7 @@ func TestPhotoChallengeIsNotHeldToVideoLength(t *testing.T) {
 
 func TestPhotoChallengeNeedsItsPhoto(t *testing.T) {
 	srv := photoSetup(t)
-	body := strings.Replace(photoChallengeBody, `"videoUrl":"https://cdn/u/1/a/photo.jpg"`,
+	body := strings.Replace(photoChallengeBody, `"videoUrl":"http://127.0.0.1:1/u/9502/a/photo.jpg"`,
 		`"videoUrl":""`, 1)
 	if status, _, _ := postAs(t, srv, liveMaya, body); status != http.StatusBadRequest {
 		t.Errorf("a photo challenge with no photo: %d, want 400", status)
@@ -114,7 +114,7 @@ func TestAPhotoChallengeIsAnsweredWithAPhoto(t *testing.T) {
 	srv := photoSetup(t)
 	_, ch, _ := postAs(t, srv, liveMaya, photoChallengeBody)
 
-	video := `{"challengeId":"` + ch.ID + `","videoUrl":"https://cdn/u/2/b/720p.mp4",` +
+	video := `{"challengeId":"` + ch.ID + `","videoUrl":"http://127.0.0.1:1/u/9501/b/720p.mp4",` +
 		`"durationMs":8000}`
 	status, raw := answerAs(t, srv, liveLeo, video)
 	if status != http.StatusBadRequest || !strings.Contains(raw, "answer it with a photo") {
@@ -122,7 +122,7 @@ func TestAPhotoChallengeIsAnsweredWithAPhoto(t *testing.T) {
 	}
 
 	photo := `{"challengeId":"` + ch.ID + `","mediaType":"photo",` +
-		`"videoUrl":"https://cdn/u/2/b/photo.jpg","thumbnailUrl":"https://cdn/u/2/b/default.jpg"}`
+		`"videoUrl":"http://127.0.0.1:1/u/9501/b/photo.jpg","thumbnailUrl":"http://127.0.0.1:1/u/9501/b/default.jpg"}`
 	status, raw = answerAs(t, srv, liveLeo, photo)
 	if status != http.StatusCreated {
 		t.Fatalf("a photo answer, with no length: %d %s", status, raw)
@@ -142,7 +142,7 @@ func TestAVideoChallengeIsNotAnsweredWithAPhoto(t *testing.T) {
 	video := strings.Replace(photoChallengeBody, `"mediaType":"photo"`, `"mediaType":"video"`, 1)
 	_, ch, _ := postAs(t, srv, liveMaya, video)
 	photo := `{"challengeId":"` + ch.ID + `","mediaType":"photo",` +
-		`"videoUrl":"https://cdn/u/2/b/photo.jpg"}`
+		`"videoUrl":"http://127.0.0.1:1/u/9501/b/photo.jpg"}`
 	status, raw := answerAs(t, srv, liveLeo, photo)
 	if status != http.StatusBadRequest || !strings.Contains(raw, "answer it with a video") {
 		t.Errorf("a photo answer to a video challenge: %d %s", status, raw)

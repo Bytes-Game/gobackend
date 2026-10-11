@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -30,6 +32,14 @@ func TestMain(m *testing.M) {
 	// content-score cache must be off for deterministic, isolated results.
 	disableContentScoreCache = true
 	disableUserProfileCache = true
+
+	// Posts and answers must be their poster's own uploads in our storage
+	// (post_media.go). Tests stand in a storage at an address where nothing
+	// listens, so the size check cannot measure a file and lets it through
+	// at once. testUpload gives an address in it.
+	postMediaStorage = func() (*R2Config, error) {
+		return &R2Config{PublicBaseURL: postTestBase}, nil
+	}
 
 	var err error
 	mr, err = miniredis.Run()
@@ -71,4 +81,13 @@ func withAuth(req *http.Request, userID, username string) *http.Request {
 	ctx := context.WithValue(req.Context(), userIDContextKey, userID)
 	ctx = context.WithValue(ctx, usernameContextKey, username)
 	return req.WithContext(ctx)
+}
+
+// postTestBase is the stand-in post storage's address. Nothing listens there.
+const postTestBase = "http://127.0.0.1:1"
+
+// testUpload is the address of a fresh upload of [file] by user [uid] in the
+// stand-in storage, the way buildObjectKey lays one out.
+func testUpload(uid int, file string) string {
+	return fmt.Sprintf("%s/u/%d/up%d/%s", postTestBase, uid, time.Now().UnixNano(), file)
 }

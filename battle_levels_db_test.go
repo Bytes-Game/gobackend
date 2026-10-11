@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -56,8 +55,7 @@ func seedLevels(t *testing.T, visibility string) string {
 func levelAnswer(t *testing.T, who int, cid string) (int, string) {
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{
-		"challengeId": cid, "videoUrl": "http://127.0.0.1:1/answer-" +
-			strconv.FormatInt(time.Now().UnixNano(), 10) + ".mp4",
+		"challengeId": cid, "videoUrl": testUpload(who, "720p.mp4"),
 		"durationMs": 5000,
 	})
 	r := withAuth(httptest.NewRequest("POST", "/api/v1/challenges/accept", bytes.NewReader(body)),

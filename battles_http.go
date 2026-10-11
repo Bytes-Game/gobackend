@@ -28,6 +28,12 @@ func BattleStandingsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "challenge id must be a number", http.StatusBadRequest)
 		return
 	}
+	// Only for somebody who may watch it: the score names everyone in the
+	// battle and how they are doing, which is as private as the videos.
+	if !viewerMayWatch(signedInUserID(r), strconv.Itoa(id)) {
+		http.Error(w, "no such battle", http.StatusNotFound)
+		return
+	}
 	st, ok, err := loadBattleStandings(r.Context(), db, id)
 	if err != nil {
 		queryFailed("standings for battle "+strconv.Itoa(id), "answered 500", err)

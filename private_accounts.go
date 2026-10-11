@@ -152,3 +152,41 @@ func viewerMayWatch(viewerID, challengeID string) bool {
 	}
 	return ok
 }
+
+// showUserTo leaves out of [u] what [viewerID] may not see about them.
+//
+// Their settings and whether they use two-step sign-in are theirs alone:
+// both went to anybody who asked for the profile, signed in or not, and
+// "this account has no second step" is exactly what somebody trying to get
+// into it wants to know. And a private account's following list is for the
+// people it lets in, as its videos are; the count still shows.
+func showUserTo(viewerID string, u *User) {
+	if u == nil {
+		return
+	}
+	if viewerID != u.ID {
+		u.Settings = nil
+		u.TwoFactorEnabled = false
+	}
+	if accountHiddenFrom(viewerID, u.ID) {
+		u.FollowingList = []string{}
+	}
+}
+
+// showUsersTo is showUserTo for a page of people, in one question.
+func showUsersTo(viewerID string, users []User) {
+	ids := make([]string, 0, len(users))
+	for _, u := range users {
+		ids = append(ids, u.ID)
+	}
+	hidden := hiddenCreators(viewerID, ids)
+	for i := range users {
+		if viewerID != users[i].ID {
+			users[i].Settings = nil
+			users[i].TwoFactorEnabled = false
+		}
+		if hidden[users[i].ID] {
+			users[i].FollowingList = []string{}
+		}
+	}
+}

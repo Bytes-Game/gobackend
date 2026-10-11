@@ -63,7 +63,7 @@ func pickSong(t *testing.T, srv *httptest.Server, as int, sourceID string) (int,
 
 func videoWithSong(trackID string) string {
 	return `{"prefix":"Who dances","subject":"best to this","visibility":"arena",` +
-		`"videoUrl":"https://cdn/u/1/a/720p.mp4","thumbnailUrl":"https://cdn/u/1/a/default.jpg",` +
+		`"videoUrl":"http://127.0.0.1:1/u/9502/a/720p.mp4","thumbnailUrl":"http://127.0.0.1:1/u/9502/a/default.jpg",` +
 		`"musicTrackId":"` + trackID + `"}`
 }
 
@@ -133,7 +133,7 @@ func TestAPostAndItsAnswerCarryTheirSongsOnEveryScreen(t *testing.T) {
 		t.Errorf("stored song %d, used %d times", stored, uses)
 	}
 
-	answer := `{"challengeId":"` + ch.ID + `","videoUrl":"https://cdn/u/2/b/720p.mp4",` +
+	answer := `{"challengeId":"` + ch.ID + `","videoUrl":"http://127.0.0.1:1/u/9501/b/720p.mp4",` +
 		`"durationMs":8000,"musicTrackId":"` + rainy.ID + `"}`
 	if status, raw := answerAs(t, srv, liveLeo, answer); status != http.StatusCreated {
 		t.Fatalf("answering with a song: %d %s", status, raw)
@@ -407,7 +407,7 @@ func TestSavedSearchesAreKeptToTheirLimitWithTheSongsStillNeeded(t *testing.T) {
 	_, posted, _ := pickSong(t, srv, liveMaya, "posted")
 	_, ch, _ := postAs(t, srv, liveMaya, videoWithSong(posted.ID))
 	_, answered, _ := pickSong(t, srv, liveLeo, "answered")
-	answerAs(t, srv, liveLeo, `{"challengeId":"`+ch.ID+`","videoUrl":"https://cdn/u/2/b/720p.mp4",`+
+	answerAs(t, srv, liveLeo, `{"challengeId":"`+ch.ID+`","videoUrl":"http://127.0.0.1:1/u/9501/b/720p.mp4",`+
 		`"durationMs":8000,"musicTrackId":"`+answered.ID+`"}`)
 	// Picked a week ago, not posted yet: picked again just now, below.
 	pickSong(t, srv, liveSam, "repicked")

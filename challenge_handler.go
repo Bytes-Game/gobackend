@@ -97,6 +97,15 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		writeRateLimited(w, "challenge_create")
 		return
 	}
+	// Only files this person uploaded to our storage, checked before the
+	// server opens any of them. See post_media.go.
+	if msg := postMediaRefusal(payload.CreatorID, payload.VideoURL,
+		payload.ThumbnailURL, payload.VideoVariants); msg != "" {
+		log.Printf("refused a post from %s: its files are not their uploads in our storage",
+			payload.CreatorID)
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
 
 	// Size gate. The bytes went straight from the phone to object storage
 	// without passing through here, so this is the first moment the server can
@@ -159,6 +168,9 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/challenges/arena
 func GetArenaChallengesHandler(w http.ResponseWriter, r *http.Request) {
 	challenges := GetArenaChallenges()
+	// Public posts, but not a private account's: those are for its
+	// followers wherever they are listed. See private_accounts.go.
+	challenges = dropHiddenCreatorChallenges(signedInUserID(r), challenges)
 	if challenges == nil {
 		challenges = []Challenge{}
 	}
@@ -309,6 +321,15 @@ func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if msg := answerKindRefusal(challenge.MediaType, answerType); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	// Only files this person uploaded to our storage, checked before the
+	// server opens any of them. See post_media.go.
+	if msg := postMediaRefusal(payload.ResponderID, payload.VideoURL,
+		payload.ThumbnailURL, payload.VideoVariants); msg != "" {
+		log.Printf("refused an answer from %s: its files are not their uploads in our storage",
+			payload.ResponderID)
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
