@@ -2,11 +2,12 @@ package main
 
 // battle_levels.go — who may battle whom.
 //
-// Battles are between people of about the same level, so they stay fair:
-// your own league, or the one right next to it. A Bronze player can take on
-// Bronze and Silver, a Gold player Silver, Gold and Platinum. A Diamond
-// player cannot pick off beginners, and a beginner is not thrown against a
-// Diamond.
+// Battles are between people with about the same number of points, so they
+// stay fair: you can answer a challenge from anybody within 50 points of
+// you, above or below. Somebody on 1,000 points can take on anybody from
+// 950 to 1,050. As your points climb towards the next league, the people
+// just inside it come within reach — and when you cross its line you are
+// in it (leagueFor, after every battle).
 //
 // Except between friends. Friends can battle at any level. "Friends" means
 // both people chose it, so a stranger cannot make themselves your friend to
@@ -18,16 +19,18 @@ package main
 // A one-way follow is not enough. Anybody can follow anybody, so it would be
 // a way round the rule for anyone who wanted one.
 //
-// This used to allow two leagues apart (Bronze against Gold), had no friends
-// exception, and read the league from a column that says "Bronze" for
-// everybody who has not had a battle decided yet — including people whose
-// rating says otherwise. The league here is worked out from the rating and
-// the record, the same way the profile shows it (leagueFor).
+// The rule is worked out in one place (levelRefusals) for both of its uses:
+// the battle page and the answer step ask about one challenge, and every
+// feed asks about a whole page at once so the app can switch each Accept
+// button on or off before anybody taps it.
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/lib/pq"
 )
 
 // leagueTier puts the leagues in order. Somebody with no decided battles is
@@ -38,68 +41,171 @@ var leagueTier = map[string]int{
 	"Gold":     3,
 	"Platinum": 4,
 	"Diamond":  5,
+	"Ace":      6,
 }
 
-// leagueOrder is leagueTier the other way round.
-var leagueOrder = []string{"Bronze", "Silver", "Gold", "Platinum", "Diamond"}
+// battleRange is how many points apart two players may be and still battle,
+// either way.
+const battleRange = 50
 
-// maxLeagueDiff is how many leagues apart two people may be and still
-// battle: 1 is your own league and the ones on either side.
-const maxLeagueDiff = 1
-
-// tierOf is a league's place in the order, Bronze for Unranked or anything
-// unknown.
-func tierOf(league string) int {
-	if t, ok := leagueTier[league]; ok {
-		return t
+// pointsOf is somebody's points: their rating, or the starting rating for a
+// row that has none yet.
+func pointsOf(rating int) int {
+	if rating <= 0 {
+		return ratingStart
 	}
-	return 1
+	return rating
 }
 
-// battleLeague is the league somebody is in now, from their rating and
-// record.
-func battleLeague(u User) string {
-	return leagueFor(u.Rating, u.Wins+u.Losses+u.Draws)
+// inRange is whether two players' points are close enough to battle.
+func inRange(theirs, yours int) bool {
+	gap := theirs - yours
+	if gap < 0 {
+		gap = -gap
+	}
+	return gap <= battleRange
 }
 
-// leaguesInReach names the leagues somebody in [tier] may battle, in words:
-// "Bronze and Silver", "Silver, Gold and Platinum".
-func leaguesInReach(tier int) string {
-	names := make([]string, 0, 2*maxLeagueDiff+1)
-	for t := tier - maxLeagueDiff; t <= tier+maxLeagueDiff; t++ {
-		if t >= 1 && t <= len(leagueOrder) {
-			names = append(names, leagueOrder[t-1])
+// withCommas writes 1180 as "1,180".
+func withCommas(n int) string {
+	s := strconv.Itoa(n)
+	neg := strings.HasPrefix(s, "-")
+	s = strings.TrimPrefix(s, "-")
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	if neg {
+		return "-" + s
+	}
+	return s
+}
+
+// aPlayerIn is "a Gold player", "an Ace player", or "a new player" for
+// somebody with no battle decided yet.
+func aPlayerIn(league string) string {
+	switch league {
+	case "", "Unranked":
+		return "a new player"
+	case "Ace":
+		return "an Ace player"
+	}
+	return "a " + league + " player"
+}
+
+// outOfRangeWords says, for the person trying to answer, why they cannot
+// and what they can do instead.
+func outOfRangeWords(theirLeague string, theirs, yours int) string {
+	return fmt.Sprintf("This challenge is from %s with %s points. You have %s points, "+
+		"so you can battle players from %s to %s points, or friends at any level. "+
+		"Win battles to climb.",
+		aPlayerIn(theirLeague), withCommas(theirs), withCommas(yours),
+		withCommas(yours-battleRange), withCommas(yours+battleRange))
+}
+
+// errNoPlayer is a level check for somebody the database does not have.
+var errNoPlayer = errors.New("no such player")
+
+// levelRefusals says, for each of [chs], why [viewerID] may not answer it
+// by the level rule, in words for them; a challenge they may answer is not
+// in the map. Only the level rule and the friends exception: whether it is
+// their own, whether they may see it and whether it takes answers at all
+// are asked elsewhere.
+func levelRefusals(viewerID string, chs []*Challenge) (map[string]string, error) {
+	out := map[string]string{}
+	viewer, err := strconv.Atoi(viewerID)
+	if err != nil || db == nil || len(chs) == 0 {
+		return out, nil
+	}
+	ids := []int64{int64(viewer)}
+	for _, c := range chs {
+		if n, err := strconv.ParseInt(c.CreatorID, 10, 64); err == nil {
+			ids = append(ids, n)
 		}
 	}
-	if len(names) == 1 {
-		return names[0]
+	type player struct{ points, decided int }
+	players := map[string]player{}
+	rows, err := db.Query(`
+		SELECT id, rating, wins + losses + draws FROM users WHERE id = ANY($1::int[])`,
+		pq.Array(ids))
+	if err != nil {
+		return nil, err
 	}
-	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
-}
+	bad := 0
+	for rows.Next() {
+		var id, rating, decided int
+		if scanFailed("a player's points for the level rule",
+			rows.Scan(&id, &rating, &decided), &bad) {
+			continue
+		}
+		players[strconv.Itoa(id)] = player{pointsOf(rating), decided}
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	you, ok := players[viewerID]
+	if !ok {
+		return nil, errNoPlayer
+	}
 
-// friendsForBattle is whether [responderID] counts as [challenge]'s
-// creator's friend for this battle: they follow each other, or it is
-// friends-only and the creator picked them by name.
-func friendsForBattle(challenge Challenge, responderID string) (bool, error) {
-	creator, err1 := strconv.Atoi(challenge.CreatorID)
-	responder, err2 := strconv.Atoi(responderID)
-	cid, err3 := strconv.Atoi(challenge.ID)
-	if err1 != nil || err2 != nil || err3 != nil {
-		return false, nil
+	// Who is out of range, before asking who is a friend: most of a page
+	// usually is not, and then there is nothing more to ask.
+	far := map[string]*Challenge{}
+	farIDs := []int64{}
+	for _, c := range chs {
+		them, ok := players[c.CreatorID]
+		if !ok || c.CreatorID == viewerID || inRange(them.points, you.points) {
+			continue
+		}
+		if n, err := strconv.ParseInt(c.ID, 10, 64); err == nil {
+			if _, dup := far[c.ID]; !dup {
+				farIDs = append(farIDs, n)
+			}
+			far[c.ID] = c
+		}
 	}
-	var friends bool
-	err := db.QueryRow(`
-		SELECT (EXISTS (SELECT 1 FROM follows WHERE follower_id = $1 AND following_id = $2)
-		        AND EXISTS (SELECT 1 FROM follows WHERE follower_id = $2 AND following_id = $1))
-		    OR EXISTS (SELECT 1 FROM challenges c
-		                 JOIN challenge_visible_to v ON v.challenge_id = c.id
-		                WHERE c.id = $3 AND c.visibility = 'friends' AND v.user_id = $2)`,
-		creator, responder, cid).Scan(&friends)
-	return friends, err
+	if len(far) == 0 {
+		return out, nil
+	}
+	friends := map[string]bool{}
+	frows, err := db.Query(`
+		SELECT c.id FROM challenges c
+		 WHERE c.id = ANY($2::int[])
+		   AND ((EXISTS (SELECT 1 FROM follows WHERE follower_id = $1 AND following_id = c.creator_id)
+		         AND EXISTS (SELECT 1 FROM follows WHERE follower_id = c.creator_id AND following_id = $1))
+		     OR (c.visibility = 'friends'
+		         AND EXISTS (SELECT 1 FROM challenge_visible_to v
+		                      WHERE v.challenge_id = c.id AND v.user_id = $1)))`,
+		viewer, pq.Array(farIDs))
+	if queryFailed("checking which far-off challengers are friends of user "+viewerID,
+		"holding them all to the level rule", err) {
+		frows = nil
+	}
+	if frows != nil {
+		fbad := 0
+		for frows.Next() {
+			var id int
+			if scanFailed("a challenge from a friend", frows.Scan(&id), &fbad) {
+				continue
+			}
+			friends[strconv.Itoa(id)] = true
+		}
+		if err := frows.Close(); err != nil {
+			queryFailed("reading which far-off challengers are friends of user "+viewerID,
+				"holding the rest to the level rule", err)
+		}
+	}
+	for id, c := range far {
+		if friends[id] {
+			continue
+		}
+		them := players[c.CreatorID]
+		out[id] = outOfRangeWords(leagueFor(them.points, them.decided), them.points, you.points)
+	}
+	return out, nil
 }
 
 // battleRefusal says why [responderID] may not answer [challenge], in words
-// for them, or "" when they may. Only the battle rules: whether they may
+// for them, or "" when they may. The battle rules only: whether they may
 // see it at all is viewerMayWatch, and whether the post takes answers is
 // the challenge's own business (validateChallengeResponseSubmission).
 func battleRefusal(challenge Challenge, responderID string) string {
@@ -109,32 +215,39 @@ func battleRefusal(challenge Challenge, responderID string) string {
 	if responderID == challenge.CreatorID {
 		return "This is your own challenge. Somebody else has to answer it."
 	}
-	creator, found1 := GetUserByID(challenge.CreatorID)
-	responder, found2 := GetUserByID(responderID)
-	if !found1 || !found2 {
+	refusals, err := levelRefusals(responderID, []*Challenge{&challenge})
+	if err != nil {
+		if !errors.Is(err, errNoPlayer) {
+			queryFailed("reading points for the level rule (user "+responderID+")",
+				"asking them to try again", err)
+		}
 		return "Could not check your level right now. Try again in a moment."
 	}
-	theirs, yours := battleLeague(creator), battleLeague(responder)
-	gap := tierOf(theirs) - tierOf(yours)
-	if gap < 0 {
-		gap = -gap
+	return refusals[challenge.ID]
+}
+
+// markAnswerBlocks puts on each challenge of a page that [viewerID] may not
+// answer why not (Challenge.AnswerBlocked), so the app shows its Accept
+// button switched off — with the reason a tap away — instead of letting
+// somebody record a whole video to be turned away. Their own posts and
+// posts nobody can answer are left alone: the app shows no Accept button
+// on those at all.
+func markAnswerBlocks(viewerID string, chs []*Challenge) {
+	ask := make([]*Challenge, 0, len(chs))
+	for _, c := range chs {
+		if c != nil && c.CreatorID != viewerID && !c.ClosedToBattles {
+			ask = append(ask, c)
+		}
 	}
-	if gap <= maxLeagueDiff {
-		return ""
+	refusals, err := levelRefusals(viewerID, ask)
+	if err != nil {
+		if !errors.Is(err, errNoPlayer) {
+			queryFailed("reading points for the level rule on a page (user "+viewerID+")",
+				"leaving every Accept button on; the answer step still checks", err)
+		}
+		return
 	}
-	friends, err := friendsForBattle(challenge, responderID)
-	if queryFailed("checking whether user "+responderID+" and the creator of challenge "+
-		challenge.ID+" are friends", "holding them to the level rule", err) {
-		friends = false
+	for _, c := range ask {
+		c.AnswerBlocked = refusals[c.ID]
 	}
-	if friends {
-		return ""
-	}
-	you := "You're in " + yours
-	if yours == "Unranked" {
-		you = "You haven't had a battle decided yet, so you start in Bronze"
-	}
-	return fmt.Sprintf("This challenge is from a %s player. %s, so you can battle %s "+
-		"players, or friends at any level. Win battles to move up.",
-		theirs, you, leaguesInReach(tierOf(yours)))
 }

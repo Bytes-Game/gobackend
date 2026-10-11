@@ -1109,3 +1109,45 @@ func TestResolve_ADrawTellsNobody(t *testing.T) {
 		}
 	}
 }
+
+// A league is earned and lost by points: crossing a league's line after a
+// battle moves you into it, and falling back under it moves you out.
+func TestResolve_TheLeagueFollowsThePointsUpAndDown(t *testing.T) {
+	defer withDB(t)()
+	cid, _ := liveBattle(t)
+	// The creator is just under Silver; the answerer just inside it.
+	if _, err := db.Exec(`UPDATE users SET rating = 1040, wins = 3, league = 'Bronze' WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE users SET rating = 1060, wins = 3, league = 'Silver' WHERE id = 2`); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []int{5301, 5302} {
+		voter(t, v, 5)
+		watched(t, v, "challenge", cid, 3000, `{"creatorMs":3000}`)
+		if _, err := db.Exec(`INSERT INTO challenge_votes (challenge_id, response_id, voter_id)
+			VALUES ($1, NULL, $2)`, cid, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE challenges SET voting_ends_at = NOW() - INTERVAL '1 minute' WHERE id = $1`, cid); err != nil {
+		t.Fatal(err)
+	}
+	battleResolverRound(context.Background(), 1)
+
+	read := func(id int) (int, string) {
+		var rating int
+		var league string
+		if err := db.QueryRow(`SELECT rating, league FROM users WHERE id = $1`, id).
+			Scan(&rating, &league); err != nil {
+			t.Fatal(err)
+		}
+		return rating, league
+	}
+	if r, l := read(1); r < 1050 || l != "Silver" {
+		t.Errorf("the winner crossed into Silver's points but is %d (%s)", r, l)
+	}
+	if r, l := read(2); r >= 1050 || l != "Bronze" {
+		t.Errorf("the loser fell under Silver's points but is %d (%s)", r, l)
+	}
+}

@@ -3742,6 +3742,8 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 	quality := math.Min(1, cs.QualityScore*battleEngagementMultiplier(cs.ResponseCount))
 	// League bonus
 	switch cs.CreatorLeague {
+	case "Ace":
+		quality = math.Min(1.0, quality+0.20)
 	case "Diamond":
 		quality = math.Min(1.0, quality+0.15)
 	case "Platinum":
@@ -3927,7 +3929,6 @@ func scoreForUser(cs *ContentScore, profile *UserProfile, session *SessionState,
 		// getUserLeague is CACHED (5-min TTL) — this runs once per candidate in the
 		// scoring hot loop, and the user's league is the same for every candidate;
 		// the old inline per-candidate SELECT was N redundant DB queries per feed.
-		leagueTier := map[string]int{"Bronze": 1, "Silver": 2, "Gold": 3, "Platinum": 4, "Diamond": 5}
 		userLeague := getUserLeague(profile.UserID)
 		if leagueTier[userLeague] > leagueTier[cs.CreatorLeague] {
 			egoBonus += 0.1 * profile.EgoSensitivity

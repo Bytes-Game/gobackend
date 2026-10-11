@@ -25,7 +25,8 @@ func TestLeague_EarnedNotGiven(t *testing.T) {
 		want   string
 	}{
 		{900, "Bronze"}, {1049, "Bronze"}, {1050, "Silver"}, {1150, "Gold"},
-		{1300, "Platinum"}, {1500, "Diamond"},
+		{1300, "Platinum"}, {1500, "Diamond"}, {1749, "Diamond"}, {1750, "Ace"},
+		{2400, "Ace"},
 	}
 	for _, c := range cases {
 		if got := leagueFor(c.rating, 5); got != c.want {
@@ -34,7 +35,7 @@ func TestLeague_EarnedNotGiven(t *testing.T) {
 	}
 	// Every name here must be one matchmaking understands, or two players
 	// in real leagues get compared as "unknown".
-	for _, r := range []int{900, 1100, 1200, 1400, 1600} {
+	for _, r := range []int{900, 1100, 1200, 1400, 1600, 1800} {
 		if _, ok := leagueTier[leagueFor(r, 1)]; !ok {
 			t.Errorf("%q is not in leagueTier", leagueFor(r, 1))
 		}
