@@ -800,6 +800,25 @@ func TestAbout_KeepsTheSentenceTidied(t *testing.T) {
 	}
 }
 
+func TestAbout_IsSaidPlainlyWithoutLooksLike(t *testing.T) {
+	// The owner: "only show what the video is about, do not write looks
+	// like". The app already says AI wrote it.
+	got := understoodAbout(`{"categories": ["food"], "about": ` +
+		`"It looks like a man is cooking biryani. He seems to be at home."}`)
+	want := "A man is cooking biryani. He is at home."
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	for name, p := range map[string]string{
+		"reading": buildUnderstandPrompt("a man explains how to make chai at home", ""),
+		"looking": buildFramesPrompt(""),
+	} {
+		if !strings.Contains(p, `do not write "it looks like"`) {
+			t.Errorf("the %s prompt does not ask for a plain answer", name)
+		}
+	}
+}
+
 func TestAbout_IsNothingWhenTheModelCouldNotTell(t *testing.T) {
 	for _, said := range []string{`""`, `"..."`, `"none"`, `"Unknown."`, `"n/a"`, `"other"`} {
 		raw := `{"categories": ["other"], "feelings": [], "topics": [], "about": ` + said + `}`

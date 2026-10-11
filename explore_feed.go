@@ -115,8 +115,21 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 	// freshest viral content surfaces; recency fills the rest with
 	// content the user definitely hasn't been served yet. No follow,
 	// no collab, no embedding-neighbors — those would re-personalize.
+	//
+	// The search grid's next batch asks differently. It names the videos it
+	// already has (exclude), and the recency half becomes "the newest videos
+	// it has not got yet, from any time", so scrolling far enough reaches
+	// every video there is — and then an empty answer, which is where the
+	// grid stops. See exploreGridExclude.
+	exclude := exploreGridExclude(r)
+	gridMore := len(exclude) > 0
 	trending := sourceTrendingRealtime(userID, candidateLimit*7/10)
-	recent := fetchCandidates(userID, candidateLimit*3/10)
+	var recent []HomeFeedItem
+	if gridMore {
+		recent = fetchGridCandidates(userID, candidateLimit, exclude)
+	} else {
+		recent = fetchCandidates(userID, candidateLimit*3/10)
+	}
 
 	// Merge + dedup. Trending leads — freshness is what users want here.
 	seen := make(map[string]bool, candidateLimit)
@@ -128,14 +141,16 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			key := it.Type + ":" + id
-			if seen[key] {
+			if seen[key] || exclude[key] {
 				continue
 			}
 			seen[key] = true
 			candidates = append(candidates, it)
 		}
 	}
-	if len(candidates) == 0 {
+	// The grid's next batch has already looked through every video it does
+	// not hold. Nothing left is the answer, not a reason to go round again.
+	if len(candidates) == 0 && !gridMore {
 		// Nothing trending and nothing recent — fall through to widening
 		// fetchCandidates which has its own ladder.
 		candidates = fetchCandidates(userID, candidateLimit)
@@ -245,6 +260,9 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 		profile = &UserProfile{UserID: userID, CategoryAffinity: map[string]float64{}}
 	}
 	scored = applySurpriseInjection(scored, profile, CohortEngaged, nil)
+	// Last, after the wildcard: it is picked from a pool of its own, which
+	// knows nothing about who this person blocked or what the grid holds.
+	scored = dropUnservable(scored, ns, exclude)
 
 	// Compose: simple slice, no slot pattern (slot patterns are mood-driven
 	// and explore intentionally doesn't peek at user mood).
@@ -253,6 +271,9 @@ func ExploreFeedHandler(w http.ResponseWriter, r *http.Request) {
 		composed = composed[:limit]
 	}
 	rawCount := len(composed)
+	// A private account's videos are for its followers. See
+	// private_accounts.go.
+	composed = dropHiddenCreatorScored(userID, composed)
 
 	// Shared enrichment choke point — same as For You / Following. Runs
 	// BEFORE the filter because battle-ness is read from TopResponseVideoUrl,

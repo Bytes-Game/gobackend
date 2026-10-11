@@ -62,6 +62,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"mymodule/internal/aboutline"
 )
 
 const (
@@ -244,7 +246,7 @@ Unlike the categories, these are NOT a list to choose from. Write whatever
 fits, in two or three words each. Be specific: name the thing, the practice,
 the place, the situation. For example: %s.
 
-ABOUT — one or two short, plain sentences telling a viewer what happens in the video and what is said in it, the way you would tell a friend. Say only what the transcript shows: never invent names, places or events. If you cannot tell what the video is about, write "".
+ABOUT — one or two short, plain sentences telling a viewer what happens in the video and what is said in it, the way you would tell a friend. Say only what the transcript shows: never invent names, places or events. State it directly, for example "A man explains how to cook biryani at home." Never hedge: do not write "it looks like", "it seems", "appears to" or "probably" — the app already tells viewers an AI wrote it. If you cannot tell what the video is about, write "".
 
 How to judge:
 - The transcript may be in any language and WILL contain transcription mistakes. Judge what the speaker means, not how words are spelled.
@@ -591,6 +593,9 @@ func understoodAbout(raw string) string {
 	}
 	a := strings.Join(strings.Fields(reply.About), " ")
 	a = strings.Trim(a, `"' `)
+	// Said plainly: "It looks like a man is cooking" is stored as "A man is
+	// cooking". The app already says AI wrote it.
+	a = aboutline.Plain(a)
 	switch strings.ToLower(strings.TrimRight(a, ".")) {
 	case "", "...", "…", "none", "unknown", "n/a", "other":
 		return ""

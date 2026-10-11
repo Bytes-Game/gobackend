@@ -43,17 +43,23 @@ type ChatShare struct {
 }
 
 // mayWatchSQL is true when the person in $2 may watch challenge `c`: it is
-// not friends-only, or it is theirs, or they follow its creator and it is
-// for all followers or for them by name. The same rule the follow-graph
-// feed uses (candidate_sources.go), for one person and one video.
-const mayWatchSQL = `(c.visibility <> 'friends'
-	OR c.creator_id = $2
-	OR (EXISTS (SELECT 1 FROM follows f
-	             WHERE f.follower_id = $2 AND f.following_id = c.creator_id)
-	    AND (NOT EXISTS (SELECT 1 FROM challenge_visible_to v
-	                      WHERE v.challenge_id = c.id)
-	         OR EXISTS (SELECT 1 FROM challenge_visible_to v
-	                     WHERE v.challenge_id = c.id AND v.user_id = $2))))`
+// theirs; or it is not friends-only, or they follow its creator and it is
+// for all followers or for them by name — and, either way, its creator's
+// account is not private, or they follow it (private_accounts.go). The
+// same rule the follow-graph feed uses (candidate_sources.go), for one
+// person and one video. $2 is 0 for nobody signed in.
+const mayWatchSQL = `(c.creator_id = $2
+	OR ((c.visibility <> 'friends'
+	     OR (EXISTS (SELECT 1 FROM follows f
+	                  WHERE f.follower_id = $2 AND f.following_id = c.creator_id)
+	         AND (NOT EXISTS (SELECT 1 FROM challenge_visible_to v
+	                           WHERE v.challenge_id = c.id)
+	              OR EXISTS (SELECT 1 FROM challenge_visible_to v
+	                          WHERE v.challenge_id = c.id AND v.user_id = $2))))
+	    AND (NOT EXISTS (SELECT 1 FROM users pu
+	                      WHERE pu.id = c.creator_id AND pu.visibility = 'friends')
+	         OR EXISTS (SELECT 1 FROM follows f
+	                     WHERE f.follower_id = $2 AND f.following_id = c.creator_id))))`
 
 // checkShare says whether [senderID] may share challenge [challengeID] (and
 // side [responseID], 0 for the challenger's video).

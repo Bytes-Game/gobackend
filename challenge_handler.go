@@ -246,6 +246,14 @@ func GetChallengeDetailHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Challenge not found", http.StatusNotFound)
 		return
 	}
+	// Only for somebody who may watch it. This route is open without
+	// signing in, and it used to hand any video to anybody with its number
+	// — friends-only ones, and a private account's. Not allowed reads the
+	// same as not there, so the number cannot be used to find out which.
+	if !viewerMayWatch(signedInUserID(r), challenge.ID) {
+		http.Error(w, "Challenge not found", http.StatusNotFound)
+		return
+	}
 
 	// No view here. Opening this page used to add one every time, however
 	// often the same person opened it; a view is counted from watching the
@@ -494,6 +502,12 @@ func AddChallengeCommentHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "text is required", http.StatusBadRequest)
 		return
 	}
+	// Only under a video you may watch: a friends-only one, or a private
+	// account's, is not somewhere a stranger can leave words.
+	if !viewerMayWatch(payload.UserID, payload.ChallengeID) {
+		http.Error(w, "Challenge not found", http.StatusNotFound)
+		return
+	}
 
 	// ~20 comments/min per user. Burst of 8 covers a back-and-forth
 	// discussion thread without breaking real conversation pacing.
@@ -523,6 +537,12 @@ func AddChallengeCommentHandler(w http.ResponseWriter, r *http.Request) {
 func GetChallengeCommentsHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
+	// The same people who may watch it. This route is open without signing
+	// in, and it read out the comments under any video by its number.
+	if !viewerMayWatch(signedInUserID(r), id) {
+		http.Error(w, "Challenge not found", http.StatusNotFound)
+		return
+	}
 
 	comments := GetChallengeComments(id)
 	if comments == nil {

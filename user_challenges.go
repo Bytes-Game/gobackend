@@ -78,6 +78,13 @@ func GetUserChallengesHandler(w http.ResponseWriter, r *http.Request) {
 	// Identity from the session, not the path. Viewing your own profile is
 	// the only thing that unlocks your non-arena posts.
 	viewingOwnProfile := authUserID(r) == ownerID
+	// A private account's videos are for its followers: everybody else gets
+	// none, the same as the app's "This account is private".
+	if !viewingOwnProfile && accountHiddenFrom(authUserID(r), ownerID) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+		return
+	}
 
 	challenges := GetChallengesByCreator(ownerID, viewingOwnProfile, limit, offset)
 	if challenges == nil {

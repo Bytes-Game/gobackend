@@ -128,7 +128,7 @@ Unlike the categories, these are NOT a list to choose from. Write whatever
 fits, in two or three words each. Name what you can SEE: the object, the food,
 the place, the activity. For example: %s.
 
-ABOUT — one or two short, plain sentences telling a viewer what the video shows, the way you would tell a friend. Say only what you can see in the frames: never invent names, places or what anybody says. If you cannot tell what the video is about, write "".
+ABOUT — one or two short, plain sentences telling a viewer what the video shows, the way you would tell a friend. Say only what you can see in the frames: never invent names, places or what anybody says. State it directly, for example "Two friends dance on a rooftop at sunset." Never hedge: do not write "it looks like", "it seems", "appears to" or "probably" — the app already tells viewers an AI wrote it. If you cannot tell what the video is about, write "".
 
 How to judge:
 - These frames are from ONE video. Judge the video as a whole, not each frame separately.

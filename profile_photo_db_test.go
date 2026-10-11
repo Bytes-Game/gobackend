@@ -312,6 +312,16 @@ func TestAbout_WhatTheWorkerWroteReachesTheViewer(t *testing.T) {
 	if code != 200 || got.About != "Someone juggles five balls." || got.From != "shown" {
 		t.Fatalf("the answer's: %d %+v", code, got)
 	}
+
+	// One written before the worker learned to say it plainly is plain on
+	// the way out.
+	if _, err := db.Exec(`UPDATE challenge_responses SET video_analysis = $2 WHERE id = $1`,
+		rid, `{"passes":["shape","frames"],"about":"It looks like someone is juggling five balls.","aboutFrom":"shown"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, got = askAbout(t, nfStranger, cid, rid); got.About != "Someone is juggling five balls." {
+		t.Fatalf("an old hedged answer reached the viewer as %q", got.About)
+	}
 }
 
 func TestAbout_FriendsOnlyStaysClosed(t *testing.T) {
