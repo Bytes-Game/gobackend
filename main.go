@@ -68,6 +68,14 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A username signs in whatever its capital letters: "karan" is the
+	// account "Karan" (usernames.go). Looked up once, here, so every check
+	// below — the password, the account, the 30 days — sees the name as it
+	// is stored.
+	if name := storedUsername(creds.Username); name != "" {
+		creds.Username = name
+	}
+
 	// First, validate the user's credentials.
 	if !IsValidUser(creds.Username, creds.Password) {
 		http.Error(w, "Invalid username or password", http.StatusUnauthorized)

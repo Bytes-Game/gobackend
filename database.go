@@ -821,6 +821,12 @@ func runMigrations() error {
 		return err
 	}
 
+	// The database's refusal of a username taken in other capital letters,
+	// switched on at the first start where no two names clash, and until
+	// then the clashes named in the log (usernames.go). Not fatal: sign-up
+	// refuses those names either way.
+	ensureUsernameLock()
+
 	// Give the videos that already exist the answers the new provenance
 	// columns were built to hold. Deliberately AFTER the versioned
 	// migrations, because it reads and writes the columns they add.
