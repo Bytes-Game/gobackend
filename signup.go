@@ -180,6 +180,16 @@ func SignupHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A name can have had an owner before: one deleted for good, or one
+	// who changed theirs. Nothing left waiting under it was meant for this
+	// account (username_change.go).
+	if rdb != nil {
+		if err := rdb.Del(rctx, storedNotificationsKey(acct.username)).Err(); err != nil {
+			log.Printf("sign-up %q: notifications left under the name by its last owner could not be cleared: %v",
+				acct.username, err)
+		}
+	}
+
 	user, _ := GetUserByUsername(acct.username)
 	go IndexUser(user) // searchable immediately
 
@@ -237,6 +247,21 @@ func RefreshTokenHandler(w http.ResponseWriter, r *http.Request) {
 	if userID == "" || username == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
+	}
+	// With the name the account has now. A sign-in that somehow outlived a
+	// username change would otherwise hand its old name on, refresh after
+	// refresh (username_change.go). A database that cannot answer keeps the
+	// name the sign-in has: refusing would sign the person out.
+	now, err := currentUsername(userID)
+	switch {
+	case err == sql.ErrNoRows:
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	case err == nil:
+		username = now
+	default:
+		queryFailed("account "+userID+"'s username at a sign-in refresh",
+			"the refreshed sign-in keeps the name it had", err)
 	}
 	token, err := issueToken(userID, username)
 	if err != nil {

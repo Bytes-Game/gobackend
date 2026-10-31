@@ -3412,9 +3412,12 @@ func DeleteChatMessage(msgID int, senderID int) error {
 	return nil
 }
 
-// UpdateUserLastSeen updates the user's last_seen timestamp.
-func UpdateUserLastSeen(username string) {
-	db.Exec(`UPDATE users SET last_seen=NOW() WHERE username=$1`, username)
+// UpdateUserLastSeen stamps account [userID] as seen now. By id, not by name:
+// a connection closing just after a username change must not stamp whoever
+// takes the old name next (username_change.go).
+func UpdateUserLastSeen(userID string) {
+	_, err := db.Exec(`UPDATE users SET last_seen = NOW() WHERE id::text = $1`, userID)
+	queryFailed("stamping account "+userID+" as last seen", "it keeps the time it had", err)
 }
 
 // GetUserLastSeen returns the last_seen timestamp for a user.

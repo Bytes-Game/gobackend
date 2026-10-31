@@ -681,6 +681,9 @@ func main() {
 	// inside the handler (path-id must match body userId until
 	// session auth lands). See profile_handlers.go.
 	api.HandleFunc("/users/{id}", authed(UpdateUserProfileHandler)).Methods("PATCH", "OPTIONS")
+	// Changing your username, once every 30 days (username_change.go).
+	api.HandleFunc("/users/{id}/username", authed(UsernameStatusHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/users/{id}/username", authed(ChangeUsernameHandler)).Methods("PUT", "OPTIONS")
 	// Self-service account deletion (owner-only; Google Play requires
 	// in-app deletion for apps with account creation).
 	api.HandleFunc("/users/{id}", authed(DeleteAccountHandler)).Methods("DELETE")

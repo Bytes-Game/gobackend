@@ -100,6 +100,10 @@ var actionLimitTable = map[string]actionLimitConfig{
 	// Changing your password: 5 an hour. Each one checks the old password,
 	// so it is also a way to guess it.
 	"password_change":  {tokensPerSecond: 5.0 / 3600, burst: 5},
+	// Trying to change your username: 10 an hour. Only one can succeed
+	// every 30 days; the rest are names that were taken, and a stream of
+	// those is somebody checking which names exist.
+	"username_change":  {tokensPerSecond: 10.0 / 3600, burst: 10},
 }
 
 // actionLimiterRegistry holds one rateLimiter per action key. Created
