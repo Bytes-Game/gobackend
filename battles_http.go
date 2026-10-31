@@ -263,6 +263,7 @@ func loadBattleCards(ctx context.Context, q querier, uid int, tab string, visito
 			                  WHERE o.challenge_id = br.challenge_id AND o.user_id <> br.user_id), 0),
 			       COALESCE((SELECT u.username FROM battle_results o JOIN users u ON u.id = o.user_id
 			                  WHERE o.challenge_id = br.challenge_id AND o.user_id <> br.user_id
+			                    AND u.deletion_requested_at IS NULL
 			                  ORDER BY o.votes DESC, o.user_id LIMIT 1), ''),
 			       br.rating_after - br.rating_before
 			  FROM battle_results br

@@ -6,7 +6,12 @@ package main
 // identity). Required for Google Play compliance (apps with account
 // creation must offer in-app deletion) and simply the right thing.
 //
-// Scope: hard-deletes the user's row, social graph edges, engagement
+// Asking does not delete anything yet. The account waits 30 days, hidden
+// from everybody and signed out everywhere, in case the person changes
+// their mind — see account_leaving.go. After that, purgeAccount below
+// deletes it for good.
+//
+// What purgeAccount deletes: the user's row, social graph edges, engagement
 // history, profile/model state, device tokens, and their CONTENT
 // (challenges cascade to responses/likes/votes/comments via
 // DeleteChallengeByID, which also feeds the search-index removal).
@@ -37,17 +42,22 @@ package main
 // database. A file nothing in this database points at is left alone.
 
 import (
-	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/lib/pq"
 )
 
 // DeleteAccountHandler — DELETE /api/v1/users/{id}
+//
+// Starts the 30 days and says when the account will be deleted for good.
+// "deleted" stays in the answer for apps from before the wait, which read
+// it as "done, sign out" — still the right thing for them to do.
 func DeleteAccountHandler(w http.ResponseWriter, r *http.Request) {
 	if db == nil {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
@@ -58,6 +68,35 @@ func DeleteAccountHandler(w http.ResponseWriter, r *http.Request) {
 	if userID == "" || authUserID(r) != userID {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
+	}
+	deleteOn, err := requestAccountDeletion(r.Context(), userID)
+	if err != nil {
+		log.Printf("account %s asked to be deleted, but that could not be saved: %v", userID, err)
+		http.Error(w, "delete failed", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("account %s asked to be deleted: hidden now, deleted for good on %s",
+		userID, deleteOn.UTC().Format(time.RFC3339))
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"deleted":  true,
+		"deleteOn": deleteOn.UTC().Format(time.RFC3339),
+	})
+}
+
+// purgeAccount deletes [userID]'s account for good: every row, and the files
+// the database lists for it. Run by the job once the 30 days are up.
+func purgeAccount(userID string) error {
+	// Only ever an account that asked to go. Anything else reaching here —
+	// a slip in a caller, or the person keeping their account a moment ago —
+	// must delete nothing.
+	var waiting bool
+	err := db.QueryRow(`SELECT deletion_requested_at IS NOT NULL FROM users WHERE id::text = $1`,
+		userID).Scan(&waiting)
+	if err != nil {
+		return fmt.Errorf("checking it is waiting to be deleted: %w", err)
+	}
+	if !waiting {
+		return fmt.Errorf("it is not waiting to be deleted; nothing was deleted")
 	}
 
 	// 1) Content first: reuse the challenge-deletion path so responses,
@@ -91,8 +130,7 @@ func DeleteAccountHandler(w http.ResponseWriter, r *http.Request) {
 	// orphaned login.
 	tx, err := db.Begin()
 	if err != nil {
-		http.Error(w, "delete failed", http.StatusInternalServerError)
-		return
+		return err
 	}
 	stmts := []string{
 		`DELETE FROM challenge_responses WHERE responder_id::text = $1`,
@@ -111,19 +149,18 @@ func DeleteAccountHandler(w http.ResponseWriter, r *http.Request) {
 		`DELETE FROM user_similarities WHERE user_id::text = $1 OR similar_user_id::text = $1`,
 		`DELETE FROM user_profiles WHERE user_id = $1`,
 		`DELETE FROM user_totp WHERE user_id::text = $1`,
+		// What was set aside while it waited (account_leaving.go).
+		`DELETE FROM leaving_set_aside WHERE user_id::text = $1`,
 		`DELETE FROM users WHERE id::text = $1`,
 	}
 	for _, s := range stmts {
 		if _, err := tx.Exec(s, userID); err != nil {
 			_ = tx.Rollback()
-			log.Printf("account delete %s failed at %q: %v", userID, s, err)
-			http.Error(w, "delete failed", http.StatusInternalServerError)
-			return
+			return fmt.Errorf("at %q: %w", s, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		http.Error(w, "delete failed", http.StatusInternalServerError)
-		return
+		return err
 	}
 	// Queued only now. A delete that failed above leaves the account where
 	// it was, and it keeps its photo and its answers.
@@ -144,9 +181,8 @@ func DeleteAccountHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	log.Printf("Account deleted: user %s", userID)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"deleted": true})
+	log.Printf("Account deleted for good: user %s", userID)
+	return nil
 }
 
 // accountFileList is what deleting an account clears from storage, besides

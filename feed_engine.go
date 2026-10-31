@@ -3222,7 +3222,7 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			CAST(u.id AS TEXT), u.league,
 			(SELECT COUNT(*) FROM follows WHERE following_id = u.id),
 			u.wins, u.losses, c.created_at,
-			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id),
+			`+visibleAnswersOfC+`,
 			COALESCE(c.views, 0),
 			(SELECT COUNT(*) FROM challenge_likes WHERE challenge_id = c.id)
 			FROM challenges c
@@ -5481,21 +5481,22 @@ func coldStartChallengesTiered(userID, kind string, limit, offset int, window st
 	responseFilter := ""
 	switch kind {
 	case "battle":
-		responseFilter = "AND (SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id) > 0"
+		responseFilter = "AND " + visibleAnswersOfC + " > 0"
 	case "short":
-		responseFilter = "AND (SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id) = 0"
+		responseFilter = "AND " + visibleAnswersOfC + " = 0"
 	}
 	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
 			c.views, COALESCE(cl.likes,0), c.created_at,
 			COALESCE(c.created_at + INTERVAL '24 hours', NOW()) as expires_at,
-			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id) as response_count
+			`+visibleAnswersOfC+` as response_count
 		FROM challenges c
 		JOIN users u ON c.creator_id = u.id
 		LEFT JOIN (SELECT challenge_id, COUNT(*) as likes FROM challenge_likes GROUP BY challenge_id) cl
 			ON cl.challenge_id = c.id
 		WHERE c.visibility = 'arena' AND c.status IN ('open','active','completed')
+		AND c.creator_id NOT IN `+leavingUsersSQL+`
 		AND c.created_at > NOW() - ($3::text)::interval
 		AND c.views >= $4
 		AND COALESCE(cl.likes,0) >= $5
@@ -6477,7 +6478,7 @@ func FollowingFeedV2Handler(w http.ResponseWriter, r *http.Request) {
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
 			c.views, COALESCE(cl.likes,0), c.created_at,
 			COALESCE(c.created_at + INTERVAL '24 hours', NOW()),
-			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id)
+			`+visibleAnswersOfC+`
 		FROM challenges c
 		JOIN users u ON c.creator_id = u.id
 		LEFT JOIN (SELECT challenge_id, COUNT(*) as likes FROM challenge_likes GROUP BY challenge_id) cl
@@ -6737,14 +6738,16 @@ func populateTopResponses(items []HomeFeedItem) {
 			     ELSE cr.hls_manifest_url END,
 			ru.username, ru.league,
 			(SELECT COUNT(*) FROM challenge_responses
-			  WHERE challenge_id = cr.challenge_id AND NOT COALESCE(is_hidden, FALSE)),
+			  WHERE challenge_id = cr.challenge_id AND NOT COALESCE(is_hidden, FALSE)
+			    AND responder_id NOT IN ` + leavingUsersSQL + `),
 			(SELECT COUNT(*) FROM challenge_response_likes WHERE response_id = cr.id)
 		FROM challenge_responses cr
 		JOIN users ru ON cr.responder_id = ru.id
 		WHERE cr.challenge_id IN (` + strings.Join(placeholders, ",") + `)
 		  -- A hidden answer (hidden by hand or by moderation) is out of the
-		  -- battle.
+		  -- battle, and so is one whose account is waiting to be deleted.
 		  AND NOT COALESCE(cr.is_hidden, FALSE)
+		  AND cr.responder_id NOT IN ` + leavingUsersSQL + `
 		ORDER BY cr.challenge_id, cr.created_at DESC`
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -7174,16 +7177,16 @@ func fetchChallengesWindowedByKind(userID, kind string, limit int, window string
 	if limit <= 0 {
 		return nil
 	}
-	responseFilter := "(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id) > 0"
+	responseFilter := visibleAnswersOfC + " > 0"
 	if kind == "short" {
-		responseFilter = "(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id) = 0"
+		responseFilter = visibleAnswersOfC + " = 0"
 	}
 	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
 			c.views, COALESCE(cl.likes,0), c.created_at,
 			COALESCE(c.created_at + INTERVAL '24 hours', NOW()),
-			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id)
+			`+visibleAnswersOfC+`
 		FROM challenges c
 		JOIN users u ON c.creator_id = u.id
 		LEFT JOIN (SELECT challenge_id, COUNT(*) as likes FROM challenge_likes GROUP BY challenge_id) cl
@@ -7192,6 +7195,7 @@ func fetchChallengesWindowedByKind(userID, kind string, limit int, window string
 		AND c.status IN ('open','active','completed')
 		AND c.created_at > NOW() - ($3::text)::interval
 		AND c.creator_id != CAST($1 AS INT)
+		AND c.creator_id NOT IN `+leavingUsersSQL+`
 		AND `+responseFilter+`
 		ORDER BY c.created_at DESC
 		LIMIT $2`, userID, limit, window)

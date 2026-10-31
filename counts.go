@@ -262,6 +262,7 @@ func peopleBySide(cid int, what string) ([]*PeopleSide, error) {
 		  FROM challenge_responses cr
 		  JOIN users u ON u.id = cr.responder_id
 		 WHERE cr.challenge_id = $1
+		   AND u.deletion_requested_at IS NULL
 		 ORDER BY cr.created_at, cr.id`, cid)
 	if err != nil {
 		return nil, err

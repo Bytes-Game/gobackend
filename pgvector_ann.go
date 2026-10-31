@@ -154,7 +154,7 @@ func sourceEmbeddingANN(userID string, limit int) []HomeFeedItem {
 	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
-			c.views, c.likes_count, c.created_at, c.response_count
+			c.views, c.likes_count, c.created_at, `+visibleAnswersOfC+`
 		FROM challenges c
 		JOIN users u ON c.creator_id = u.id
 		WHERE c.embedding IS NOT NULL

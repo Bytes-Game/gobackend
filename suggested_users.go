@@ -289,6 +289,10 @@ type candidateRow struct {
 // reported (best-effort — keeps Redis lookups out of the hot path).
 func buildSuggestedExclusions(userID string) map[string]bool {
 	excl := map[string]bool{userID: true}
+	// Nobody is offered an account waiting to be deleted (account_leaving.go).
+	for id := range leavingIDs() {
+		excl[strconv.Itoa(id)] = true
+	}
 	rows, err := db.Query(
 		`SELECT CAST(following_id AS TEXT) FROM follows WHERE follower_id = CAST($1 AS INT)`,
 		userID,

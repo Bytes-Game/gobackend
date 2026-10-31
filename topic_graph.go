@@ -150,6 +150,7 @@ func buildTopicGraph() *topicGraph {
 		  JOIN challenges c ON c.id = cr.challenge_id
 		 WHERE ` + searchableWhere("c") + `
 		   AND COALESCE(cr.is_hidden, FALSE) = FALSE
+		   AND cr.responder_id NOT IN ` + leavingUsersSQL + `
 		   AND cr.content_topics IS NOT NULL
 		   AND cr.content_topics <> '[]'::jsonb`)
 	if err != nil {

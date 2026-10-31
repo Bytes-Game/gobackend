@@ -69,6 +69,10 @@ var searchableStatuses = []string{"open", "active", "completed"}
 //
 // alias is the table alias used by the surrounding query ("c" for the joined
 // challenge query, "" when selecting from challenges directly).
+//
+// A video whose account is waiting to be deleted is never one
+// (account_leaving.go). That is checked here, in SQL, and in Go wherever a
+// result comes from the index rather than the table (isLeaving).
 func searchableWhere(alias string) string {
 	p := ""
 	if alias != "" {
@@ -79,7 +83,8 @@ func searchableWhere(alias string) string {
 		quoted[i] = "'" + st + "'"
 	}
 	return p + "visibility = '" + searchableVisibility + "'" +
-		"\n\t    AND " + p + "status IN (" + strings.Join(quoted, ",") + ")"
+		"\n\t    AND " + p + "status IN (" + strings.Join(quoted, ",") + ")" +
+		"\n\t    AND " + p + "creator_id NOT IN " + leavingUsersSQL
 }
 
 // isSearchable is the same rule for something already in hand.

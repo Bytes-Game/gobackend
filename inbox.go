@@ -176,7 +176,7 @@ func ListNotificationsHandler(w http.ResponseWriter, r *http.Request) {
 		  FROM user_notifications n
 		  LEFT JOIN users a ON a.id = n.actor_id
 		  LEFT JOIN challenges c ON c.id = n.challenge_id
-		 WHERE n.user_id = $1
+		 WHERE n.user_id = $1`+notLeavingNotificationSQL+`
 		 ORDER BY n.created_at DESC, n.id DESC
 		 LIMIT $2`, uid, limit)
 	if queryFailed("reading the notifications list", "answering with an error", err) {
@@ -207,11 +207,22 @@ func ListNotificationsHandler(w http.ResponseWriter, r *http.Request) {
 		queryFailed("reading the notifications list", "the list may be short", err)
 	}
 	unread := 0
-	err = db.QueryRow(`SELECT COUNT(*) FROM user_notifications
-	                    WHERE user_id = $1 AND read_at IS NULL`, uid).Scan(&unread)
+	err = db.QueryRow(`SELECT COUNT(*) FROM user_notifications n
+	                     LEFT JOIN challenges c ON c.id = n.challenge_id
+	                    WHERE n.user_id = $1 AND n.read_at IS NULL`+notLeavingNotificationSQL,
+		uid).Scan(&unread)
 	queryFailed("counting unread notifications", "showing none as unread", err)
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "unread": unread})
 }
+
+// notLeavingNotificationSQL leaves out a notification about an account
+// waiting to be deleted: one it caused ("liked your video"), or one about
+// its video (account_leaving.go). They come back if the account is kept, and
+// go for good with it. For a query over user_notifications n LEFT JOIN
+// challenges c.
+const notLeavingNotificationSQL = `
+		   AND (n.actor_id IS NULL OR n.actor_id NOT IN ` + leavingUsersSQL + `)
+		   AND (c.creator_id IS NULL OR c.creator_id NOT IN ` + leavingUsersSQL + `)`
 
 // POST /api/v1/notifications/read — everything seen.
 func MarkNotificationsReadHandler(w http.ResponseWriter, r *http.Request) {

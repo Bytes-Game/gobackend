@@ -242,3 +242,60 @@ func MeiliSearchAll(query string, searchType string) []map[string]interface{} {
 
 	return results
 }
+
+// removeFromSearch takes an account waiting to be deleted out of search: its
+// own entry and its posts'. Results are also checked against the list of
+// leaving accounts as they come back (isSearchable), so an index that missed
+// this still never shows them; this keeps the index honest.
+func removeFromSearch(userID string) {
+	if meili == nil {
+		return
+	}
+	if _, err := meili.Index("users").DeleteDocument(userID, nil); err != nil {
+		log.Printf("search: could not take account %s out of the index: %v — "+
+			"results still leave it out", userID, err)
+	}
+	ids := postIDsOf(userID)
+	if len(ids) == 0 {
+		return
+	}
+	if _, err := meili.Index("challenges").DeleteDocuments(ids, nil); err != nil {
+		log.Printf("search: could not take account %s's %d post(s) out of the index: %v — "+
+			"results still leave them out", userID, len(ids), err)
+	}
+}
+
+// addBackToSearch puts an account that was kept back into search, with the
+// posts of its that search may return.
+func addBackToSearch(userID string) {
+	if meili == nil {
+		return
+	}
+	if u, ok := GetUserByID(userID); ok {
+		IndexUser(u)
+	}
+	for _, c := range GetSearchableChallenges() {
+		if c.CreatorID == userID {
+			IndexChallenge(c)
+		}
+	}
+}
+
+// postIDsOf is every post [userID] made, as the index names them.
+func postIDsOf(userID string) []string {
+	rows, err := db.Query(`SELECT id::text FROM challenges WHERE creator_id::text = $1`, userID)
+	if queryFailed("the posts of account "+userID, "they stay in the search index", err) {
+		return nil
+	}
+	defer rows.Close()
+	var ids []string
+	bad := 0
+	for rows.Next() {
+		var id string
+		if scanFailed("a post of account "+userID, rows.Scan(&id), &bad) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}

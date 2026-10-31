@@ -1043,13 +1043,17 @@ func GetUserByID(idStr string) (User, bool) {
 	return u, true
 }
 
-// UserExists checks whether a username is already taken.
+// UserExists checks whether a username is already taken — by anybody,
+// whatever the capital letters: "Karan" and "karan" are one name. An account
+// waiting to be deleted still holds its name for the 30 days; once it is
+// deleted for good, the name is free (account_leaving.go).
 func UserExists(username string) bool {
 	var exists bool
 	// NB: this had a missing closing paren for months — no callers
 	// exercised it, so the syntax error only surfaced when the future
 	// signup flow reached for it and always got `false`.
-	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)`, username).Scan(&exists); err != nil {
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE lower(username) = lower($1))`,
+		username).Scan(&exists); err != nil {
 		queryFailed("UserExists: could not check whether that username is taken",
 			"reporting it as free, which lets two accounts collide on it", err)
 	}
@@ -1107,8 +1111,12 @@ func IsValidUser(username, password string) bool {
 // notification fan-out, search fallback). The password column is intentionally
 // NOT selected — nothing here needs it and it shouldn't sit in memory. The
 // client-facing roster uses the bounded GetUsersPaginated instead.
+//
+// Every user that is staying: an account waiting to be deleted is not
+// searched for, indexed or told anything (account_leaving.go).
 func GetAllUsers() []User {
-	rows, err := db.Query(`SELECT id, username, full_name, wins, losses, league FROM users ORDER BY id`)
+	rows, err := db.Query(`SELECT id, username, full_name, wins, losses, league FROM users
+	                        WHERE deletion_requested_at IS NULL ORDER BY id`)
 	if err != nil {
 		log.Printf("GetAllUsers error: %v", err)
 		return nil
@@ -1142,7 +1150,8 @@ func GetAllUsers() []User {
 func GetUsersPaginated(limit, offset int) []User {
 	rows, err := db.Query(
 		`SELECT id, username, full_name, wins, losses, league
-		   FROM users ORDER BY id LIMIT $1 OFFSET $2`,
+		   FROM users WHERE deletion_requested_at IS NULL
+		  ORDER BY id LIMIT $1 OFFSET $2`,
 		limit, offset,
 	)
 	if err != nil {
@@ -1872,6 +1881,7 @@ JOIN users u ON c.creator_id = u.id
 LEFT JOIN (SELECT challenge_id, COUNT(*) AS cnt FROM challenge_likes GROUP BY challenge_id) lc ON lc.challenge_id = c.id
 LEFT JOIN (SELECT challenge_id, COUNT(*) AS cnt FROM challenge_responses
              WHERE NOT COALESCE(is_hidden, FALSE)
+               AND responder_id NOT IN ` + leavingUsersSQL + `
              GROUP BY challenge_id) rc ON rc.challenge_id = c.id`
 
 // queryChallenges executes a challenge query and returns Challenge structs.
@@ -2131,6 +2141,7 @@ func GetChallengeResponses(challengeID string) []ChallengeResponse {
 		 JOIN users u ON cr.responder_id = u.id
 		 LEFT JOIN (SELECT response_id, COUNT(*) AS cnt FROM challenge_response_likes GROUP BY response_id) lc ON lc.response_id = cr.id
 		 WHERE cr.challenge_id = $1 AND COALESCE(cr.is_hidden, FALSE) = FALSE
+		   AND cr.responder_id NOT IN `+leavingUsersSQL+`
 		 ORDER BY cr.created_at ASC`, cid,
 	)
 	if err != nil {
@@ -3000,6 +3011,8 @@ func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 		 LEFT JOIN chat_messages rm ON rm.id = m.reply_to_id
 		 WHERE ((m.sender_id = $1 AND m.receiver_id = $2)
 		    OR (m.sender_id = $2 AND m.receiver_id = $1))
+		   -- Nothing from a chat with an account waiting to be deleted.
+		   AND s.deletion_requested_at IS NULL AND r.deletion_requested_at IS NULL
 		   AND m.created_at > COALESCE(
 		         (SELECT cleared_at FROM chat_cleared WHERE user_id = $1 AND other_id = $2),
 		         '-infinity'::timestamptz)
@@ -3118,7 +3131,10 @@ func GetConversations(userID int) []Conversation {
 	var lastAt []time.Time
 	for _, pid := range partnerIDs {
 		var username, league string
-		err := db.QueryRow(`SELECT username, league FROM users WHERE id=$1`, pid).Scan(&username, &league)
+		// A chat with an account waiting to be deleted is not on the list
+		// (account_leaving.go); it comes back if they keep the account.
+		err := db.QueryRow(`SELECT username, league FROM users
+		                     WHERE id=$1 AND deletion_requested_at IS NULL`, pid).Scan(&username, &league)
 		if err != nil {
 			continue
 		}
@@ -3304,11 +3320,12 @@ func GetSavedChallenges(userID string) []Challenge {
 		`SELECT c.id, c.creator_id, u.username, u.league, c.video_url, c.thumbnail_url,
 		        c.prefix, c.subject, c.visibility, c.status, c.views, c.created_at,
 		        (SELECT COUNT(*) FROM challenge_likes WHERE challenge_id=c.id) AS likes,
-		        (SELECT COUNT(*) FROM challenge_responses WHERE challenge_id=c.id) AS response_count
+		        `+visibleAnswersOfC+` AS response_count
 		 FROM saved_challenges sc
 		 JOIN challenges c ON sc.challenge_id = c.id
 		 JOIN users u ON c.creator_id = u.id
 		 WHERE sc.user_id = $1
+		   AND u.deletion_requested_at IS NULL
 		 ORDER BY sc.created_at DESC`, uid,
 	)
 	if err != nil {

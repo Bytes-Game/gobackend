@@ -296,7 +296,7 @@ var runByATest = map[string]string{
 	"profile_handlers.go:UpdateUserProfileHandler":  "TestRuntimeQueries_HandlersThatBuildTheirOwnSQL",
 	"profile_handlers.go:GetLikedChallengesHandler": "TestRuntimeQueries_HandlersThatBuildTheirOwnSQL",
 	"profile_handlers.go:GetWatchHistoryHandler":    "TestRuntimeQueries_HandlersThatBuildTheirOwnSQL",
-	"account_delete.go:DeleteAccountHandler":        "TestRuntimeQueries_AccountDeletionRunsEveryStatement",
+	"account_delete.go:purgeAccount":                "TestRuntimeQueries_AccountDeletionRunsEveryStatement",
 
 	"hls_worker_api.go:HLSNextPendingHandler": "TestRuntimeQueries_WorkerClaimEndpoint",
 

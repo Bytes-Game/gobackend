@@ -123,7 +123,7 @@ func parseToken(tokenStr string) (*authClaims, error) {
 		issued = claims.IssuedAt.Time
 	}
 	if signedInBeforeCutoff(claims.Subject, issued) {
-		return nil, errors.New("signed out: the password was changed after this sign-in")
+		return nil, errors.New("signed out: the password was changed, or the account signed out everywhere, after this sign-in")
 	}
 	return claims, nil
 }
