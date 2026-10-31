@@ -356,9 +356,14 @@ var variantToExt = map[string]string{
 // buildObjectKey constructs the S3 path for one variant of one upload.
 // Layout: u/<userID>/<uploadID>/<variant>.<ext>
 //
-// Per-user prefix means a future "delete all my media" job is a single
-// prefix scan; per-upload prefix groups variants of the same source so
-// we can list them with one round trip.
+// The per-upload folder groups variants of the same source so we can list
+// them with one round trip, and delete them together.
+//
+// Never delete by the per-user folder, u/<userID>/. A user number is only
+// unique inside one database: replace the database and numbering starts
+// again from 1, while the old uploads stay here under the old numbers. So a
+// new account can share an old one's folder. Delete what the database says
+// is theirs, upload by upload — see account_delete.go.
 func buildObjectKey(userID, uploadID, kind, variant string) (string, error) {
 	if userID == "" || uploadID == "" {
 		return "", errors.New("userID and uploadID required")

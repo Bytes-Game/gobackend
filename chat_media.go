@@ -287,16 +287,35 @@ func forgetChatFile(url string) {
 		"keeping the file, to be safe", err) || stillUsed {
 		return
 	}
+	if folder := chatFileFolder(url); folder != "" {
+		enqueueMediaDeletions([]string{folder})
+	}
+}
+
+// chatSenderNumber is the sender's part of a chat file's address: their user
+// number, digits only.
+var chatSenderNumber = regexp.MustCompile(`^[0-9]+$`)
+
+// chatFileFolder is the folder a chat file was uploaded into —
+// chat/<sender>/<random name>/, which holds that one file and nothing else —
+// or "" for an address that is not exactly that shape on our own storage.
+// "" is the safe answer: whatever comes back is deleted whole.
+//
+// Built from the parts rather than by trimming the file name off with
+// path.Dir, which also tidies the path: "chat//<random>/photo.jpg" would come
+// out as chat/<random>/, the whole chat folder of whoever has that number.
+func chatFileFolder(url string) string {
 	cfg, err := chatMediaStorage()
-	if err != nil || cfg == nil {
-		return
+	if err != nil || cfg == nil || url == "" {
+		return ""
 	}
 	base := strings.TrimRight(cfg.PublicBaseURL, "/") + "/"
 	key := strings.TrimPrefix(url, base)
 	parts := strings.Split(key, "/")
-	if key == url || len(parts) != 4 || parts[0] != "chat" || !chatMediaRest.MatchString(parts[2]+"/"+parts[3]) {
-		return
+	if key == url || len(parts) != 4 || parts[0] != "chat" ||
+		!chatSenderNumber.MatchString(parts[1]) ||
+		!chatMediaRest.MatchString(parts[2]+"/"+parts[3]) {
+		return ""
 	}
-	// The file's own folder: chat/<sender>/<random name>/
-	enqueueMediaDeletions([]string{path.Dir(key) + "/"})
+	return "chat/" + parts[1] + "/" + parts[2] + "/"
 }

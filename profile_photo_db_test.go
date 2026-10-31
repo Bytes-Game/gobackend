@@ -386,29 +386,3 @@ func TestProfilePhoto_AReplacedPhotoIsRemovedFromStorage(t *testing.T) {
 		t.Error("the removed photo stays online")
 	}
 }
-
-func TestAccountDelete_EverythingTheyUploadedIsQueuedForRemoval(t *testing.T) {
-	defer withDB(t)()
-	resetRedis(t)
-	const gone = 9711
-	if _, err := db.Exec(`INSERT INTO users (id, username, password, avatar_url)
-	                       VALUES ($1, 'leaving_user', 'x', 'https://media.example/u/9711/a/photo.jpg')
-	                       ON CONFLICT (id) DO NOTHING`, gone); err != nil {
-		t.Fatal(err)
-	}
-	defer db.Exec(`DELETE FROM pending_media_deletions WHERE object_prefix = 'u/9711/'`)
-
-	r := withAuth(httptest.NewRequest("DELETE", "/api/v1/users/9711", nil), "9711", "leaving_user")
-	r = mux.SetURLVars(r, map[string]string{"id": "9711"})
-	w := httptest.NewRecorder()
-	DeleteAccountHandler(w, r)
-	if w.Code != 200 {
-		t.Fatalf("delete answered %d: %s", w.Code, w.Body.String())
-	}
-	if _, found := GetUserByID("9711"); found {
-		t.Fatal("the account is still there")
-	}
-	if !pendingDeletion(t, "u/9711/") {
-		t.Error("their uploads — profile photo, chat photos — stay in storage")
-	}
-}
