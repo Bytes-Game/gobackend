@@ -299,7 +299,8 @@ func GetLikedChallengesHandler(w http.ResponseWriter, r *http.Request) {
 		SELECT cl.challenge_id, cl.created_at AS liked_at
 		  FROM challenge_likes cl
 		  JOIN challenges c ON c.id = cl.challenge_id
-		 WHERE cl.user_id = $1`
+		 WHERE cl.user_id = $1
+		   AND c.creator_id NOT IN ` + leavingUsersSQL
 	args := []any{uidInt}
 	if beforeRaw != "" {
 		if before, err := strconv.ParseInt(beforeRaw, 10, 64); err == nil {
@@ -454,6 +455,7 @@ func GetWatchHistoryHandler(w http.ResponseWriter, r *http.Request) {
 		  FROM latest l
 		  JOIN challenges c ON c.id = l.content_id
 		  LEFT JOIN users u ON u.id = c.creator_id
+		 WHERE c.creator_id NOT IN ` + leavingUsersSQL + `
 		 ORDER BY l.created_at DESC
 		 LIMIT $` + strconv.Itoa(len(args)+1)
 	args = append(args, limit+1)
@@ -718,6 +720,8 @@ func ListBlockedUsersHandler(w http.ResponseWriter, r *http.Request) {
 		   FROM user_blocks ub
 		   JOIN users u ON u.id = ub.blocked_id
 		  WHERE ub.blocker_id = $1
+		    -- Hidden here too while waiting to be deleted (account_leaving.go).
+		    AND u.deletion_requested_at IS NULL
 		  ORDER BY ub.created_at DESC`,
 		userID,
 	)

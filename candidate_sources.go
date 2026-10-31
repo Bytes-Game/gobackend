@@ -131,6 +131,7 @@ func multiSourceFetchForCohort(userID string, totalLimit int, cohort Cohort) ([]
 	seen := make(map[string]bool, totalLimit)
 	bySource := make(map[string][]HomeFeedItem, len(sources))
 	itemSource := make(map[string]string, totalLimit)
+	leaving := leavingIDs()
 	for _, src := range sources {
 		for _, it := range resultsByName[src.name] {
 			id := getItemID(it)
@@ -143,6 +144,15 @@ func multiSourceFetchForCohort(userID string, totalLimit int, cohort Cohort) ([]
 			if isOwnContent(it, userID) {
 				if metricCandidateSource != nil {
 					metricCandidateSource.WithLabelValues(src.name, "own_content").Inc()
+				}
+				continue
+			}
+			// Nor anything of an account waiting to be deleted: not shown,
+			// and not scored, so it takes no place a staying account's video
+			// would have had (account_leaving.go). Here for the same reason.
+			if inLeaving(leaving, getItemCreatorID(it)) {
+				if metricCandidateSource != nil {
+					metricCandidateSource.WithLabelValues(src.name, "leaving").Inc()
 				}
 				continue
 			}
@@ -334,7 +344,7 @@ func sourceTrendingWindowed(userID string, limit int, window string) []HomeFeedI
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
 			c.views, c.likes_count, c.created_at,
-			c.response_count
+			`+visibleAnswersOfC+`
 		FROM challenges c
 		JOIN users u ON c.creator_id = u.id
 		WHERE c.visibility = 'arena'
@@ -388,7 +398,7 @@ func sourceFollowGraphWindowed(userID string, limit int, window string) []HomeFe
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
 			c.views, c.likes_count, c.created_at,
-			c.response_count
+			`+visibleAnswersOfC+`
 		FROM challenges c
 		JOIN users u ON c.creator_id = u.id
 		JOIN follows f ON f.following_id = c.creator_id
@@ -464,7 +474,7 @@ func sourceCollaborativeWindowed(userID string, limit int, window string) []Home
 	rows, err := db.Query(`
 		SELECT c.id, c.creator_id, u.username, u.league, c.video_url,
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
-			c.views, c.likes_count, c.created_at, c.response_count,
+			c.views, c.likes_count, c.created_at, `+visibleAnswersOfC+`,
 			COUNT(DISTINCT us.similar_user_id) AS engaging_similars,
 			MAX(fe.created_at) AS last_engaged
 		FROM user_similarities us
@@ -473,6 +483,7 @@ func sourceCollaborativeWindowed(userID string, limit int, window string) []Home
 		JOIN users u ON c.creator_id = u.id
 		WHERE us.user_id = $1
 		  AND us.similarity_score > 0.3
+		  AND us.similar_user_id NOT IN `+leavingUserTextIDsSQL+`
 		  AND fe.event_type IN ('like','complete','share','save')
 		  AND c.created_at > NOW() - ($3::text)::interval
 		  AND c.creator_id != CAST($1 AS INT)

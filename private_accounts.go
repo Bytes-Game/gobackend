@@ -14,6 +14,10 @@ package main
 // seen by that person and by the people who follow them, and by nobody
 // else. A video shared with friends only keeps its own, narrower rule on
 // top (mayWatchSQL).
+//
+// An account waiting to be deleted (account_leaving.go) is hidden here too,
+// from everybody: everything that already leaves out a private account's
+// videos leaves out theirs.
 
 import (
 	"strconv"
@@ -21,13 +25,15 @@ import (
 	"github.com/lib/pq"
 )
 
-// hiddenCreators is which of [creatorIDs] are private accounts that
-// [viewerID] may not see: not themselves, and not somebody they follow. An
-// empty viewer is nobody signed in, who sees no private account.
+// hiddenCreators is which of [creatorIDs] [viewerID] may not see: accounts
+// waiting to be deleted, which nobody sees, and private accounts that are
+// not the viewer's own and not somebody they follow. An empty viewer is
+// nobody signed in, who sees no private account.
 //
-// When the database cannot say, it says nothing is hidden and logs why, the
-// same way every other read here fails: a feed that empties while the
-// database is unwell would look exactly like a platform with no videos.
+// When the database cannot say which accounts are private, it says none are
+// and logs why, the same way every other read here fails: a feed that
+// empties while the database is unwell would look exactly like a platform
+// with no videos.
 func hiddenCreators(viewerID string, creatorIDs []string) map[string]bool {
 	if db == nil || len(creatorIDs) == 0 {
 		return nil
@@ -43,6 +49,13 @@ func hiddenCreators(viewerID string, creatorIDs []string) map[string]bool {
 	if len(ids) == 0 {
 		return nil
 	}
+	out := map[string]bool{}
+	leaving := leavingIDs()
+	for _, n := range ids {
+		if leaving[n] {
+			out[strconv.Itoa(n)] = true
+		}
+	}
 	viewer, _ := strconv.Atoi(viewerID) // 0: nobody signed in
 	rows, err := db.Query(`
 		SELECT u.id FROM users u
@@ -54,10 +67,9 @@ func hiddenCreators(viewerID string, creatorIDs []string) map[string]bool {
 		pq.Array(ids), viewer)
 	if queryFailed("finding private accounts among the creators shown to user "+viewerID,
 		"showing every video as though its account were public", err) {
-		return nil
+		return out
 	}
 	defer rows.Close()
-	out := map[string]bool{}
 	bad := 0
 	for rows.Next() {
 		var id int
@@ -131,7 +143,8 @@ func dropHiddenCreatorChallenges(viewerID string, chs []Challenge) []Challenge {
 	return out
 }
 
-// accountHiddenFrom is whether [ownerID]'s account is private to [viewerID].
+// accountHiddenFrom is whether [ownerID]'s account is hidden from
+// [viewerID]: private to them, or waiting to be deleted.
 func accountHiddenFrom(viewerID, ownerID string) bool {
 	return hiddenCreators(viewerID, []string{ownerID})[ownerID]
 }

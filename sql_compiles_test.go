@@ -296,7 +296,12 @@ var runByATest = map[string]string{
 	"profile_handlers.go:UpdateUserProfileHandler":  "TestRuntimeQueries_HandlersThatBuildTheirOwnSQL",
 	"profile_handlers.go:GetLikedChallengesHandler": "TestRuntimeQueries_HandlersThatBuildTheirOwnSQL",
 	"profile_handlers.go:GetWatchHistoryHandler":    "TestRuntimeQueries_HandlersThatBuildTheirOwnSQL",
-	"account_delete.go:DeleteAccountHandler":        "TestRuntimeQueries_AccountDeletionRunsEveryStatement",
+	"account_delete.go:purgeAccount":                "TestRuntimeQueries_AccountDeletionRunsEveryStatement",
+
+	// A table name from the list of what a leaving account's marks are set
+	// aside from, and on the way back, the columns the saved rows have.
+	"account_leaving.go:moveTraces":    "TestAccountLeaving_KeepingWorksWhateverChangedInTheMeantime",
+	"account_leaving.go:putTracesBack": "TestAccountLeaving_KeepingWorksWhateverChangedInTheMeantime",
 
 	"hls_worker_api.go:HLSNextPendingHandler": "TestRuntimeQueries_WorkerClaimEndpoint",
 

@@ -400,7 +400,7 @@ func sourceAudition(userID string, limit int) []HomeFeedItem {
 			c.thumbnail_url, c.prefix, c.subject, c.visibility, c.status,
 			c.views, COALESCE(cl.likes,0), c.created_at,
 			COALESCE(c.created_at + INTERVAL '24 hours', NOW()),
-			(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id)
+			`+visibleAnswersOfC+`
 		FROM challenges c
 		JOIN users u ON c.creator_id = u.id
 		LEFT JOIN (SELECT challenge_id, COUNT(*) as likes FROM challenge_likes GROUP BY challenge_id) cl

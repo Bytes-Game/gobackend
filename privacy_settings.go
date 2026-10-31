@@ -41,6 +41,10 @@ func messagesRefused(senderID, receiverID int) bool {
 	if db == nil {
 		return false
 	}
+	// Nobody can message an account waiting to be deleted (account_leaving.go).
+	if isLeaving(strconv.Itoa(receiverID)) {
+		return true
+	}
 	var refused bool
 	err := db.QueryRow(`
 		SELECT `+onlyFromFollowedSQL+`
@@ -65,8 +69,10 @@ func activityHidden(username string) bool {
 		return false
 	}
 	var hidden bool
+	// An account waiting to be deleted never shows as active either.
 	err := db.QueryRow(`
 		SELECT COALESCE(settings->>'showActivity', 'true') = 'false'
+		       OR deletion_requested_at IS NOT NULL
 		  FROM users WHERE username = $1`, username).Scan(&hidden)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false

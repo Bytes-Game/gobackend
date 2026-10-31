@@ -231,7 +231,7 @@ func loadHomeFeedItemByID(itemType, id string) (HomeFeedItem, bool) {
 				c.views,
 				(SELECT COUNT(*) FROM challenge_likes l WHERE l.challenge_id = c.id),
 				c.created_at,
-				(SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = c.id)
+				`+visibleAnswersOfC+`
 			FROM challenges c
 			JOIN users u ON c.creator_id = u.id
 			WHERE c.id = $1

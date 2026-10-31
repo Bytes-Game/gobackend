@@ -12,11 +12,13 @@ package main
 // nothing here touches a real bucket.
 
 import (
+	"context"
 	"net/http/httptest"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/lib/pq"
@@ -75,7 +77,8 @@ func queuedLike(t *testing.T, patterns ...string) []string {
 	return out
 }
 
-// deleteAccount calls the real handler as that person.
+// deleteAccount calls the real handler as that person: it asks for the
+// deletion, which starts the 30 days (account_leaving.go).
 func deleteAccount(t *testing.T, id int, username string) *httptest.ResponseRecorder {
 	t.Helper()
 	sid := strconv.Itoa(id)
@@ -84,6 +87,22 @@ func deleteAccount(t *testing.T, id int, username string) *httptest.ResponseReco
 	w := httptest.NewRecorder()
 	DeleteAccountHandler(w, r)
 	return w
+}
+
+// deleteForGood asks for the deletion through the real handler, lets the 30
+// days pass, and runs the real job that finishes it. Says how many accounts
+// the job deleted.
+func deleteForGood(t *testing.T, id int, username string) int {
+	t.Helper()
+	if w := deleteAccount(t, id, username); w.Code != 200 {
+		t.Fatalf("asking to delete answered %d: %s", w.Code, w.Body.String())
+	}
+	mustExec(t, `UPDATE users SET deletion_requested_at = NOW() - INTERVAL '31 days' WHERE id = $1`, id)
+	n, err := purgeDueAccounts(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("the job that deletes accounts for good: %v", err)
+	}
+	return n
 }
 
 func TestAccountDelete_OnlyWhatTheDatabaseListsIsQueued(t *testing.T) {
@@ -133,8 +152,8 @@ func TestAccountDelete_OnlyWhatTheDatabaseListsIsQueued(t *testing.T) {
 	mustExec(t, chat, leaving, friend, "photo", base+"/chat/9711/cccccccc/photo.jpg")
 	mustExec(t, chat, friend, third, "photo", base+"/chat/9711/cccccccc/photo.jpg")
 
-	if w := deleteAccount(t, leaving, "leaving_user"); w.Code != 200 {
-		t.Fatalf("delete answered %d: %s", w.Code, w.Body.String())
+	if n := deleteForGood(t, leaving, "leaving_user"); n != 1 {
+		t.Fatalf("the job deleted %d accounts, want 1", n)
 	}
 	if _, found := GetUserByID("9711"); found {
 		t.Fatal("the account is still there")
@@ -195,8 +214,8 @@ func TestAccountDelete_AProfilePhotoThatIsNotTheirsIsLeftAlone(t *testing.T) {
 	mustExec(t, `INSERT INTO users (id, username, password, avatar_url) VALUES (9731, 'borrowed_photo', 'x', $1)`,
 		base+"/u/9732/someone/photo.jpg")
 
-	if w := deleteAccount(t, 9731, "borrowed_photo"); w.Code != 200 {
-		t.Fatalf("delete answered %d: %s", w.Code, w.Body.String())
+	if n := deleteForGood(t, 9731, "borrowed_photo"); n != 1 {
+		t.Fatalf("the job deleted %d accounts, want 1", n)
 	}
 	if pendingDeletion(t, "u/9732/someone/") {
 		t.Error("deleting one account queued another person's upload for removal")
@@ -244,8 +263,8 @@ func TestAccountDelete_ADeleteThatFailsKeepsTheFiles(t *testing.T) {
 	mustExec(t, `CREATE TRIGGER refuse_9721 BEFORE DELETE ON users
 	             FOR EACH ROW EXECUTE FUNCTION refuse_9721()`)
 
-	if w := deleteAccount(t, 9721, "staying_put"); w.Code != 500 {
-		t.Fatalf("a delete the database refused answered %d: %s", w.Code, w.Body.String())
+	if n := deleteForGood(t, 9721, "staying_put"); n != 0 {
+		t.Fatalf("a delete the database refused was counted as done (%d)", n)
 	}
 	if _, found := GetUserByID("9721"); !found {
 		t.Fatal("the account went anyway, so this test proves nothing")

@@ -168,7 +168,9 @@ func recentSearchAccounts(userID string) []User {
 		SELECT id, username, COALESCE(full_name, ''), COALESCE(league, ''),
 		       COALESCE(visibility, 'public'), wins, losses
 		  FROM users
-		 WHERE id = ANY($1)`, pq.Array(ids))
+		 WHERE id = ANY($1)
+		   -- Not an account waiting to be deleted (account_leaving.go).
+		   AND deletion_requested_at IS NULL`, pq.Array(ids))
 	if queryFailed("the accounts in the search history",
 		"showing the history without them", err) {
 		return out

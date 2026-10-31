@@ -21,6 +21,9 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	var creds struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		// The person was told their account is waiting to be deleted and
+		// chose to keep it. Never set by the app on its own.
+		KeepAccount bool `json:"keepAccount"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
@@ -78,6 +81,27 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		// This should not happen if IsValidUser passed, but it's good practice to check.
 		http.Error(w, "Could not find user data after successful login", http.StatusInternalServerError)
 		return
+	}
+
+	// Waiting to be deleted (account_leaving.go). The password was right, so
+	// say when the account goes, and keep it only when the person has chosen
+	// to — never as a side effect of signing in.
+	if deleteOn, waiting := deletionDate(user.ID); waiting {
+		if !creds.KeepAccount {
+			writeJSON(w, http.StatusConflict, map[string]interface{}{
+				"error": "This account will be deleted on " +
+					deleteOn.UTC().Format("2 January 2006") + ". Keep it to sign in.",
+				"deletionPending": true,
+				"deleteOn":        deleteOn.UTC().Format(time.RFC3339),
+			})
+			log.Printf("user %s signed in while waiting to be deleted; asked whether to keep it", creds.Username)
+			return
+		}
+		if err := keepAccount(r.Context(), user.ID); err != nil {
+			log.Printf("user %s chose to keep their account, but that could not be saved: %v", creds.Username, err)
+			http.Error(w, "Login temporarily unavailable", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// Mint a signed session token. From here on the client authenticates every
@@ -140,7 +164,9 @@ func GetUserHandler(w http.ResponseWriter, r *http.Request) {
 	username := vars["username"]
 
 	user, exists := GetUserByUsername(username)
-	if !exists {
+	// An account waiting to be deleted is not found, as TikTok shows it
+	// (account_leaving.go).
+	if !exists || isLeaving(user.ID) {
 		http.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
@@ -512,6 +538,10 @@ func main() {
 	// challenge or an account drops the rows and queues the storage paths;
 	// this drains that queue. Without it every delete leaks its video.
 	startMediaDeleter()
+	// Delete for good the accounts whose 30 days are up. Without it an
+	// account that asked to be deleted would stay hidden forever and never
+	// actually go.
+	startAccountPurger()
 	// Try each new video on a small crowd first, and only spend a big crowd on
 	// the ones that earn it. Without this every video costs the same 300 views
 	// before anyone is allowed to judge it, which is what caps how many uploads

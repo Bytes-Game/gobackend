@@ -378,10 +378,12 @@ func rankSearchAccounts(query, userID string, following, fof map[string]bool, vi
 	// Learned click-through prior for this query (see search_ctr.go).
 	ctrBoosts := searchCTRBoosts(query)
 	out := make([]scored, 0, len(hits))
+	leaving := leavingIDs()
 	for i, hit := range hits {
 		// Skip the viewer themselves — surfacing your own account is just
-		// noise in a search context.
-		if hit.User.ID == userID {
+		// noise in a search context. And any account waiting to be deleted,
+		// which the index may still hold (account_leaving.go).
+		if hit.User.ID == userID || inLeaving(leaving, hit.User.ID) {
 			continue
 		}
 
@@ -781,7 +783,9 @@ func meiliSearchChallenges(query string, limit int) []challengeHit {
 	for _, hit := range res.Hits {
 		doc := decodeHit(hit)
 		ch := meiliDocToChallenge(doc)
-		if !isSearchable(ch.Visibility, ch.Status) {
+		// Nor anything of an account waiting to be deleted, whatever the
+		// index still holds (account_leaving.go).
+		if !isSearchable(ch.Visibility, ch.Status) || isLeaving(ch.CreatorID) {
 			continue
 		}
 		// Rank is position among what is actually returned, so dropping a

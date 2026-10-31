@@ -180,6 +180,7 @@ func getSimilarUsers(userID string) []UserSimilarity {
 		SELECT similar_user_id, similarity_score
 		FROM user_similarities
 		WHERE user_id = $1
+		  AND similar_user_id NOT IN `+leavingUserTextIDsSQL+`
 		ORDER BY similarity_score DESC
 		LIMIT 20`, userID)
 	if err != nil {
@@ -237,7 +238,10 @@ func getCollaborativeBonus(userID, contentID, contentType string) float64 {
 			AND fe.event_type IN ('share','rewatch','save','like','comment','view')
 			ORDER BY fe.created_at DESC LIMIT 1
 		) sub ON true
-		WHERE us.user_id = $1`, userID, contentID, contentType).Scan(&weightedEngagement)
+		WHERE us.user_id = $1
+		  -- A taste is not borrowed from an account waiting to be deleted
+		  -- (account_leaving.go).
+		  AND us.similar_user_id NOT IN `+leavingUserTextIDsSQL, userID, contentID, contentType).Scan(&weightedEngagement)
 
 	if err != nil {
 		return 0

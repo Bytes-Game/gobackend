@@ -68,7 +68,8 @@ type publicVideo struct {
 func PublicProfilePageHandler(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(strings.TrimSpace(mux.Vars(r)["username"]), "@")
 	u, ok := GetUserByUsername(name)
-	if !ok || name == "" {
+	// Waiting to be deleted reads exactly as deleted (account_leaving.go).
+	if !ok || name == "" || isLeaving(u.ID) {
 		publicNotFound(w, "This account isn't available",
 			"It may have been deleted, or the link is wrong.")
 		return

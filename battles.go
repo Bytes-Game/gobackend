@@ -378,7 +378,7 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 
 	rows, err := q.QueryContext(ctx, `
 		SELECT cr.id, cr.responder_id, u.username, COALESCE(cr.views, 0),
-		       COALESCE(cr.is_hidden, FALSE)
+		       COALESCE(cr.is_hidden, FALSE) OR u.deletion_requested_at IS NOT NULL
 		  FROM challenge_responses cr
 		  JOIN users u ON u.id = cr.responder_id
 		 WHERE cr.challenge_id = $1
@@ -925,6 +925,125 @@ func resolveDueBattles(ctx context.Context, limit int) (int, error) {
 		}
 	}
 	return decided, nil
+}
+
+// cancelBattlesOf ends, with no result, every battle [userID] is in that is
+// still being voted on: they asked for their account to be deleted
+// (account_leaving.go). Says how many it ended.
+//
+// Nobody wins or loses points. Their opponent should not lose to somebody
+// who left, nor win by default; and nobody should wait out the clock on a
+// player who is gone. Each player gets a "cancelled" result: the battle
+// leaves their live list and counts as none of won, lost or draw, which is
+// all any record or streak reads (loadBattleSummary, loadBattleCards).
+func cancelBattlesOf(ctx context.Context, userID string) (int, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT c.id FROM challenges c
+		  LEFT JOIN challenge_responses cr ON cr.challenge_id = c.id
+		 WHERE c.resolved_at IS NULL AND c.voting_ends_at IS NOT NULL
+		   AND (c.creator_id::text = $1 OR cr.responder_id::text = $1)`, userID)
+	if err != nil {
+		return 0, err
+	}
+	var ids []int
+	bad := 0
+	for rows.Next() {
+		var id int
+		if scanFailed("a battle to cancel", rows.Scan(&id), &bad) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	cancelled := 0
+	for _, id := range ids {
+		ok, err := cancelBattle(ctx, id)
+		if err != nil {
+			return cancelled, fmt.Errorf("battle %d: %w", id, err)
+		}
+		if ok {
+			cancelled++
+		}
+	}
+	return cancelled, nil
+}
+
+// cancelBattle ends one battle still being voted on with no result for
+// anybody. Safe to call twice and alongside the resolver: the row is locked,
+// and a battle already decided is left alone. Returns whether this call
+// ended it.
+func cancelBattle(ctx context.Context, challengeID int) (bool, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var creatorID int
+	err = tx.QueryRowContext(ctx, `
+		SELECT creator_id FROM challenges
+		 WHERE id = $1 AND resolved_at IS NULL AND voting_ends_at IS NOT NULL
+		 FOR UPDATE`, challengeID).Scan(&creatorID)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	// Every player: the creator, and each person who answered — with the
+	// answer that joined them to the battle, their first.
+	type player struct {
+		id       int
+		role     string
+		response any
+	}
+	players := []player{{id: creatorID, role: "creator"}}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT DISTINCT ON (responder_id) responder_id, id
+		  FROM challenge_responses
+		 WHERE challenge_id = $1 AND responder_id <> $2
+		 ORDER BY responder_id, created_at, id`, challengeID, creatorID)
+	if err != nil {
+		return false, err
+	}
+	for rows.Next() {
+		var p player
+		var rid int
+		if err := rows.Scan(&p.id, &rid); err != nil {
+			_ = rows.Close()
+			return false, err
+		}
+		p.role, p.response = "responder", rid
+		players = append(players, p)
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+
+	for _, p := range players {
+		// rating_before and rating_after are the same: nothing moved.
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO battle_results
+			    (challenge_id, user_id, role, response_id, outcome, rating_before, rating_after)
+			SELECT $1, u.id, $3, $4, 'cancelled', u.rating, u.rating
+			  FROM users u WHERE u.id = $2
+			ON CONFLICT (challenge_id, user_id) DO NOTHING`,
+			challengeID, p.id, p.role, p.response); err != nil {
+			return false, fmt.Errorf("record the cancelled result for %d: %w", p.id, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE challenges SET status = 'completed', resolved_at = NOW()
+		 WHERE id = $1`, challengeID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // decayIdleRatings charges a week off to every rating above decayAbove whose

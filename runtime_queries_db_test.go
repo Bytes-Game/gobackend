@@ -340,6 +340,16 @@ func TestRuntimeQueries_AccountDeletionRunsEveryStatement(t *testing.T) {
 	if rec.Code != http.StatusOK && rec.Code != http.StatusNoContent {
 		t.Fatalf("delete gave %d: %s", rec.Code, rec.Body.String())
 	}
+	// Asking starts 30 days (account_leaving.go); the statements below run
+	// when the job finishes the deletion. Let the 30 days pass and run it.
+	if _, err := db.Exec(`UPDATE users SET deletion_requested_at = NOW() - INTERVAL '31 days'
+	                       WHERE id = 950`); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := purgeDueAccounts(context.Background(), time.Now()); err != nil || n != 1 {
+		t.Fatalf("the job deleted %d accounts (err %v), want 1 — a statement in "+
+			"purgeAccount did not run", n, err)
+	}
 
 	var left int
 	if err := db.QueryRow(

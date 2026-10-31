@@ -29,6 +29,17 @@ func HandleFollowEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An account waiting to be deleted cannot be followed: it would come
+	// straight back into a following list (account_leaving.go). Said as a
+	// block from their side is, which the app already shows.
+	if isLeaving(payload.FollowingID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error":  "You can't follow this account.",
+			"reason": "unavailable",
+		})
+		return
+	}
+
 	if err := ProcessFollowEvent(payload); err != nil {
 		// Across a block: said plainly, with a reason the app can act on.
 		switch {
