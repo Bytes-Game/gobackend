@@ -43,15 +43,19 @@ func renameServer(t *testing.T) *httptest.Server {
 // call makes one request with sign-in [token], and reads the answer.
 func call(t *testing.T, srv *httptest.Server, token, method, path, body string) (int, map[string]any) {
 	t.Helper()
+	// The "== nil" and the returns are for NilAway, which cannot see that
+	// t.Fatalf stops the test (the same shape as authedDo).
 	req, err := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || req == nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+		return 0, nil
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || res == nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+		return 0, nil
 	}
 	defer res.Body.Close()
 	var got map[string]any
