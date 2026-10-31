@@ -36,8 +36,11 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // deletionWait is how long a deleted account is kept, hidden, before it is
@@ -312,8 +315,7 @@ func purgeDueAccounts(ctx context.Context, now time.Time) (int, error) {
 // The marks a leaving account left on other people's things — likes on
 // videos and on answers, votes, dislikes, comments, saves, shares, and
 // follows both ways — are set aside while it waits, and put back if it is
-// kept. Each statement below has its partner in the other list, in the same
-// order.
+// kept.
 //
 // Taken out of their tables rather than filtered: the like count on a video
 // is read in more than twenty places, and every one of them would have to
@@ -321,8 +323,37 @@ func purgeDueAccounts(ctx context.Context, now time.Time) (int, error) {
 // that count down and back up with them.
 //
 // Nothing points at any of these tables, so taking rows out of one cannot
-// take anything of anybody else's with it. A row whose video, answer or
-// person has gone in the meantime is not put back.
+// take anything of anybody else's with it.
+// TestAccountLeaving_NothingPointsAtWhatIsSetAside keeps that true.
+
+// traceTables is every table their marks are set aside from. For each: which
+// rows are theirs, and what must still be there for a row to go back — the
+// video, answer or person it was on. A like on a video deleted during the 30
+// days has nowhere to go back to, and trying would make keeping the account
+// fail. In stillThere, `r` is the row as it was set aside.
+//
+// One list for both directions, so the two cannot drift apart: a table set
+// aside is always a table put back.
+var traceTables = []struct{ table, theirs, stillThere string }{
+	{"challenge_likes", "user_id = $1",
+		"EXISTS (SELECT 1 FROM challenges c WHERE c.id = r.challenge_id)"},
+	{"challenge_response_likes", "user_id = $1",
+		"EXISTS (SELECT 1 FROM challenge_responses x WHERE x.id = r.response_id)"},
+	{"challenge_votes", "voter_id = $1",
+		"EXISTS (SELECT 1 FROM challenges c WHERE c.id = r.challenge_id) AND " +
+			"(r.response_id IS NULL OR EXISTS (SELECT 1 FROM challenge_responses x WHERE x.id = r.response_id))"},
+	{"challenge_dislikes", "user_id = $1",
+		"EXISTS (SELECT 1 FROM challenges c WHERE c.id = r.challenge_id)"},
+	{"challenge_comments", "author_id = $1",
+		"EXISTS (SELECT 1 FROM challenges c WHERE c.id = r.challenge_id)"},
+	{"saved_challenges", "user_id = $1",
+		"EXISTS (SELECT 1 FROM challenges c WHERE c.id = r.challenge_id)"},
+	{"video_shares", "user_id = $1",
+		"EXISTS (SELECT 1 FROM challenges c WHERE c.id = r.challenge_id)"},
+	{"follows", "follower_id = $1 OR following_id = $1",
+		"EXISTS (SELECT 1 FROM users u WHERE u.id = r.follower_id) AND " +
+			"EXISTS (SELECT 1 FROM users u WHERE u.id = r.following_id)"},
+}
 
 // moveTraces sets [userID]'s marks on other people's things aside, or puts
 // them back, inside [tx] — so it happens together with the change to the
@@ -333,95 +364,92 @@ func moveTraces(ctx context.Context, tx *sql.Tx, userID string, back bool) error
 		return fmt.Errorf("user id %q is not a number", userID)
 	}
 	if back {
-		for _, q := range []string{
-			`WITH back AS (DELETE FROM leaving_set_aside WHERE user_id = $1 AND table_name = 'challenge_likes'
-		               RETURNING row_data)
-		 INSERT INTO challenge_likes SELECT (jsonb_populate_record(NULL::challenge_likes, b.row_data)).*
-		   FROM back b
-		  WHERE EXISTS (SELECT 1 FROM challenges c WHERE c.id = (b.row_data->>'challenge_id')::int)
-		 ON CONFLICT DO NOTHING`,
-			`WITH back AS (DELETE FROM leaving_set_aside WHERE user_id = $1 AND table_name = 'challenge_response_likes'
-		               RETURNING row_data)
-		 INSERT INTO challenge_response_likes
-		 SELECT (jsonb_populate_record(NULL::challenge_response_likes, b.row_data)).*
-		   FROM back b
-		  WHERE EXISTS (SELECT 1 FROM challenge_responses r WHERE r.id = (b.row_data->>'response_id')::int)
-		 ON CONFLICT DO NOTHING`,
-			`WITH back AS (DELETE FROM leaving_set_aside WHERE user_id = $1 AND table_name = 'challenge_votes'
-		               RETURNING row_data)
-		 INSERT INTO challenge_votes SELECT (jsonb_populate_record(NULL::challenge_votes, b.row_data)).*
-		   FROM back b
-		  WHERE EXISTS (SELECT 1 FROM challenges c WHERE c.id = (b.row_data->>'challenge_id')::int)
-		    AND (b.row_data->>'response_id' IS NULL
-		         OR EXISTS (SELECT 1 FROM challenge_responses r WHERE r.id = (b.row_data->>'response_id')::int))
-		 ON CONFLICT DO NOTHING`,
-			`WITH back AS (DELETE FROM leaving_set_aside WHERE user_id = $1 AND table_name = 'challenge_dislikes'
-		               RETURNING row_data)
-		 INSERT INTO challenge_dislikes SELECT (jsonb_populate_record(NULL::challenge_dislikes, b.row_data)).*
-		   FROM back b
-		  WHERE EXISTS (SELECT 1 FROM challenges c WHERE c.id = (b.row_data->>'challenge_id')::int)
-		 ON CONFLICT DO NOTHING`,
-			`WITH back AS (DELETE FROM leaving_set_aside WHERE user_id = $1 AND table_name = 'challenge_comments'
-		               RETURNING row_data)
-		 INSERT INTO challenge_comments SELECT (jsonb_populate_record(NULL::challenge_comments, b.row_data)).*
-		   FROM back b
-		  WHERE EXISTS (SELECT 1 FROM challenges c WHERE c.id = (b.row_data->>'challenge_id')::int)
-		 ON CONFLICT DO NOTHING`,
-			`WITH back AS (DELETE FROM leaving_set_aside WHERE user_id = $1 AND table_name = 'saved_challenges'
-		               RETURNING row_data)
-		 INSERT INTO saved_challenges SELECT (jsonb_populate_record(NULL::saved_challenges, b.row_data)).*
-		   FROM back b
-		  WHERE EXISTS (SELECT 1 FROM challenges c WHERE c.id = (b.row_data->>'challenge_id')::int)
-		 ON CONFLICT DO NOTHING`,
-			`WITH back AS (DELETE FROM leaving_set_aside WHERE user_id = $1 AND table_name = 'video_shares'
-		               RETURNING row_data)
-		 INSERT INTO video_shares SELECT (jsonb_populate_record(NULL::video_shares, b.row_data)).*
-		   FROM back b
-		  WHERE EXISTS (SELECT 1 FROM challenges c WHERE c.id = (b.row_data->>'challenge_id')::int)
-		 ON CONFLICT DO NOTHING`,
-			`WITH back AS (DELETE FROM leaving_set_aside WHERE user_id = $1 AND table_name = 'follows'
-		               RETURNING row_data)
-		 INSERT INTO follows SELECT (jsonb_populate_record(NULL::follows, b.row_data)).*
-		   FROM back b
-		  WHERE EXISTS (SELECT 1 FROM users u WHERE u.id = (b.row_data->>'follower_id')::int)
-		    AND EXISTS (SELECT 1 FROM users u WHERE u.id = (b.row_data->>'following_id')::int)
-		 ON CONFLICT DO NOTHING`,
-		} {
-			if _, err := tx.ExecContext(ctx, q, id); err != nil {
-				return err
-			}
+		// A follow with somebody who is ALSO waiting to be deleted waits on
+		// with them instead: it goes back when they keep their account, and
+		// goes with their account if they do not. Put back now, it would show
+		// them in this person's followers while they are hidden everywhere
+		// else — follower lists and counts leave a leaving account out only
+		// because its follows are set aside.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE leaving_set_aside SET user_id = f.other
+			  FROM (SELECT s.id,
+			               CASE WHEN (s.row_data->>'follower_id')::int = $1
+			                    THEN (s.row_data->>'following_id')::int
+			                    ELSE (s.row_data->>'follower_id')::int END AS other
+			          FROM leaving_set_aside s
+			         WHERE s.user_id = $1 AND s.table_name = 'follows') f
+			 WHERE leaving_set_aside.id = f.id
+			   AND f.other IN `+leavingUsersSQL, id); err != nil {
+			return fmt.Errorf("follows with somebody else who is leaving: %w", err)
 		}
-		return nil
 	}
-	for _, q := range []string{
-		`WITH moved AS (DELETE FROM challenge_likes WHERE user_id = $1 RETURNING *)
-		 INSERT INTO leaving_set_aside (user_id, table_name, row_data)
-		 SELECT $1, 'challenge_likes', to_jsonb(moved) FROM moved`,
-		`WITH moved AS (DELETE FROM challenge_response_likes WHERE user_id = $1 RETURNING *)
-		 INSERT INTO leaving_set_aside (user_id, table_name, row_data)
-		 SELECT $1, 'challenge_response_likes', to_jsonb(moved) FROM moved`,
-		`WITH moved AS (DELETE FROM challenge_votes WHERE voter_id = $1 RETURNING *)
-		 INSERT INTO leaving_set_aside (user_id, table_name, row_data)
-		 SELECT $1, 'challenge_votes', to_jsonb(moved) FROM moved`,
-		`WITH moved AS (DELETE FROM challenge_dislikes WHERE user_id = $1 RETURNING *)
-		 INSERT INTO leaving_set_aside (user_id, table_name, row_data)
-		 SELECT $1, 'challenge_dislikes', to_jsonb(moved) FROM moved`,
-		`WITH moved AS (DELETE FROM challenge_comments WHERE author_id = $1 RETURNING *)
-		 INSERT INTO leaving_set_aside (user_id, table_name, row_data)
-		 SELECT $1, 'challenge_comments', to_jsonb(moved) FROM moved`,
-		`WITH moved AS (DELETE FROM saved_challenges WHERE user_id = $1 RETURNING *)
-		 INSERT INTO leaving_set_aside (user_id, table_name, row_data)
-		 SELECT $1, 'saved_challenges', to_jsonb(moved) FROM moved`,
-		`WITH moved AS (DELETE FROM video_shares WHERE user_id = $1 RETURNING *)
-		 INSERT INTO leaving_set_aside (user_id, table_name, row_data)
-		 SELECT $1, 'video_shares', to_jsonb(moved) FROM moved`,
-		`WITH moved AS (DELETE FROM follows WHERE follower_id = $1 OR following_id = $1 RETURNING *)
-		 INSERT INTO leaving_set_aside (user_id, table_name, row_data)
-		 SELECT $1, 'follows', to_jsonb(moved) FROM moved`,
-	} {
-		if _, err := tx.ExecContext(ctx, q, id); err != nil {
-			return err
+	for _, t := range traceTables {
+		if back {
+			err = putTracesBack(ctx, tx, id, t.table, t.stillThere)
+		} else {
+			_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+				WITH moved AS (DELETE FROM %s WHERE (%s) RETURNING *)
+				INSERT INTO leaving_set_aside (user_id, table_name, row_data)
+				SELECT $1, $2, to_jsonb(moved) FROM moved`, t.table, t.theirs), id, t.table)
+		}
+		if err != nil {
+			return fmt.Errorf("%s: %w", t.table, err)
 		}
 	}
 	return nil
+}
+
+// putTracesBack puts [userID]'s rows set aside from [table] back, those whose
+// video, answer or person is [stillThere]. Every one leaves the holding table
+// either way: one whose thing has gone has nowhere to go back to.
+//
+// What goes back is each column the saved rows have and the table still has.
+// The table can change during the 30 days: a column added since takes its
+// default, one dropped since is left out. Putting back every column the table
+// has now would write nothing into a column added since — and a column added
+// with NOT NULL, as this repo often adds them, would then refuse every row,
+// and with them the person trying to keep their account. (Their rows from one
+// table were all saved by one statement, so they all have the same columns.)
+//
+// A row already back is left as it is. That happens: another server can let
+// somebody follow them again in the few seconds before it hears they left.
+func putTracesBack(ctx context.Context, tx *sql.Tx, userID int, table, stillThere string) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT DISTINCT k.key
+		  FROM leaving_set_aside s
+		 CROSS JOIN LATERAL jsonb_object_keys(s.row_data) AS k(key)
+		 WHERE s.user_id = $1 AND s.table_name = $2
+		   AND EXISTS (SELECT 1 FROM pg_attribute a
+		                WHERE a.attrelid = to_regclass($2) AND a.attname = k.key
+		                  AND a.attnum > 0 AND NOT a.attisdropped)`, userID, table)
+	if err != nil {
+		return err
+	}
+	var cols []string
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			rows.Close()
+			return err
+		}
+		cols = append(cols, pq.QuoteIdentifier(col))
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(cols) == 0 {
+		return nil // nothing of theirs was set aside from this table
+	}
+	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+		WITH back AS (DELETE FROM leaving_set_aside WHERE user_id = $1 AND table_name = $2
+		              RETURNING row_data)
+		INSERT INTO %[1]s (%[2]s)
+		SELECT r.%[3]s
+		  FROM back b, jsonb_populate_record(NULL::%[1]s, b.row_data) r
+		 WHERE %[4]s
+		ON CONFLICT DO NOTHING`,
+		table, strings.Join(cols, ", "), strings.Join(cols, ", r."), stillThere),
+		userID, table)
+	return err
 }
