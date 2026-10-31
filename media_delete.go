@@ -296,6 +296,13 @@ func (c *R2Config) doSigned(ctx context.Context, method, signedURL string) ([]by
 
 // ---------- working out what to delete ----------
 
+// mediaDeleteStorage is the storage the helpers below work out folders for.
+// Tests swap in a stand-in, so the database half of a delete — which rows
+// it reads and which folders it queues — can be checked against a real
+// database. Talking to the bucket itself (drainMediaDeletions) still needs
+// the real settings.
+var mediaDeleteStorage = loadR2Config
+
 // mediaPrefixFromPublicURL turns a stored video address back into the folder
 // it lives in.
 //
@@ -340,7 +347,7 @@ func mediaPrefixesForChallenge(challengeID int) []string {
 	if db == nil {
 		return nil
 	}
-	cfg, err := loadR2Config()
+	cfg, err := mediaDeleteStorage()
 	if err != nil {
 		return nil
 	}
@@ -422,7 +429,7 @@ func mediaPrefixesForResponse(responseID int) []string {
 	if db == nil {
 		return nil
 	}
-	cfg, err := loadR2Config()
+	cfg, err := mediaDeleteStorage()
 	if err != nil {
 		return nil
 	}

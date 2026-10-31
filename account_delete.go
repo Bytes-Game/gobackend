@@ -10,22 +10,41 @@ package main
 // history, profile/model state, device tokens, and their CONTENT
 // (challenges cascade to responses/likes/votes/comments via
 // DeleteChallengeByID, which also feeds the search-index removal).
-// Chat messages the user SENT remain (they're the other participant's
-// history too) but are already attributed by numeric id only.
+// Their chats go too: the database removes every message they sent or
+// received along with their row (chat_messages cascades on both people).
 //
-// The videos themselves go too. This file used to say they did not —
-// "decoupled storage cleanup" — but nothing was ever doing the decoupled
-// part, so every deleted account left its videos in the bucket forever.
-// DeleteChallengeByID now queues each one's storage paths and a background
-// worker clears them; see media_delete.go. Nothing extra is needed here,
-// because every video a user owns hangs off one of their challenges.
+// ════════════════════════════════════════════════════════════════════════
+// THEIR FILES
+// ════════════════════════════════════════════════════════════════════════
+//
+// What they uploaded is removed from storage as well, by a background
+// worker (media_delete.go). Only the files the database lists for this
+// account go:
+//
+//   - their posts, and the answers to them      (DeleteChallengeByID)
+//   - their answers to other people's posts
+//   - their profile photo
+//   - the photos and voice notes in their chats, unless a forwarded copy in
+//     a chat that stays still shows the same file
+//
+// NEVER THEIR WHOLE FOLDER. Every upload sits under u/<their number>/, and
+// this used to clear that folder in one go. But a number is only unique
+// inside one database. When the database is replaced with a fresh one — as
+// it was when the free one expired — numbering starts again from 1, while
+// the old uploads stay in storage under the old numbers. A new account can
+// then have an old account's number, and clearing "its" folder wipes the
+// old person's videos: exactly what anyone would want back from the old
+// database. A file nothing in this database points at is left alone.
 
 import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/gorilla/mux"
+	"github.com/lib/pq"
 )
 
 // DeleteAccountHandler — DELETE /api/v1/users/{id}
@@ -62,12 +81,9 @@ func DeleteAccountHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Everything they ever uploaded, in one go: posts and answers (already
-	// queued with each challenge above), and what hangs off no challenge —
-	// profile photos, chat photos and voice messages. All of it lives under
-	// their own folder, u/<id>/. A deleted person's face must not stay
-	// online at an address somebody kept.
-	enqueueMediaDeletions([]string{"u/" + userID + "/"})
+	// Their other files, read from the rows that point at them. Read now:
+	// the rows go below, and the addresses go with them.
+	files := accountFiles(userID)
 
 	// 2) Everything else in one transaction. Order doesn't matter (no
 	// FK chains between these), but the users row goes last so a crash
@@ -109,6 +125,9 @@ func DeleteAccountHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "delete failed", http.StatusInternalServerError)
 		return
 	}
+	// Queued only now. A delete that failed above leaves the account where
+	// it was, and it keeps its photo and its answers.
+	files.queue()
 
 	// 3) Best-effort Redis state: embeddings, seen-set, signals. TTLs
 	// reap the rest; these are just the long-lived keys.
@@ -128,4 +147,117 @@ func DeleteAccountHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Account deleted: user %s", userID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"deleted": true})
+}
+
+// accountFileList is what deleting an account clears from storage, besides
+// the posts, which DeleteChallengeByID queues one by one.
+type accountFileList struct {
+	// Folders that are this account's alone: the profile photo, and each
+	// of their answers to other people's posts.
+	folders []string
+	// Every photo and voice note in their chats, theirs and the other
+	// person's. Those chats go with the account, but a copy forwarded into
+	// a chat that stays can still show the same file, so each one is
+	// checked again once the account is gone.
+	chatFiles []string
+}
+
+// accountFiles works out, from the rows that point at them, which files go
+// with an account. Must run BEFORE those rows are deleted.
+func accountFiles(userID string) accountFileList {
+	var out accountFileList
+	uid, err := strconv.Atoi(userID)
+	if db == nil || err != nil {
+		return out
+	}
+	cfg, err := mediaDeleteStorage()
+	if err != nil || cfg == nil {
+		// No storage set up, so nothing was ever uploaded to it.
+		return out
+	}
+
+	// The profile photo, if it is their own upload. The app cannot set any
+	// other (validProfilePhoto), but a photo saved before that check
+	// existed could point at somebody else's file.
+	var photo string
+	err = db.QueryRow(`SELECT COALESCE(avatar_url, '') FROM users WHERE id = $1`, uid).Scan(&photo)
+	if !queryFailed("the profile photo of an account being deleted",
+		"the photo stays in storage", err) {
+		if p := mediaPrefixFromPublicURL(cfg, photo); strings.HasPrefix(p, "u/"+userID+"/") {
+			out.folders = append(out.folders, p)
+		}
+	}
+
+	// Their answers to other people's posts. Answers to their own posts
+	// went with those posts.
+	rows, err := db.Query(`SELECT id FROM challenge_responses WHERE responder_id = $1`, uid)
+	if !queryFailed("the answers of an account being deleted",
+		"their videos stay in storage", err) {
+		var answers []int
+		bad := 0
+		for rows.Next() {
+			var id int
+			if scanFailed("an answer of an account being deleted", rows.Scan(&id), &bad) {
+				continue
+			}
+			answers = append(answers, id)
+		}
+		rows.Close()
+		for _, id := range answers {
+			out.folders = append(out.folders, mediaPrefixesForResponse(id)...)
+		}
+	}
+
+	// The photos and voice notes in their chats.
+	rows, err = db.Query(`SELECT DISTINCT media_url FROM chat_messages
+	                       WHERE (sender_id = $1 OR receiver_id = $1)
+	                         AND COALESCE(media_url, '') <> ''`, uid)
+	if !queryFailed("the chat photos and voice notes of an account being deleted",
+		"they stay in storage", err) {
+		bad := 0
+		for rows.Next() {
+			var url string
+			if scanFailed("a chat file of an account being deleted", rows.Scan(&url), &bad) {
+				continue
+			}
+			out.chatFiles = append(out.chatFiles, url)
+		}
+		rows.Close()
+	}
+	return out
+}
+
+// queue hands the files to the cleanup worker. Call it only once the account
+// is really gone.
+func (f accountFileList) queue() {
+	enqueueMediaDeletions(f.folders)
+	if len(f.chatFiles) == 0 || db == nil {
+		return
+	}
+	// A chat file goes unless a message that is still there shows it: a copy
+	// somebody forwarded into another chat. One question for all of them,
+	// rather than one each — someone who sent a lot of photos would
+	// otherwise make the delete crawl.
+	rows, err := db.Query(`SELECT u FROM unnest($1::text[]) AS t(u)
+	                        WHERE NOT EXISTS (
+	                          SELECT 1 FROM chat_messages m
+	                           WHERE m.media_url = t.u AND m.is_deleted IS NOT TRUE)`,
+		pq.Array(f.chatFiles))
+	if queryFailed("which chat files of a deleted account nothing shows any more",
+		"keeping them all, to be safe", err) {
+		return
+	}
+	var gone []string
+	bad := 0
+	for rows.Next() {
+		var url string
+		if scanFailed("a chat file of a deleted account", rows.Scan(&url), &bad) {
+			continue
+		}
+		if folder := chatFileFolder(url); folder != "" {
+			gone = append(gone, folder)
+		}
+	}
+	rows.Close()
+	enqueueMediaDeletions(gone)
 }
