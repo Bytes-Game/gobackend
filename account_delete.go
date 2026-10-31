@@ -90,8 +90,9 @@ func purgeAccount(userID string) error {
 	// a slip in a caller, or the person keeping their account a moment ago —
 	// must delete nothing.
 	var waiting bool
-	err := db.QueryRow(`SELECT deletion_requested_at IS NOT NULL FROM users WHERE id::text = $1`,
-		userID).Scan(&waiting)
+	var username string
+	err := db.QueryRow(`SELECT deletion_requested_at IS NOT NULL, username FROM users WHERE id::text = $1`,
+		userID).Scan(&waiting, &username)
 	if err != nil {
 		return fmt.Errorf("checking it is waiting to be deleted: %w", err)
 	}
@@ -176,6 +177,9 @@ func purgeAccount(userID string) error {
 			recentSearchAccountsKey(userID),
 			"creator_affinity:" + userID, "tie:" + userID,
 			"lasteng:" + userID, "ltrneg:" + userID,
+			// Filed under the name, which is now free: whoever takes it
+			// next must not be handed what was waiting for this account.
+			storedNotificationsKey(username),
 		} {
 			_ = rdb.Del(rctx, k).Err()
 		}

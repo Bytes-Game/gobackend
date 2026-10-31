@@ -47,6 +47,11 @@ func InitRedis() error {
 	return nil
 }
 
+// storedNotificationsKey is where the notifications waiting for [username]
+// are kept while they are offline. Filed under the name, so a name that
+// changes hands moves or clears it (username_change.go, purgeAccount).
+func storedNotificationsKey(username string) string { return "notifications:" + username }
+
 // StoreNotificationInRedis appends a notification to the user's Valkey list.
 // Notifications expire after 30 days so memory doesn't grow unbounded.
 func StoreNotificationInRedis(username string, notification Notification) {
@@ -56,7 +61,7 @@ func StoreNotificationInRedis(username string, notification Notification) {
 		return
 	}
 
-	key := "notifications:" + username
+	key := storedNotificationsKey(username)
 	if err := rdb.RPush(rctx, key, data).Err(); err != nil {
 		log.Printf("Failed to store notification for %s: %v", username, err)
 		return
@@ -69,7 +74,7 @@ func StoreNotificationInRedis(username string, notification Notification) {
 
 // GetStoredNotifications retrieves all pending notifications for a user.
 func GetStoredNotifications(username string) ([]Notification, bool) {
-	key := "notifications:" + username
+	key := storedNotificationsKey(username)
 	data, err := rdb.LRange(rctx, key, 0, -1).Result()
 	if err != nil || len(data) == 0 {
 		return nil, false
@@ -88,7 +93,7 @@ func GetStoredNotifications(username string) ([]Notification, bool) {
 // ClearStoredNotifications removes all pending notifications for a user
 // after they have been delivered via WebSocket.
 func ClearStoredNotifications(username string) {
-	key := "notifications:" + username
+	key := storedNotificationsKey(username)
 	rdb.Del(rctx, key)
 	log.Printf("Cleared stored notifications for user %s.", username)
 }

@@ -93,6 +93,15 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	// And the name the account has NOW. A sign-in carries the name it was
+	// made with; after a username change it must not be filed under the old
+	// one, where it would pick up what is meant for whoever takes that name
+	// next (username_change.go). A database that cannot answer says no: the
+	// app tries again in a moment.
+	if now, err := currentUsername(claims.Subject); err != nil || now != username {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -113,7 +122,7 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 		clientsMu.Unlock()
 		conn.Close()
 		// Update last_seen on disconnect
-		go UpdateUserLastSeen(username)
+		go UpdateUserLastSeen(claims.Subject)
 		log.Printf("WebSocket for %s disconnected and cleaned up", username)
 	}()
 
@@ -180,10 +189,63 @@ func wsSendLocal(username string, data []byte) bool {
 	return true
 }
 
-// wsRelayEnvelope is the message shape published on wsRelayChannel.
+// wsRelayEnvelope is the message shape published on wsRelayChannel: a
+// payload for [Username], or with Close set, a request to close their
+// connection (wsDisconnect).
 type wsRelayEnvelope struct {
 	Username string          `json:"u"`
-	Payload  json.RawMessage `json:"p"`
+	Payload  json.RawMessage `json:"p,omitempty"`
+	Close    bool            `json:"c,omitempty"`
+}
+
+// wsDisconnect closes [username]'s live connection: on this replica, and in
+// multi-replica mode on whichever one holds it. For a name that has just
+// stopped being theirs (username_change.go).
+func wsDisconnect(username string) {
+	wsDisconnectLocal(username)
+	if !multiReplica() || rdb == nil {
+		return
+	}
+	env, err := json.Marshal(wsRelayEnvelope{Username: username, Close: true})
+	if err != nil {
+		return
+	}
+	if err := rdb.Publish(rctx, wsRelayChannel, env).Err(); err != nil {
+		log.Printf("ws: could not ask the other replicas to close %s's connection: %v", username, err)
+	}
+}
+
+// wsDisconnectLocal closes [username]'s connection on this replica, if it
+// holds one. The name is freed first, so the connection's own clean-up finds
+// nothing left to remove.
+func wsDisconnectLocal(username string) {
+	clientsMu.Lock()
+	client, ok := clients[username]
+	if ok {
+		delete(clients, username)
+	}
+	clientsMu.Unlock()
+	if !ok {
+		return
+	}
+	wsMarkOffline(username)
+	_ = client.conn.Close()
+	log.Printf("WebSocket for %s closed: the name is no longer theirs", username)
+}
+
+// wsRelayed handles one message from the cross-replica channel: delivers it
+// if its user is connected HERE (the other replicas got the same publish and
+// check their own maps), or closes their connection here.
+func wsRelayed(payload string) {
+	var env wsRelayEnvelope
+	if err := json.Unmarshal([]byte(payload), &env); err != nil {
+		return
+	}
+	if env.Close {
+		wsDisconnectLocal(env.Username)
+		return
+	}
+	wsSendLocal(env.Username, env.Payload)
 }
 
 // wsDeliver sends a text payload to a user wherever they're connected:
@@ -225,13 +287,7 @@ func startWSRelay() {
 		sub := rdb.Subscribe(rctx, wsRelayChannel)
 		defer sub.Close()
 		for msg := range sub.Channel() {
-			var env wsRelayEnvelope
-			if err := json.Unmarshal([]byte(msg.Payload), &env); err != nil {
-				continue
-			}
-			// Deliver only if the user is on THIS replica; other
-			// replicas got the same publish and check their own maps.
-			wsSendLocal(env.Username, env.Payload)
+			wsRelayed(msg.Payload)
 		}
 	}()
 }
