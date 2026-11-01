@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // leaver makes a person who can sign in with [password]. Defer what it
@@ -25,10 +26,16 @@ import (
 // database (t.Cleanup would run after, against no database at all).
 func leaver(t *testing.T, id int, name, password string) func() {
 	t.Helper()
-	hash, err := hashPassword(password)
+	// The password is kept scrambled as the server keeps it, but at
+	// bcrypt's lowest strength: a test account needs no protection, and at
+	// full strength every sign-in in these tests took most of a second
+	// under the race detector (CI's test step has a ten-minute limit).
+	// Signing in checks it with the same code as any other password.
+	raw, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
 	if err != nil {
 		t.Fatal(err)
 	}
+	hash := string(raw)
 	clean := func() {
 		db.Exec(`DELETE FROM device_tokens WHERE user_id = $1`, strconv.Itoa(id))
 		db.Exec(`DELETE FROM challenges WHERE creator_id = $1`, id)

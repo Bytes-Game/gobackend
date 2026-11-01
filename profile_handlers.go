@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -871,22 +872,29 @@ func VerifyTOTPHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !verifyTOTPCode(secret, strings.TrimSpace(payload.Code)) {
+	step, ok := matchTOTPStep(secret, strings.TrimSpace(payload.Code), time.Now())
+	if !ok {
 		http.Error(w, "invalid code", http.StatusUnauthorized)
 		return
 	}
 
+	// The code's time step is remembered, so the same code cannot be typed
+	// again to sign in (two_step_signin.go).
 	if !active {
 		if _, err := db.Exec(
-			`UPDATE user_totp SET is_active = TRUE, last_used_at = NOW() WHERE user_id = $1`,
-			userID,
+			`UPDATE user_totp SET is_active = TRUE, last_used_at = NOW(),
+			        last_used_step = GREATEST(COALESCE(last_used_step, 0), $2)
+			  WHERE user_id = $1`,
+			userID, step,
 		); err != nil {
 			http.Error(w, "activate failed", http.StatusInternalServerError)
 			return
 		}
-	} else {
-		// Already active — just bump last_used_at for replay defense.
-		_, _ = db.Exec(`UPDATE user_totp SET last_used_at = NOW() WHERE user_id = $1`, userID)
+	} else if _, err := db.Exec(
+		`UPDATE user_totp SET last_used_at = NOW(),
+		        last_used_step = GREATEST(COALESCE(last_used_step, 0), $2)
+		  WHERE user_id = $1`, userID, step); err != nil {
+		log.Printf("two-step: when account %s last used a code could not be saved: %v", userID, err)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"verified": true, "active": true})
 }
@@ -894,9 +902,10 @@ func VerifyTOTPHandler(w http.ResponseWriter, r *http.Request) {
 // DisableTOTPHandler — POST /api/v1/users/{id}/totp/disable
 // Body: { userId, code }
 //
-// Requires a valid TOTP code (or recovery code — TBD when sign-in
-// uses 2FA) to disable. Without this, anyone who got a session
-// cookie could turn off 2FA without proving they're the real user.
+// Requires a valid authenticator code or recovery code to disable, each
+// usable once, as at sign-in (two_step_signin.go). Without this, anyone
+// who got a session could turn off 2FA without proving they're the real
+// user.
 func DisableTOTPHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	userID := vars["id"]
@@ -930,12 +939,15 @@ func DisableTOTPHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !verifyTOTPCode(secret, strings.TrimSpace(payload.Code)) {
-		// Try recovery code as a fallback.
-		if !consumeRecoveryCode(userID, payload.Code) {
-			http.Error(w, "invalid code", http.StatusUnauthorized)
-			return
-		}
+	ok, err := checkCode(userID, secret, payload.Code)
+	if queryFailed("whether the code to turn off account "+userID+"'s two-step verification is right",
+		"it stays on", err) {
+		http.Error(w, "lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "invalid code", http.StatusUnauthorized)
+		return
 	}
 
 	if _, err := db.Exec(`DELETE FROM user_totp WHERE user_id = $1`, userID); err != nil {
@@ -943,44 +955,6 @@ func DisableTOTPHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"disabled": true})
-}
-
-// consumeRecoveryCode returns true if `code` matches one of the
-// user's stored hashes AND removes that hash from the row so the
-// code can't be reused. Single-use enforcement is critical: without
-// the remove step, an attacker who got one recovery code holds 2FA
-// bypass forever.
-func consumeRecoveryCode(userID, code string) bool {
-	var hashesJSON string
-	if err := db.QueryRow(
-		`SELECT COALESCE(recovery_codes::text, '[]') FROM user_totp WHERE user_id = $1`,
-		userID,
-	).Scan(&hashesJSON); err != nil {
-		return false
-	}
-	var hashes []string
-	if err := json.Unmarshal([]byte(hashesJSON), &hashes); err != nil {
-		return false
-	}
-	target := hashRecoveryCode(code)
-	idx := -1
-	for i, h := range hashes {
-		if h == target {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return false
-	}
-	// Remove the consumed hash.
-	hashes = append(hashes[:idx], hashes[idx+1:]...)
-	newJSON, _ := json.Marshal(hashes)
-	_, _ = db.Exec(
-		`UPDATE user_totp SET recovery_codes = $1::jsonb WHERE user_id = $2`,
-		string(newJSON), userID,
-	)
-	return true
 }
 
 // ════════════════════════════════════════════════════════════════════

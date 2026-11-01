@@ -187,7 +187,12 @@ that the column does not exist.
 
 ## Before release
 
-The owner's before-release list (app id, signing key, build settings, and
-`APP_DOWNLOAD_URL` on Render for the shared web pages) is kept in the
-Frontend repo's CLAUDE.md, under "Before release". Give it to them when they
-say they are about to release, and not before.
+The owner's before-release list is kept in the Frontend repo's CLAUDE.md,
+under "Before release". Give it to them when they say they are about to
+release, and not before.
+
+It includes everything the server needs set on Render: `SMTP_*` and
+`MAIL_FROM` (forgot password), `GOOGLE_CLIENT_IDS`, `APPLE_CLIENT_IDS` and
+`ANDROID_PACKAGE_NAME` (Google and Apple sign-in), and `APP_DOWNLOAD_URL`
+(the shared web pages). A new server setting the owner must fill in goes on
+that list the day it is added.

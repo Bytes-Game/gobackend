@@ -91,51 +91,23 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Waiting to be deleted (account_leaving.go). The password was right, so
-	// say when the account goes, and keep it only when the person has chosen
-	// to — never as a side effect of signing in.
-	if deleteOn, waiting := deletionDate(user.ID); waiting {
-		if !creds.KeepAccount {
-			writeJSON(w, http.StatusConflict, map[string]interface{}{
-				"error": "This account will be deleted on " +
-					deleteOn.UTC().Format("2 January 2006") + ". Keep it to sign in.",
-				"deletionPending": true,
-				"deleteOn":        deleteOn.UTC().Format(time.RFC3339),
-			})
-			log.Printf("user %s signed in while waiting to be deleted; asked whether to keep it", creds.Username)
-			return
-		}
-		if err := keepAccount(r.Context(), user.ID); err != nil {
-			log.Printf("user %s chose to keep their account, but that could not be saved: %v", creds.Username, err)
-			http.Error(w, "Login temporarily unavailable", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	// Mint a signed session token. From here on the client authenticates every
-	// protected request with this token (Authorization: Bearer <token>) and the
-	// server derives identity from it — never from a client-supplied userId.
-	token, err := issueToken(user.ID, user.Username)
-	if err != nil {
-		// Almost always means JWT_SECRET is unset — fail closed rather than hand
-		// back a session the protected routes will reject anyway.
-		log.Printf("token issuance failed for %s: %v", creds.Username, err)
+	// Two-step verification on: the password is not enough. Nothing more is
+	// said, not even whether the account is waiting to be deleted, until the
+	// code comes (two_step_signin.go).
+	on, err := twoStepOn(user.ID)
+	if queryFailed("whether "+creds.Username+" has two-step verification on", "the sign-in is refused", err) {
 		http.Error(w, "Login temporarily unavailable", http.StatusInternalServerError)
 		return
 	}
-
-	// Create the response payload — no longer sending all users for security.
-	response := map[string]interface{}{
-		"user":     user,
-		"token":    token,
-		"allUsers": []User{},
+	if on {
+		askForSecondStep(w, user)
+		return
 	}
 
-	// Send the successful response.
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
-	log.Printf("User %s logged in successfully.", creds.Username)
+	// Waiting to be deleted (account_leaving.go): say when the account goes,
+	// and keep it only when the person has chosen to — never as a side effect
+	// of signing in. Then the session token.
+	completeSignIn(w, r, user, creds.KeepAccount)
 }
 
 // ReseedHandler drops all data and reseeds the database.
@@ -796,6 +768,11 @@ func main() {
 	// Forgot password: a code by email, then a new password (password_reset.go).
 	r.HandleFunc("/password/forgot", ForgotPasswordHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/password/reset", ResetPasswordHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/login/2fa", TwoFactorLoginHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/auth/google", socialSignIn(googleProvider)).Methods("POST", "OPTIONS")
+	r.HandleFunc("/auth/apple", socialSignIn(appleProvider)).Methods("POST", "OPTIONS")
+	r.HandleFunc("/auth/social/signup", SocialSignupHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/auth/apple/callback", AppleCallbackHandler).Methods("POST")
 	// Token refresh (authed) — active users never hit the 7-day expiry.
 	api.HandleFunc("/auth/refresh", authed(RefreshTokenHandler)).Methods("POST", "OPTIONS")
 	// Change your password; every other phone is signed out. See
