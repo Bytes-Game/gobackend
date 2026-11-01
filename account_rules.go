@@ -43,6 +43,8 @@ var reservedNames = map[string]bool{
 	"team": true, "official": true, "moderator": true, "mod": true,
 	"security": true, "safety": true, "devf": true, "devfapp": true,
 	"devfofficial": true, "devfteam": true, "battlearena": true,
+	"flex": true, "flexapp": true, "flexofficial": true, "flexteam": true,
+	"flexsupport": true, "teamflex": true,
 	"arena": true, "everyone": true, "null": true, "undefined": true,
 	"api": true, "www": true, "app": true, "login": true, "signup": true,
 	"settings": true, "privacy": true, "terms": true,

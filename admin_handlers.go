@@ -189,7 +189,7 @@ func AdminDashboardHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 const adminDashboardHTML = `<!doctype html>
-<html><head><meta charset="utf-8"><title>devf admin</title>
+<html><head><meta charset="utf-8"><title>Flex admin</title>
 <style>
 body{font-family:system-ui,sans-serif;background:#0b0b0e;color:#eee;margin:0;padding:24px;max-width:1100px;margin:0 auto}
 h1{font-size:20px;letter-spacing:.5px;color:#8ab4ff}
@@ -205,7 +205,7 @@ code{background:#222;padding:1px 5px;border-radius:3px;color:#ffb}
 .pct.mid{color:#ffd27a}
 .pct.hi{color:#8af0a8}
 </style></head><body>
-<h1>devf — funnels & errors</h1>
+<h1>Flex — funnels & errors</h1>
 <div class="tiny">Windows: last 7 days. Pulled live from feed_events. Reload to refresh.</div>
 
 <h2>Nightly analytics job</h2>

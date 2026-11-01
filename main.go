@@ -793,6 +793,9 @@ func main() {
 	// anonymous-rate-limited via the "signup" action bucket).
 	r.HandleFunc("/signup", SignupHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/signup/available", UsernameAvailableHandler).Methods("GET", "OPTIONS")
+	// Forgot password: a code by email, then a new password (password_reset.go).
+	r.HandleFunc("/password/forgot", ForgotPasswordHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/password/reset", ResetPasswordHandler).Methods("POST", "OPTIONS")
 	// Token refresh (authed) — active users never hit the 7-day expiry.
 	api.HandleFunc("/auth/refresh", authed(RefreshTokenHandler)).Methods("POST", "OPTIONS")
 	// Change your password; every other phone is signed out. See
