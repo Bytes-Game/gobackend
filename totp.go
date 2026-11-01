@@ -85,27 +85,26 @@ func generateTOTPCode(secret string, t time.Time) (string, error) {
 	return fmt.Sprintf("%0*d", totpDigits, code), nil
 }
 
-// verifyTOTPCode compares `code` against expected values for the
-// current window and ±totpSkewWindows. Constant-time comparison so
-// timing differences can't reveal partial code matches.
-func verifyTOTPCode(secret, code string) bool {
+// matchTOTPStep says which time step [code] belongs to (now, or one either
+// side), so a caller can refuse a code that was used already. Every window
+// is compared, match or not, so how long it takes says nothing.
+func matchTOTPStep(secret, code string, now time.Time) (int64, bool) {
 	if len(code) != totpDigits {
-		return false
+		return 0, false
 	}
-	now := time.Now()
+	var step int64
+	found := false
 	for i := -totpSkewWindows; i <= totpSkewWindows; i++ {
 		t := now.Add(time.Duration(i*totpStepSeconds) * time.Second)
 		expected, err := generateTOTPCode(secret, t)
 		if err != nil {
 			continue
 		}
-		// hmac.Equal is the stdlib constant-time byte comparator;
-		// using it on string-bytes is the canonical pattern.
-		if hmac.Equal([]byte(expected), []byte(code)) {
-			return true
+		if hmac.Equal([]byte(expected), []byte(code)) && !found {
+			step, found = t.Unix()/totpStepSeconds, true
 		}
 	}
-	return false
+	return step, found
 }
 
 // otpauthURI builds the otpauth:// link that QR-scans into any

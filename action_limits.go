@@ -90,6 +90,14 @@ var actionLimitTable = map[string]actionLimitConfig{
 	// Auth — login / signup attempts. Anything more than a few per
 	// minute from one account is a credential-stuffing attempt.
 	"login":            {tokensPerSecond: 0.1, burst: 5},          // 6/min
+	// The two-step code at sign-in (two_step_signin.go): five tries per
+	// account every ten minutes, and 30 an hour from one address. A code
+	// is one in a million, so five tries is nowhere near a guess.
+	"login_2fa":    {tokensPerSecond: 5.0 / 600, burst: 5},
+	"login_2fa_ip": {tokensPerSecond: 30.0 / 3600, burst: 10},
+	// Signing in with Google or Apple (social_signin.go), per address: 60
+	// an hour. Each one makes the server check a signed token.
+	"social_signin": {tokensPerSecond: 60.0 / 3600, burst: 20},
 	// New accounts, per internet address: 10 an hour and 50 a day. More
 	// than one person can share an address (a school, a café, a phone
 	// network), so not fewer. signup_all is the whole platform: 600 an

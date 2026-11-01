@@ -173,9 +173,17 @@ func SignupHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := issueToken(id, acct.username)
+	log.Printf("New user signed up: %s (id=%s)", acct.username, id)
+	welcomeNewAccount(w, id, acct.username)
+}
+
+// welcomeNewAccount signs in an account that was just made, with a
+// password or with Google or Apple (social_signin.go): 201 with the
+// account and its sign-in, as /login answers.
+func welcomeNewAccount(w http.ResponseWriter, id, username string) {
+	token, err := issueToken(id, username)
 	if err != nil {
-		log.Printf("sign-up token issuance failed for %s: %v", acct.username, err)
+		log.Printf("sign-up token issuance failed for %s: %v", username, err)
 		http.Error(w, "Signup succeeded but login is temporarily unavailable", http.StatusInternalServerError)
 		return
 	}
@@ -184,16 +192,15 @@ func SignupHandler(w http.ResponseWriter, r *http.Request) {
 	// who changed theirs. Nothing left waiting under it was meant for this
 	// account (username_change.go).
 	if rdb != nil {
-		if err := rdb.Del(rctx, storedNotificationsKey(acct.username)).Err(); err != nil {
+		if err := rdb.Del(rctx, storedNotificationsKey(username)).Err(); err != nil {
 			log.Printf("sign-up %q: notifications left under the name by its last owner could not be cleared: %v",
-				acct.username, err)
+				username, err)
 		}
 	}
 
-	user, _ := GetUserByUsername(acct.username)
+	user, _ := GetUserByUsername(username)
 	go IndexUser(user) // searchable immediately
 
-	log.Printf("New user signed up: %s (id=%s)", acct.username, id)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
