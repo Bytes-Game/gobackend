@@ -104,6 +104,12 @@ var actionLimitTable = map[string]actionLimitConfig{
 	// every 30 days; the rest are names that were taken, and a stream of
 	// those is somebody checking which names exist.
 	"username_change":  {tokensPerSecond: 10.0 / 3600, burst: 10},
+	// Forgot password. Per internet address: asking for codes, 10 an hour;
+	// trying them, 30 an hour. Per account: 5 codes an hour, so nobody's
+	// inbox can be filled with them.
+	"password_reset_ip":  {tokensPerSecond: 10.0 / 3600, burst: 10},
+	"password_reset_try": {tokensPerSecond: 30.0 / 3600, burst: 10},
+	"password_reset":     {tokensPerSecond: 5.0 / 3600, burst: 5},
 }
 
 // actionLimiterRegistry holds one rateLimiter per action key. Created

@@ -66,10 +66,14 @@ func TestPublicPages_AProfileShowsWhoTheyAreAndTheirPublicVideos(t *testing.T) {
 		`href="/v/` + public + `"`,
 		"<strong>1</strong><span>Followers</span>",
 		"<strong>1</strong><span>Posts</span>",
+		"(@maya_pub) on Flex</title>", "<b>f</b>Flex",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the page does not have %q", want)
 		}
+	}
+	if strings.Contains(strings.ToLower(body), "devf") {
+		t.Error("the page still says the app's old name, devf")
 	}
 	for name, id := range map[string]string{"friends-only": private, "removed": removed} {
 		if strings.Contains(body, `href="/v/`+id+`"`) {

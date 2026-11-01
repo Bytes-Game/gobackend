@@ -23,6 +23,10 @@ func TestAccountRules_Usernames(t *testing.T) {
 		"admin":                 false, // reserved
 		"_admin_":               false, // reserved with the dressing taken off
 		"dev.f":                 false,
+		"flex":                  false, // the app's own name
+		"flex.official":         false,
+		"flex_team":             false,
+		"flexing_daily":         true,
 		"official":              false,
 		"support_":              false,
 		"adminmaya":             true, // only the exact reserved names
