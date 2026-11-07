@@ -10,10 +10,12 @@ import (
 	"encoding/json"
 	"log"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -39,6 +41,7 @@ func smtpStandIn(t *testing.T) <-chan string {
 		}
 	}()
 	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	t.Setenv("RESEND_API_KEY", "") // or Resend would be used instead
 	t.Setenv("SMTP_HOST", host)
 	t.Setenv("SMTP_PORT", port)
 	t.Setenv("SMTP_USERNAME", "")
@@ -46,6 +49,59 @@ func smtpStandIn(t *testing.T) <-chan string {
 	t.Setenv("MAIL_FROM", "Flexete <no-reply@flexete.test>")
 	return mails
 }
+
+// resendEmail is one email as Resend's web API received it.
+type resendEmail struct {
+	method, path, auth, contentType string
+	body                            map[string]any
+}
+
+// resendStandIn is Resend's web API on this machine: it takes an email the
+// way the real one documents (POST /emails, a Bearer key, a JSON body) and
+// answers what [answer] was last given. Every email it is sent arrives on
+// the channel. It sets up email to go through it, from a Flexete address.
+func resendStandIn(t *testing.T) (emails <-chan resendEmail, answer func(status int, body string)) {
+	t.Helper()
+	got := make(chan resendEmail, 16)
+	var mu sync.Mutex
+	status, reply := 200, `{"id":"49a3999c-0ce1-4ea6-ab68-afcd6dc2e794"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		got <- resendEmail{r.Method, r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("Content-Type"), body}
+		mu.Lock()
+		code, said := status, reply
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(said))
+	}))
+	t.Cleanup(srv.Close)
+	was := resendURL
+	resendURL = srv.URL + "/emails"
+	t.Cleanup(func() { resendURL = was })
+	t.Setenv("RESEND_API_KEY", "re_standin_key_42")
+	t.Setenv("SMTP_HOST", "")
+	t.Setenv("MAIL_FROM", "Flexete <no-reply@flexete.test>")
+	return got, func(code int, body string) {
+		mu.Lock()
+		status, reply = code, body
+		mu.Unlock()
+	}
+}
+
+func nextResendEmail(t *testing.T, emails <-chan resendEmail) resendEmail {
+	t.Helper()
+	select {
+	case e := <-emails:
+		return e
+	case <-time.After(3 * time.Second):
+		t.Fatal("nothing was sent to Resend")
+		return resendEmail{}
+	}
+}
+
+var resendSubject = regexp.MustCompile(`^(\d{6}) is your Flexete password reset code$`)
 
 func serveSMTP(conn net.Conn, mails chan<- string) {
 	defer conn.Close()
@@ -323,13 +379,115 @@ func TestPasswordReset_WithoutEmailSetUpItSaysSo(t *testing.T) {
 	smtpStandIn(t)
 	t.Setenv("SMTP_HOST", "")
 	defer resetter(t, 9906, "no_service", "no.service@example.com")()
-	for _, login := range []string{"no_service", "nobody.here@example.com"} {
-		code, got := forgot(t, login)
-		words, _ := got["error"].(string)
-		if code != 503 || got["unavailable"] != true || !strings.Contains(words, supportEmail) {
-			t.Errorf("with no email service, asking as %q answered %d %v", login, code, got)
+	notSetUp := func(how string) {
+		t.Helper()
+		for _, login := range []string{"no_service", "nobody.here@example.com"} {
+			code, got := forgot(t, login)
+			words, _ := got["error"].(string)
+			if code != 503 || got["unavailable"] != true || got["reason"] != "notSetUp" ||
+				!strings.Contains(words, supportEmail) {
+				t.Errorf("%s, asking as %q answered %d %v", how, login, code, got)
+			}
 		}
 	}
+	notSetUp("with no email service")
+	// A Resend key is not enough either: who the email is from is needed too.
+	t.Setenv("RESEND_API_KEY", "re_some_key")
+	t.Setenv("MAIL_FROM", "")
+	notSetUp("with a Resend key but no MAIL_FROM")
+}
+
+// Email over the web: what works on Render's free plan, which blocks the
+// email ports. Resend is sent the email the way its API documents.
+func TestPasswordReset_OverTheWebWithResend(t *testing.T) {
+	defer withDB(t)()
+	resetRedis(t)
+	resetActionLimiters(t)
+	emails, _ := resendStandIn(t)
+	defer resetter(t, 9941, "Over_The_Web", "over.the.web@example.com")()
+
+	code, got := forgot(t, "over_the_web")
+	if code != 200 || got["sent"] != true || got["to"] != "o•••b@example.com" {
+		t.Fatalf("asking with Resend set up answered %d %v", code, got)
+	}
+	e := nextResendEmail(t, emails)
+	if e.method != "POST" || e.path != "/emails" || e.auth != "Bearer re_standin_key_42" ||
+		!strings.HasPrefix(e.contentType, "application/json") {
+		t.Errorf("Resend was sent %s %s, Authorization %q, Content-Type %q",
+			e.method, e.path, e.auth, e.contentType)
+	}
+	if e.body["from"] != "Flexete <no-reply@flexete.test>" || e.body["reply_to"] != supportEmail {
+		t.Errorf("the email is from %v, with replies to %v", e.body["from"], e.body["reply_to"])
+	}
+	if to, _ := e.body["to"].([]any); len(to) != 1 || to[0] != "over.the.web@example.com" {
+		t.Errorf("the email went to %v", e.body["to"])
+	}
+	subject, _ := e.body["subject"].(string)
+	m := resendSubject.FindStringSubmatch(subject)
+	if m == nil {
+		t.Fatalf("the subject is %q", subject)
+	}
+	text, _ := e.body["text"].(string)
+	if !strings.Contains(text, "Hi @Over_The_Web") || !strings.Contains(text, "    "+m[1]+"\n") {
+		t.Errorf("the code is in the subject but the text is not the reset email:\n%s", text)
+	}
+	if code, got := resetWith(t, "Over_The_Web", m[1], "newpass42go"); code != 200 || got["reset"] != true {
+		t.Errorf("the code Resend was given does not reset the password: %d %v", code, got)
+	}
+}
+
+// Both set: Resend is used, and the SMTP service is not touched. On the
+// free plan the SMTP one could never answer, so trying it first would make
+// every reset wait ten seconds before it even began.
+func TestPasswordReset_ResendIsUsedWhenSMTPIsSetToo(t *testing.T) {
+	defer withDB(t)()
+	resetRedis(t)
+	resetActionLimiters(t)
+	mails := smtpStandIn(t)
+	host := os.Getenv("SMTP_HOST")
+	emails, _ := resendStandIn(t)
+	t.Setenv("SMTP_HOST", host)
+	defer resetter(t, 9942, "both_set", "both.set@example.com")()
+
+	if code, got := forgot(t, "both_set"); code != 200 || got["sent"] != true {
+		t.Fatalf("asking with both set up answered %d %v", code, got)
+	}
+	nextResendEmail(t, emails)
+	noMail(t, mails)
+}
+
+// Resend refusing is said in the server's log in Resend's own words, the
+// person is told it isn't working, and they can ask again once it is.
+func TestPasswordReset_ResendRefusingIsSaidAndCanBeAskedAgain(t *testing.T) {
+	defer withDB(t)()
+	resetRedis(t)
+	resetActionLimiters(t)
+	emails, answer := resendStandIn(t)
+	defer resetter(t, 9943, "refused_once", "refused.once@example.com")()
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	defer log.SetOutput(os.Stderr)
+
+	answer(403, `{"statusCode":403,"name":"validation_error","message":"The gmail.com domain is not verified. `+
+		`Please, add and verify your domain on https://resend.com/domains"}`)
+	if code, got := forgot(t, "refused_once"); code != 503 || got["unavailable"] != true || got["reason"] != "notSent" {
+		t.Errorf("an email Resend refused answered %d %v", code, got)
+	}
+	nextResendEmail(t, emails)
+	said := logged.String()
+	if !strings.Contains(said, "could not be emailed") || !strings.Contains(said, "403") ||
+		!strings.Contains(said, "The gmail.com domain is not verified") {
+		t.Errorf("the log does not say what Resend said:\n%s", said)
+	}
+	if strings.Contains(said, "re_standin_key_42") {
+		t.Error("the Resend key is in the server's log")
+	}
+
+	answer(200, `{"id":"5f1c7e4e-9a43-4a8e-8f0e-1d2c3b4a5f60"}`)
+	if code, got := forgot(t, "refused_once"); code != 200 || got["sent"] != true {
+		t.Errorf("asking again once Resend takes it answered %d %v: the unsent code is in the way", code, got)
+	}
+	nextResendEmail(t, emails)
 }
 
 func TestPasswordReset_AnEmailThatWillNotSendSaysSoAndCanBeAskedAgain(t *testing.T) {
@@ -341,7 +499,7 @@ func TestPasswordReset_AnEmailThatWillNotSendSaysSoAndCanBeAskedAgain(t *testing
 	port := os.Getenv("SMTP_PORT")
 	t.Setenv("SMTP_PORT", "1") // nothing answers there
 
-	if code, got := forgot(t, "will_not_send"); code != 503 || got["unavailable"] != true {
+	if code, got := forgot(t, "will_not_send"); code != 503 || got["unavailable"] != true || got["reason"] != "notSent" {
 		t.Errorf("an email that would not send answered %d %v", code, got)
 	}
 	t.Setenv("SMTP_PORT", port)

@@ -488,6 +488,11 @@ func main() {
 	// credentials are missing or are an obvious placeholder, rather than
 	// letting an unrotated dev password quietly guard /admin/reseed.
 	checkAdminConfig()
+	// And for email: say how it is set up and whether it can get out, since
+	// otherwise the first sign of a broken setup is somebody locked out of
+	// their account. In the background: an email server that never answers
+	// takes ten seconds to give up on.
+	go checkMailConfig()
 	// Build the challenge-subject autocomplete index. Runs the
 	// curated-vocab + existing-challenge merge in the background so
 	// it doesn't block startup; the handler degrades to the in-binary
