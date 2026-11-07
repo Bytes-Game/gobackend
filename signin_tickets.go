@@ -44,7 +44,7 @@ const (
 // and type a code, not long enough to be worth stealing.
 const ticketTTL = 5 * time.Minute
 
-const ticketAudience = "flex-sign-in-ticket"
+const ticketAudience = "flexete-sign-in-ticket"
 
 type ticketClaims struct {
 	Stage string `json:"stage"`
@@ -59,7 +59,7 @@ func ticketKey() ([]byte, error) {
 		return nil, err
 	}
 	m := hmac.New(sha256.New, secret)
-	m.Write([]byte("flex sign-in ticket"))
+	m.Write([]byte("flexete sign-in ticket"))
 	return m.Sum(nil), nil
 }
 

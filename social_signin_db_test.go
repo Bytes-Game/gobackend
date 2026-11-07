@@ -368,7 +368,7 @@ func TestSocialSignup_EveryAccountRuleStillHolds(t *testing.T) {
 		{map[string]any{"acceptTerms": false}, http.StatusBadRequest, "terms"},
 		{map[string]any{"username": "taken_name"}, http.StatusConflict, "username"},
 		{map[string]any{"username": "a"}, http.StatusBadRequest, "username"},
-		{map[string]any{"username": "flex"}, http.StatusBadRequest, "username"},
+		{map[string]any{"username": "flexete"}, http.StatusBadRequest, "username"},
 	} {
 		if code, got := finish(c.fields); code != c.status || got["field"] != c.field {
 			t.Fatalf("%v answered %d %v, want %d on %s", c.fields, code, got, c.status, c.field)
@@ -386,7 +386,7 @@ func TestSocialSignup_EveryAccountRuleStillHolds(t *testing.T) {
 	// The right key, but made out to something else: refused. Made out
 	// properly, the same works, so it is the address that refuses it.
 	defer dropAccount("rules_odd")
-	if code, got := finish(map[string]any{"signupTicket": signupTicketTo(t, "flex-something-else", "g-5002"),
+	if code, got := finish(map[string]any{"signupTicket": signupTicketTo(t, "flexete-something-else", "g-5002"),
 		"username": "rules_odd"}); code != http.StatusUnauthorized || got["expired"] != true {
 		t.Fatalf("a ticket made out to something else answered %d %v", code, got)
 	}
@@ -432,12 +432,12 @@ func TestAppleCallback_HandsTheResultBackToTheApp(t *testing.T) {
 	if rec.Code != http.StatusTemporaryRedirect || rec.Header().Get("Location") != want {
 		t.Fatalf("answered %d to %q, want %q", rec.Code, rec.Header().Get("Location"), want)
 	}
-	t.Setenv("ANDROID_PACKAGE_NAME", "app.flex.video")
+	t.Setenv("ANDROID_PACKAGE_NAME", "com.flexete.app")
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest("POST", "/auth/apple/callback", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	AppleCallbackHandler(rec, req)
-	if !strings.Contains(rec.Header().Get("Location"), ";package=app.flex.video;") {
+	if !strings.Contains(rec.Header().Get("Location"), ";package=com.flexete.app;") {
 		t.Fatalf("the release id is not used: %q", rec.Header().Get("Location"))
 	}
 }
@@ -455,7 +455,7 @@ func TestSuggestUsername_FreeAndAllowed(t *testing.T) {
 	if got := suggestUsername("🙂", "zoe.k@x.io"); got != "zoe.k" {
 		t.Errorf("a name with no letters falls back to the email: %q", got)
 	}
-	if got := suggestUsername("Flex", ""); usernameProblem(got) != "" {
+	if got := suggestUsername("Flexete", ""); usernameProblem(got) != "" {
 		t.Errorf("a reserved name: %q (%s)", got, usernameProblem(got))
 	}
 }

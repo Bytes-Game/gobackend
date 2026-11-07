@@ -43,6 +43,11 @@ var reservedNames = map[string]bool{
 	"team": true, "official": true, "moderator": true, "mod": true,
 	"security": true, "safety": true, "devf": true, "devfapp": true,
 	"devfofficial": true, "devfteam": true, "battlearena": true,
+	"flexete": true, "flexeteapp": true, "flexeteofficial": true,
+	"flexeteteam": true, "flexetesupport": true, "teamflexete": true,
+	"getflexete": true, "flexetehelp": true,
+	"flexeteadmin": true,
+	// The names before Flexete stay reserved too.
 	"flex": true, "flexapp": true, "flexofficial": true, "flexteam": true,
 	"flexsupport": true, "teamflex": true,
 	"arena": true, "everyone": true, "null": true, "undefined": true,

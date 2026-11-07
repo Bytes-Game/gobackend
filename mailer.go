@@ -8,7 +8,7 @@ package main
 //	SMTP_PORT      587 (the usual) or 465. 587 when unset.
 //	SMTP_USERNAME  the login the service gives you
 //	SMTP_PASSWORD  its password or key
-//	MAIL_FROM      who the email is from, e.g. Flex <no-reply@yourdomain.com>
+//	MAIL_FROM      who the email is from, e.g. Flexete <no-reply@flexete.com>
 //
 // Without SMTP_HOST and MAIL_FROM nothing is sent, and what needs email
 // (forgot password) says so to the person instead of pretending to work.
@@ -30,7 +30,7 @@ import (
 
 // supportEmail is where people write for help. Kept in one place, so it
 // changes in one place.
-const supportEmail = "support@devf.app"
+const supportEmail = "support@flexete.com"
 
 type mailSettings struct {
 	host, port, username, password, from string

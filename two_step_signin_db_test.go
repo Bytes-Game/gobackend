@@ -198,7 +198,7 @@ func TestTwoStepSignIn_TicketsRunOutAndAPasswordChangeCancelsThem(t *testing.T) 
 	// The right key, but made out to something else. (The key alone
 	// already refuses every other kind of token there is; this keeps it
 	// that way if a key is ever shared.)
-	expired(craftedTicketTo(t, "flex-something-else", "9903", stageSecondStep, time.Now(), time.Now().Add(4*time.Minute)),
+	expired(craftedTicketTo(t, "flexete-something-else", "9903", stageSecondStep, time.Now(), time.Now().Add(4*time.Minute)),
 		"a ticket made out to something else")
 
 	// Made before the password changed: cancelled, as every sign-in is.

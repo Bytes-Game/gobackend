@@ -32,7 +32,7 @@ import (
 	"github.com/gorilla/mux"
 )
 
-// appDownloadURL is where "Get Flex" goes, from APP_DOWNLOAD_URL — the
+// appDownloadURL is where "Get Flexete" goes, from APP_DOWNLOAD_URL — the
 // store listing once there is one. Without it the page says to find the
 // person in the app instead of showing a button that goes nowhere.
 func appDownloadURL() string {
@@ -251,17 +251,17 @@ var publicFuncs = template.FuncMap{"count": publicCount}
 var publicProfileTmpl = template.Must(template.New("u").Funcs(publicFuncs).Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{.Name}} (@{{.Username}}) on Flex</title>
-<meta name="description" content="{{if .Private}}A private account on Flex.{{else}}{{count .Followers}} followers · {{.Posts}} posts{{if .Ranked}} · {{.League}} league{{end}}. Watch their battles on Flex.{{end}}">
+<title>{{.Name}} (@{{.Username}}) on Flexete</title>
+<meta name="description" content="{{if .Private}}A private account on Flexete.{{else}}{{count .Followers}} followers · {{.Posts}} posts{{if .Ranked}} · {{.League}} league{{end}}. Watch their battles on Flexete.{{end}}">
 <meta property="og:type" content="profile">
-<meta property="og:title" content="{{.Name}} (@{{.Username}}) on Flex">
-<meta property="og:description" content="{{if .Private}}A private account on Flex.{{else}}{{count .Followers}} followers · {{.Posts}} posts. Watch their battles on Flex.{{end}}">
+<meta property="og:title" content="{{.Name}} (@{{.Username}}) on Flexete">
+<meta property="og:description" content="{{if .Private}}A private account on Flexete.{{else}}{{count .Followers}} followers · {{.Posts}} posts. Watch their battles on Flexete.{{end}}">
 <meta property="og:url" content="{{.PageURL}}">
 {{if .Avatar}}<meta property="og:image" content="{{.Avatar}}">{{end}}
 <meta name="twitter:card" content="summary">
 <style>` + publicStyle + `</style></head>
 <body><main>
-<a class="brand" href="{{.PageURL}}"><b>f</b>Flex</a>
+<a class="brand" href="{{.PageURL}}"><b>f</b>Flexete</a>
 <section class="card">
   <div class="head">
     {{if .Avatar}}<img class="av" src="{{.Avatar}}" alt="{{.Username}}">{{else}}<div class="init">{{.Initial}}</div>{{end}}
@@ -281,25 +281,25 @@ var publicProfileTmpl = template.Must(template.New("u").Funcs(publicFuncs).Parse
   {{if .Bio}}<p class="bio">{{.Bio}}</p>{{end}}
   {{if .Private}}<div class="private">This account is private. Follow @{{.Username}} in the app to see their videos.</div>{{end}}
   {{if .Videos}}<div class="grid">{{range .Videos}}<a href="/v/{{.ID}}" title="{{.Title}}" style="background-image:url('{{.Thumb}}')"></a>{{end}}</div>{{end}}
-  {{if .Download}}<a class="cta" href="{{.Download}}">Get Flex</a>
-  {{else}}<p class="hint">Open Flex and search <strong>@{{.Username}}</strong></p>{{end}}
+  {{if .Download}}<a class="cta" href="{{.Download}}">Get Flexete</a>
+  {{else}}<p class="hint">Open Flexete and search <strong>@{{.Username}}</strong></p>{{end}}
 </section>
 </main></body></html>`))
 
 var publicVideoTmpl = template.Must(template.New("v").Funcs(publicFuncs).Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{.Title}} · @{{.Creator}} on Flex</title>
-<meta name="description" content="By @{{.Creator}} · {{count .Likes}} likes · {{count .Views}} views on Flex.">
+<title>{{.Title}} · @{{.Creator}} on Flexete</title>
+<meta name="description" content="By @{{.Creator}} · {{count .Likes}} likes · {{count .Views}} views on Flexete.">
 <meta property="og:type" content="{{if .IsPhoto}}website{{else}}video.other{{end}}">
 <meta property="og:title" content="{{.Title}}">
-<meta property="og:description" content="By @{{.Creator}} on Flex">
+<meta property="og:description" content="By @{{.Creator}} on Flexete">
 <meta property="og:url" content="{{.PageURL}}">
 {{if .Poster}}<meta property="og:image" content="{{.Poster}}">{{end}}
 <meta name="twitter:card" content="summary_large_image">
 <style>` + publicStyle + `</style></head>
 <body><main>
-<a class="brand" href="/u/{{.Creator}}"><b>f</b>Flex</a>
+<a class="brand" href="/u/{{.Creator}}"><b>f</b>Flexete</a>
 <section class="card">
   {{if .IsPhoto}}<img class="media" src="{{.Poster}}" alt="{{.Title}}">
   {{else}}<video class="media" src="{{.Source}}" {{if .Poster}}poster="{{.Poster}}"{{end}} controls playsinline loop preload="metadata"></video>{{end}}
@@ -309,21 +309,21 @@ var publicVideoTmpl = template.Must(template.New("v").Funcs(publicFuncs).Parse(`
     {{if .CreatorAvatar}}<img src="{{.CreatorAvatar}}" alt="{{.Creator}}">{{else}}<span class="mini">{{.CreatorInitial}}</span>{{end}}
     <strong>@{{.Creator}}</strong>
   </a>
-  {{if .Download}}<a class="cta" href="{{.Download}}">Get Flex</a>
-  {{else}}<p class="hint">Open Flex to vote, like and answer it with your own video</p>{{end}}
+  {{if .Download}}<a class="cta" href="{{.Download}}">Get Flexete</a>
+  {{else}}<p class="hint">Open Flexete to vote, like and answer it with your own video</p>{{end}}
 </section>
 </main></body></html>`))
 
 var publicMissingTmpl = template.Must(template.New("m").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{.Title}} · Flex</title><meta name="robots" content="noindex">
+<title>{{.Title}} · Flexete</title><meta name="robots" content="noindex">
 <style>` + publicStyle + `</style></head>
 <body><main>
-<div class="brand"><b>f</b>Flex</div>
+<div class="brand"><b>f</b>Flexete</div>
 <section class="card" style="text-align:center">
   <h1>{{.Title}}</h1>
   <p class="hint">{{.Line}}</p>
-  {{if .Download}}<a class="cta" href="{{.Download}}">Get Flex</a>{{end}}
+  {{if .Download}}<a class="cta" href="{{.Download}}">Get Flexete</a>{{end}}
 </section>
 </main></body></html>`))

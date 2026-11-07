@@ -45,7 +45,7 @@ import (
 // username and a birthday.
 const signupTicketTTL = 15 * time.Minute
 
-const signupTicketAudience = "flex-sign-up-ticket"
+const signupTicketAudience = "flexete-sign-up-ticket"
 
 // signupTicketClaims is a checked Google or Apple sign-in, waiting for the
 // rest of the new account.
@@ -64,7 +64,7 @@ func signupTicketKey() ([]byte, error) {
 		return nil, err
 	}
 	m := hmac.New(sha256.New, secret)
-	m.Write([]byte("flex sign-up ticket"))
+	m.Write([]byte("flexete sign-up ticket"))
 	return m.Sum(nil), nil
 }
 
