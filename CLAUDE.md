@@ -193,6 +193,7 @@ release, and not before.
 
 It includes everything the server needs set on Render: `SMTP_*` and
 `MAIL_FROM` (forgot password), `GOOGLE_CLIENT_IDS`, `APPLE_CLIENT_IDS` and
-`ANDROID_PACKAGE_NAME` (Google and Apple sign-in), and `APP_DOWNLOAD_URL`
-(the shared web pages). A new server setting the owner must fill in goes on
-that list the day it is added.
+`ANDROID_PACKAGE_NAME` (Google and Apple sign-in), `APP_DOWNLOAD_URL` (the
+shared web pages) and `R2_PUBLIC_BASE_URL` (videos from media.flexete.com),
+plus the Cloudflare steps for the app's domain, flexete.com. A new server
+setting the owner must fill in goes on that list the day it is added.

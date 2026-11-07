@@ -820,7 +820,7 @@ func EnrollTOTPHandler(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"secret":         secret,
-		"otpauthUri":     otpauthURI("Flex", user.Username, secret),
+		"otpauthUri":     otpauthURI("Flexete", user.Username, secret),
 		"recoveryCodes":  plaintextCodes, // only time we ever return these
 		"digits":         totpDigits,
 		"periodSeconds":  totpStepSeconds,

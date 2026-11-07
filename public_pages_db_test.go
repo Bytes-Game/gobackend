@@ -66,7 +66,7 @@ func TestPublicPages_AProfileShowsWhoTheyAreAndTheirPublicVideos(t *testing.T) {
 		`href="/v/` + public + `"`,
 		"<strong>1</strong><span>Followers</span>",
 		"<strong>1</strong><span>Posts</span>",
-		"(@maya_pub) on Flex</title>", "<b>f</b>Flex",
+		"(@maya_pub) on Flexete</title>", "<b>f</b>Flexete",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the page does not have %q", want)

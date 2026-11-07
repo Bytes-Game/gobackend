@@ -43,7 +43,7 @@ func smtpStandIn(t *testing.T) <-chan string {
 	t.Setenv("SMTP_PORT", port)
 	t.Setenv("SMTP_USERNAME", "")
 	t.Setenv("SMTP_PASSWORD", "")
-	t.Setenv("MAIL_FROM", "Flex <no-reply@flex.test>")
+	t.Setenv("MAIL_FROM", "Flexete <no-reply@flexete.test>")
 	return mails
 }
 
@@ -106,7 +106,7 @@ func noMail(t *testing.T, mails <-chan string) {
 	}
 }
 
-var codeInSubject = regexp.MustCompile(`(?m)^Subject: (\d{6}) is your Flex password reset code`)
+var codeInSubject = regexp.MustCompile(`(?m)^Subject: (\d{6}) is your Flexete password reset code`)
 
 func codeIn(t *testing.T, mail string) string {
 	t.Helper()

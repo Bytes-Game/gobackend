@@ -42,7 +42,7 @@ func adminOnly(h http.HandlerFunc) http.HandlerFunc {
 		passOK := ok && subtle.ConstantTimeCompare([]byte(gotPass), []byte(wantPass)) == 1
 
 		if !userOK || !passOK {
-			w.Header().Set("WWW-Authenticate", `Basic realm="flex-admin"`)
+			w.Header().Set("WWW-Authenticate", `Basic realm="flexete-admin"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

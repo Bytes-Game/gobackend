@@ -191,7 +191,7 @@ func ForgotPasswordHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := sendMail(t.email, code+" is your Flex password reset code", resetEmail(t.username, code)); err != nil {
+	if err := sendMail(t.email, code+" is your Flexete password reset code", resetEmail(t.username, code)); err != nil {
 		log.Printf("forgot password: the code for account %s could not be emailed: %v", t.id, err)
 		// A code nobody received must not stop them asking again.
 		if _, err := db.Exec(`DELETE FROM password_reset_codes WHERE user_id::text = $1`, t.id); err != nil {
@@ -215,13 +215,13 @@ func ForgotPasswordHandler(w http.ResponseWriter, r *http.Request) {
 // resetEmail is what the code arrives in.
 func resetEmail(username, code string) string {
 	return "Hi @" + username + ",\n\n" +
-		"We got a request to reset the password for your Flex account. Your code is:\n\n" +
+		"We got a request to reset the password for your Flexete account. Your code is:\n\n" +
 		"    " + code + "\n\n" +
 		"Enter it in the app within 15 minutes. Don't share it with anyone: " +
-		"Flex will never ask you for it.\n\n" +
+		"Flexete will never ask you for it.\n\n" +
 		"If you didn't ask for this, you can ignore this email. Your password " +
 		"stays as it is.\n\n" +
-		"The Flex team\n"
+		"The Flexete team\n"
 }
 
 // ResetPasswordHandler — POST /password/reset {"login", "code", "newPassword"}.
