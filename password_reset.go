@@ -77,7 +77,8 @@ func newResetCode() (string, error) {
 //	404 {"field": "login", "error"} — no account has that username.
 //	409 {"field": "login", "error", "noEmail": true} — the account has no email.
 //	429 — too many requests, or a code was sent less than a minute ago.
-//	503 {"error", "unavailable": true} — email is not set up, or would not send.
+//	503 {"error", "unavailable": true, "reason"} — email is not set up
+//	    ("notSetUp"), or it was tried and did not send ("notSent").
 func ForgotPasswordHandler(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Login string `json:"login"`
@@ -96,18 +97,21 @@ func ForgotPasswordHandler(w http.ResponseWriter, r *http.Request) {
 		writeRateLimited(w, "password_reset_ip")
 		return
 	}
-	unavailable := func() {
+	// The words for people are the same either way. The reason is for the
+	// app's log, so a phone's log says which of the two it was.
+	unavailable := func(reason string) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 			"error": "Resetting a password by email isn't working right now. Email " +
 				supportEmail + " and we'll help you get back in.",
 			"unavailable": true,
+			"reason":      reason,
 		})
 	}
 	// Asked before the account is looked up, so the answer says nothing
 	// about whether an email address has an account.
 	if !mailConfigured() {
-		log.Printf("forgot password: asked for, but email is not set up (SMTP_HOST and MAIL_FROM)")
-		unavailable()
+		log.Printf("forgot password: asked for, but email is not set up (MAIL_FROM, and RESEND_API_KEY or SMTP_HOST)")
+		unavailable("notSetUp")
 		return
 	}
 	sentQuietly := func() {
@@ -197,7 +201,7 @@ func ForgotPasswordHandler(w http.ResponseWriter, r *http.Request) {
 		if _, err := db.Exec(`DELETE FROM password_reset_codes WHERE user_id::text = $1`, t.id); err != nil {
 			log.Printf("forgot password: and the unsent code for account %s could not be cleared: %v", t.id, err)
 		}
-		unavailable()
+		unavailable("notSent")
 		return
 	}
 	log.Printf("forgot password: a reset code was emailed to account %s", t.id)

@@ -191,9 +191,11 @@ The owner's before-release list is kept in the Frontend repo's CLAUDE.md,
 under "Before release". Give it to them when they say they are about to
 release, and not before.
 
-It includes everything the server needs set on Render: `SMTP_*` and
-`MAIL_FROM` (forgot password), `GOOGLE_CLIENT_IDS`, `APPLE_CLIENT_IDS` and
-`ANDROID_PACKAGE_NAME` (Google and Apple sign-in), `APP_DOWNLOAD_URL` (the
-shared web pages) and `R2_PUBLIC_BASE_URL` (videos from media.flexete.com),
-plus the Cloudflare steps for the app's domain, flexete.com. A new server
-setting the owner must fill in goes on that list the day it is added.
+It includes everything the server needs set on Render: `RESEND_API_KEY`
+and `MAIL_FROM` (forgot password; `SMTP_*` instead works only on a paid
+plan, since the free one blocks the email ports), `GOOGLE_CLIENT_IDS`,
+`APPLE_CLIENT_IDS` and `ANDROID_PACKAGE_NAME` (Google and Apple sign-in),
+`APP_DOWNLOAD_URL` (the shared web pages) and `R2_PUBLIC_BASE_URL` (videos
+from media.flexete.com), plus the Cloudflare steps for the app's domain,
+flexete.com. A new server setting the owner must fill in goes on that list
+the day it is added.
