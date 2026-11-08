@@ -228,10 +228,101 @@ func resetEmail(username, code string) string {
 		"The Flexete team\n"
 }
 
+// checkResetCode checks the emailed code for [login]: the part of a reset
+// that "is this code right?" (VerifyResetCodeHandler) and the reset itself
+// share. One count of wrong tries serves both, so checking first gives
+// nobody more guesses at the code. A right code is left as it is: checking
+// it does not use it up.
+//
+// When the code is not right, it answers [w] itself, as both handlers
+// document, and returns false. The caller then writes nothing more.
+func checkResetCode(w http.ResponseWriter, login, code string) (resetTarget, bool) {
+	wrong := func() {
+		writeFieldError(w, http.StatusBadRequest, refuse("code", "That code isn't right."))
+	}
+	spent := func(why string) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"field": "code", "error": why, "expired": true})
+	}
+
+	t, found, err := resetAccountFor(login)
+	if queryFailed("which account a password reset belongs to", "the reset is refused", err) {
+		http.Error(w, "temporarily unavailable", http.StatusInternalServerError)
+		return t, false
+	}
+	if !found {
+		wrong()
+		return t, false
+	}
+	var hash string
+	var expires time.Time
+	var attempts int
+	err = db.QueryRow(`SELECT code_hash, expires_at, attempts FROM password_reset_codes
+	                    WHERE user_id::text = $1`, t.id).Scan(&hash, &expires, &attempts)
+	if err == sql.ErrNoRows {
+		spent("That code has expired. Ask for a new one.")
+		return t, false
+	}
+	if queryFailed("account "+t.id+"'s reset code", "the reset is refused", err) {
+		http.Error(w, "temporarily unavailable", http.StatusInternalServerError)
+		return t, false
+	}
+	forget := func() {
+		if _, err := db.Exec(`DELETE FROM password_reset_codes WHERE user_id::text = $1`, t.id); err != nil {
+			log.Printf("password reset: account %s's spent code could not be cleared: %v", t.id, err)
+		}
+	}
+	if time.Now().After(expires) {
+		forget()
+		spent("That code has expired. Ask for a new one.")
+		return t, false
+	}
+	if !checkPassword(hash, code) {
+		if attempts+1 >= resetCodeTries {
+			forget()
+			spent("Too many wrong codes. Ask for a new one.")
+			return t, false
+		}
+		if _, err := db.Exec(`UPDATE password_reset_codes SET attempts = attempts + 1
+		                       WHERE user_id::text = $1`, t.id); err != nil {
+			log.Printf("password reset: a wrong try at account %s's code could not be counted: %v", t.id, err)
+		}
+		wrong()
+		return t, false
+	}
+	return t, true
+}
+
+// VerifyResetCodeHandler — POST /password/verify {"login", "code"}: is the
+// emailed code right? The app asks before showing the box for the new
+// password, so a mistyped code is caught before anybody chooses one.
+// Nothing changes, and the code is not used up: the reset still needs it.
+//
+//	200 {"valid": true} — right.
+//	400 {"field": "code", "error", "expired"?: true} — as for the reset. A
+//	    wrong try here counts against the same five as a wrong try there.
+func VerifyResetCodeHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Login string `json:"login"`
+		Code  string `json:"code"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if !allowAction("ip:"+clientIP(r), "password_reset_try") {
+		writeRateLimited(w, "password_reset_try")
+		return
+	}
+	if _, ok := checkResetCode(w, strings.TrimSpace(body.Login), strings.TrimSpace(body.Code)); !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"valid": true})
+}
+
 // ResetPasswordHandler — POST /password/reset {"login", "code", "newPassword"}.
 //
-//	200 {"reset": true, "username"} — changed. Every sign-in is signed out;
-//	    the app signs in again with the new password.
+//	200 {"reset": true, "username"} — changed. Every sign-in is signed out,
+//	    and nobody is signed in: the person signs in with the new password.
 //	400 {"field": "code", "error", "expired"?: true} — wrong, expired or spent.
 //	400 {"field": "newPassword", "error"} — the code was right; the password
 //	    is not allowed. The code still works, to fix it and try again.
@@ -249,57 +340,8 @@ func ResetPasswordHandler(w http.ResponseWriter, r *http.Request) {
 		writeRateLimited(w, "password_reset_try")
 		return
 	}
-	login, code := strings.TrimSpace(body.Login), strings.TrimSpace(body.Code)
-	wrong := func() {
-		writeFieldError(w, http.StatusBadRequest, refuse("code", "That code isn't right."))
-	}
-	spent := func(why string) {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"field": "code", "error": why, "expired": true})
-	}
-
-	t, found, err := resetAccountFor(login)
-	if queryFailed("which account a password reset belongs to", "the reset is refused", err) {
-		http.Error(w, "temporarily unavailable", http.StatusInternalServerError)
-		return
-	}
-	if !found {
-		wrong()
-		return
-	}
-	var hash string
-	var expires time.Time
-	var attempts int
-	err = db.QueryRow(`SELECT code_hash, expires_at, attempts FROM password_reset_codes
-	                    WHERE user_id::text = $1`, t.id).Scan(&hash, &expires, &attempts)
-	if err == sql.ErrNoRows {
-		spent("That code has expired. Ask for a new one.")
-		return
-	}
-	if queryFailed("account "+t.id+"'s reset code", "the reset is refused", err) {
-		http.Error(w, "temporarily unavailable", http.StatusInternalServerError)
-		return
-	}
-	forget := func() {
-		if _, err := db.Exec(`DELETE FROM password_reset_codes WHERE user_id::text = $1`, t.id); err != nil {
-			log.Printf("password reset: account %s's spent code could not be cleared: %v", t.id, err)
-		}
-	}
-	if time.Now().After(expires) {
-		forget()
-		spent("That code has expired. Ask for a new one.")
-		return
-	}
-	if !checkPassword(hash, code) {
-		if attempts+1 >= resetCodeTries {
-			forget()
-			spent("Too many wrong codes. Ask for a new one.")
-			return
-		}
-		if _, err := db.Exec(`UPDATE password_reset_codes SET attempts = attempts + 1
-		                       WHERE user_id::text = $1`, t.id); err != nil {
-			log.Printf("password reset: a wrong try at account %s's code could not be counted: %v", t.id, err)
-		}
-		wrong()
+	t, ok := checkResetCode(w, strings.TrimSpace(body.Login), strings.TrimSpace(body.Code))
+	if !ok {
 		return
 	}
 	if why := passwordProblem(body.NewPassword, t.username); why != "" {
