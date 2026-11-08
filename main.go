@@ -772,6 +772,7 @@ func main() {
 	r.HandleFunc("/signup/available", UsernameAvailableHandler).Methods("GET", "OPTIONS")
 	// Forgot password: a code by email, then a new password (password_reset.go).
 	r.HandleFunc("/password/forgot", ForgotPasswordHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/password/verify", VerifyResetCodeHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/password/reset", ResetPasswordHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/login/2fa", TwoFactorLoginHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/auth/google", socialSignIn(googleProvider)).Methods("POST", "OPTIONS")

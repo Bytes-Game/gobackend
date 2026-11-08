@@ -197,6 +197,21 @@ func resetWith(t *testing.T, login, code, password string) (int, map[string]any)
 	}, map[string]any{"login": login, "code": code, "newPassword": password})
 }
 
+func verifyCode(t *testing.T, login, code string) (int, map[string]any) {
+	t.Helper()
+	return postJSON(func(w *httptest.ResponseRecorder, raw []byte) {
+		VerifyResetCodeHandler(w, httptest.NewRequest("POST", "/password/verify", bytes.NewReader(raw)))
+	}, map[string]any{"login": login, "code": code})
+}
+
+// notTheCode is a 6-digit code that is not [code].
+func notTheCode(code string) string {
+	if code == "000000" {
+		return "111111"
+	}
+	return "000000"
+}
+
 // resetter is somebody who forgot their password, with an email on file.
 func resetter(t *testing.T, id int, name, email string) func() {
 	t.Helper()
@@ -509,6 +524,91 @@ func TestPasswordReset_AnEmailThatWillNotSendSaysSoAndCanBeAskedAgain(t *testing
 	nextMail(t, mails)
 }
 
+// The app checks the code before it shows the box for a new password.
+// Checking changes nothing: the old password still works, and the code is
+// still there for the reset, which uses it up.
+func TestPasswordReset_TheCodeIsCheckedBeforeANewPasswordIsChosen(t *testing.T) {
+	defer withDB(t)()
+	resetRedis(t)
+	resetActionLimiters(t)
+	mails := smtpStandIn(t)
+	defer resetter(t, 9944, "Checks_First", "checks.first@example.com")()
+
+	forgot(t, "checks_first")
+	sent := codeIn(t, nextMail(t, mails))
+	if code, got := verifyCode(t, "checks_first", notTheCode(sent)); code != 400 ||
+		got["field"] != "code" || got["error"] != "That code isn't right." || got["expired"] == true {
+		t.Errorf("checking a wrong code answered %d %v", code, got)
+	}
+	if code, got := verifyCode(t, "Checks_First", sent); code != 200 || got["valid"] != true {
+		t.Fatalf("checking the right code answered %d %v", code, got)
+	}
+	if code, got := verifyCode(t, "checks_first", sent); code != 200 || got["valid"] != true {
+		t.Errorf("checking the right code a second time answered %d %v: the first check used it up", code, got)
+	}
+	if code, _ := signInAs(t, "Checks_First", "oldpass42go", false); code != 200 {
+		t.Errorf("after only checking the code, signing in with the old password answered %d", code)
+	}
+
+	if code, got := resetWith(t, "checks_first", sent, "newpass42go"); code != 200 || got["reset"] != true {
+		t.Fatalf("the reset with the checked code answered %d %v", code, got)
+	}
+	if code, got := verifyCode(t, "checks_first", sent); code != 400 || got["expired"] != true {
+		t.Errorf("checking the code after the reset used it answered %d %v", code, got)
+	}
+}
+
+// Five wrong tries in all, wherever they are made: checking first gives
+// nobody more guesses at a 6-digit code.
+func TestPasswordReset_WrongCodesCountTheSameWhereverTheyAreTried(t *testing.T) {
+	defer withDB(t)()
+	resetRedis(t)
+	resetActionLimiters(t)
+	mails := smtpStandIn(t)
+	defer resetter(t, 9945, "five_in_all", "five.in.all@example.com")()
+
+	forgot(t, "five_in_all")
+	sent := codeIn(t, nextMail(t, mails))
+	wrong := notTheCode(sent)
+	for i := 1; i <= 2; i++ {
+		if code, got := verifyCode(t, "five_in_all", wrong); code != 400 || got["expired"] == true {
+			t.Fatalf("wrong check %d answered %d %v", i, code, got)
+		}
+		if code, got := resetWith(t, "five_in_all", wrong, "newpass42go"); code != 400 || got["expired"] == true {
+			t.Fatalf("wrong reset %d answered %d %v", i, code, got)
+		}
+	}
+	if code, got := verifyCode(t, "five_in_all", wrong); code != 400 || got["expired"] != true ||
+		got["error"] != "Too many wrong codes. Ask for a new one." {
+		t.Errorf("the fifth wrong try, a check, answered %d %v", code, got)
+	}
+	if code, got := verifyCode(t, "five_in_all", sent); code != 400 || got["expired"] != true {
+		t.Errorf("the right code after five wrong tries, checked, answered %d %v", code, got)
+	}
+	if code, got := resetWith(t, "five_in_all", sent, "newpass42go"); code != 400 || got["expired"] != true {
+		t.Errorf("the right code after five wrong tries, in a reset, answered %d %v", code, got)
+	}
+}
+
+// The check is held to the reset's limit for one network address, and
+// shares it: ten quick tries between the two, then a wait.
+func TestPasswordReset_TheCheckAndTheResetShareOneLimit(t *testing.T) {
+	defer withDB(t)()
+	resetRedis(t)
+	resetActionLimiters(t)
+	smtpStandIn(t)
+	for i := 1; i <= 5; i++ {
+		verifyCode(t, "nobody_has_this_name", "123456")
+		resetWith(t, "nobody_has_this_name", "123456", "newpass42go")
+	}
+	if code, got := verifyCode(t, "nobody_has_this_name", "123456"); code != 429 {
+		t.Errorf("an eleventh quick try, a check, answered %d %v", code, got)
+	}
+	if code, got := resetWith(t, "nobody_has_this_name", "123456", "newpass42go"); code != 429 {
+		t.Errorf("a twelfth quick try, a reset, answered %d %v", code, got)
+	}
+}
+
 // Only a bcrypt hash of the code is kept, and the log never shows it.
 func TestPasswordReset_TheCodeIsNeverKept(t *testing.T) {
 	defer withDB(t)()
@@ -555,6 +655,7 @@ func TestPasswordReset_MainWiresTheRoutes(t *testing.T) {
 	code := regexp.MustCompile(`(?m)^\s*//.*$`).ReplaceAllString(string(src), "")
 	for _, want := range []string{
 		`"/password/forgot", ForgotPasswordHandler`,
+		`"/password/verify", VerifyResetCodeHandler`,
 		`"/password/reset", ResetPasswordHandler`,
 	} {
 		if !strings.Contains(code, want) {
