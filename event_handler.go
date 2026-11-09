@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
+	"strconv"
 )
 
 // HandleFollowEvent handles. the logic for when a user follows another user.
@@ -177,9 +179,14 @@ func HandleReportEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	// The reporter is the authenticated user; never let the body name someone else.
 	payload.ReporterID = authUserID(r)
-
-	if payload.ReporterID == "" || payload.TargetID == "" || payload.Reason == "" {
-		http.Error(w, "reporterId, targetId, and reason are required", http.StatusBadRequest)
+	reporter, err := strconv.Atoi(payload.ReporterID)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	targetID, problem := cleanReport(&payload)
+	if problem != "" {
+		http.Error(w, problem, http.StatusBadRequest)
 		return
 	}
 
@@ -192,30 +199,65 @@ func HandleReportEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	report, err := CreateReport(payload)
-	if err != nil {
-		http.Error(w, "Failed to create report: "+err.Error(), http.StatusInternalServerError)
+	// Whose it is: what the review list shows, whom "suspend" means, and
+	// whose videos a serious report hides from the reporter. Hiding the
+	// video's own number instead (as this did) hid some other account
+	// that happened to have that number.
+	owner, found, err := reportedOwner(payload.TargetType, targetID)
+	if queryFailed("whose reported "+payload.TargetType+" "+payload.TargetID+" is",
+		"the report is refused, and the app says to try again", err) {
+		http.Error(w, "temporarily unavailable", http.StatusInternalServerError)
 		return
 	}
+	if !found {
+		http.Error(w, "That is no longer there.", http.StatusNotFound)
+		return
+	}
+	if owner == reporter {
+		http.Error(w, "That is yours.", http.StatusBadRequest)
+		return
+	}
+
+	// One open report per person per thing: tapping Report twice is one
+	// report, not two people.
+	if open, err := openReportBy(reporter, payload.TargetType, targetID); queryFailed(
+		"whether account "+payload.ReporterID+" already reported "+payload.TargetType+" "+payload.TargetID,
+		"a second report may be kept", err) {
+		// carried on: a duplicate is better than a lost report
+	} else if open > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"id": strconv.Itoa(open), "alreadyReported": true})
+		return
+	}
+
+	report, err := CreateReport(payload, owner)
+	if err != nil {
+		log.Printf("report: %s %s from account %s could not be kept: %v",
+			payload.TargetType, payload.TargetID, payload.ReporterID, err)
+		http.Error(w, "Failed to create report", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("report: account %s reported %s %s (%s); it waits on /admin/reports",
+		payload.ReporterID, payload.TargetType, payload.TargetID, payload.Reason)
 
 	// Tier 1.2: on a high-severity report (block/abuse/harassment/hate), treat
 	// the target creator as blocked for the reporter so their feed stops
 	// serving that creator immediately. Lower-severity reasons don't trigger
 	// a block — they go through normal moderation.
+	ownerID := strconv.Itoa(owner)
 	if isHardBlockReason(payload.Reason) {
-		go MarkBlocked(payload.ReporterID, payload.TargetID)
+		go MarkBlocked(payload.ReporterID, ownerID)
 	}
 
 	// A report counts against the target's engagement-quality trust
 	// multiplier (flags-against penalty in computeEngagementQuality).
 	// Drop their cached multiplier so the next trending-weight read
 	// reflects the report immediately instead of after the 10-min TTL.
-	go invalidateEngagementQuality(payload.TargetID)
+	go invalidateEngagementQuality(ownerID)
 
 	// Drop the content's cached two-tower embedding so the next ranker pass
 	// rebuilds it from current metadata (which moderation may have changed,
 	// e.g. category re-tagging or visibility flip). Cheap and best-effort.
-	if payload.TargetType == "post" || payload.TargetType == "challenge" || payload.TargetType == "" {
+	if payload.TargetType == "challenge" {
 		go invalidateContentEmbedding(payload.TargetID)
 	}
 
@@ -229,7 +271,7 @@ func HandleReportEvent(w http.ResponseWriter, r *http.Request) {
 // Matches on a small set of known-severe reasons; everything else is soft.
 func isHardBlockReason(reason string) bool {
 	switch reason {
-	case "block", "abuse", "harassment", "hate", "threats", "sexual_content", "violence":
+	case "block", "abuse", "harassment", "hate", "threats", "sexual_content", "violence", "child_safety":
 		return true
 	}
 	return false

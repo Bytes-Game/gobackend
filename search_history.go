@@ -170,7 +170,7 @@ func recentSearchAccounts(userID string) []User {
 		  FROM users
 		 WHERE id = ANY($1)
 		   -- Not an account waiting to be deleted (account_leaving.go).
-		   AND deletion_requested_at IS NULL`, pq.Array(ids))
+		   AND deletion_requested_at IS NULL AND suspended_at IS NULL`, pq.Array(ids))
 	if queryFailed("the accounts in the search history",
 		"showing the history without them", err) {
 		return out

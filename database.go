@@ -24,7 +24,9 @@ var db *sql.DB
 // ---------------------------------------------------------------------------------
 
 // InitDatabase connects to PostgreSQL, runs schema migrations, and seeds
-// sample data if the tables are empty.
+// sample data if the tables are empty on a server for testing
+// (test_server.go). Then, in the background, it scrambles passwords still
+// kept as plain text and locks demo accounts (leftover_passwords.go).
 // Returns an error rather than exiting. The caller retries and, while it is
 // failing, the app says so on /health instead of disappearing — see
 // boot_gate.go for why that distinction cost four days of silent downtime.
@@ -53,6 +55,7 @@ func InitDatabase() error {
 		return err
 	}
 	seedIfEmpty()
+	go startupAccountChecks()
 	return nil
 }
 
@@ -1122,7 +1125,7 @@ func IsValidUser(username, password string) bool {
 // searched for, indexed or told anything (account_leaving.go).
 func GetAllUsers() []User {
 	rows, err := db.Query(`SELECT id, username, full_name, wins, losses, league FROM users
-	                        WHERE deletion_requested_at IS NULL ORDER BY id`)
+	                        WHERE deletion_requested_at IS NULL AND suspended_at IS NULL ORDER BY id`)
 	if err != nil {
 		log.Printf("GetAllUsers error: %v", err)
 		return nil
@@ -1156,7 +1159,7 @@ func GetAllUsers() []User {
 func GetUsersPaginated(limit, offset int) []User {
 	rows, err := db.Query(
 		`SELECT id, username, full_name, wins, losses, league
-		   FROM users WHERE deletion_requested_at IS NULL
+		   FROM users WHERE deletion_requested_at IS NULL AND suspended_at IS NULL
 		  ORDER BY id LIMIT $1 OFFSET $2`,
 		limit, offset,
 	)
@@ -1507,8 +1510,9 @@ func seedIfEmpty() {
 		queryFailed("seedIfEmpty: could not read users",
 			"carrying on as if the answer were empty", err)
 	}
-	if count > 0 {
-		log.Println("Database already has data - skipping seed")
+	// Demo data brings ten accounts whose passwords are in the public code
+	// (test_server.go). A new live database starts empty instead.
+	if !shouldSeedDemoData(count) {
 		return
 	}
 
@@ -1541,26 +1545,11 @@ func ReseedDatabase() {
 }
 
 func seedUsers() {
-	type su struct {
-		username, password, fullName, league string
-		wins, losses                         int
-	}
-	data := []su{
-		{"player1", "pass1", "Player One", "Gold", 32, 18},
-		{"player2", "pass2", "Player Two", "Diamond", 120, 45},
-		{"player3", "pass3", "Player Three", "Bronze", 10, 5},
-		{"shadowstrike", "pass4", "Shadow Strike", "Platinum", 95, 30},
-		{"blazerunner", "pass5", "Blaze Runner", "Silver", 55, 40},
-		{"stormchaser", "pass6", "Storm Chaser", "Gold", 78, 22},
-		{"frostbyte", "pass7", "Frost Byte", "Dianond", 140, 50},
-		{"nightowl", "pass8", "Night Owl", "Bronze", 15, 10},
-		{"thunderbolt", "pass9", "Thunder Bolt", "Silver", 62, 38},
-		{"cyberking", "pass10", "Cyber King", "Platinum", 100, 25},
-	}
-	for _, u := range data {
+	for _, u := range demoAccounts {
 		// Seed with a bcrypt hash and an empty plaintext column so a fresh DB
-		// never has a password at rest. Dev still logs in with the plaintext
-		// values above (pass1…pass10) — they're just hashed when stored.
+		// never has a password at rest. A server for testing still signs in
+		// with the plaintext values (pass1…pass10) — they're just hashed when
+		// stored. Anywhere else, lockDemoAccounts takes them away.
 		hash, err := hashPassword(u.password)
 		if err != nil {
 			log.Printf("seed: hashing password for %s failed: %v", u.username, err)
@@ -2639,8 +2628,9 @@ func GetVoteSummary(challengeID string) []VoteSummary {
 // Reports CRUD
 // ---------------------------------------------------------------------------
 
-// CreateReport inserts a new content/user report.
-func CreateReport(payload ReportPayload) (Report, error) {
+// CreateReport keeps a report. [owner] is the account behind what was
+// reported (reportedOwner), kept for the review list (moderation.go).
+func CreateReport(payload ReportPayload, owner int) (Report, error) {
 	reporterID, err := strconv.Atoi(payload.ReporterID)
 	if err != nil {
 		return Report{}, fmt.Errorf("invalid reporter ID")
@@ -2653,9 +2643,9 @@ func CreateReport(payload ReportPayload) (Report, error) {
 	var id int
 	var createdAt time.Time
 	err = db.QueryRow(
-		`INSERT INTO reports (reporter_id, target_id, target_type, reason, description)
-		 VALUES ($1,$2,$3,$4,$5) RETURNING id, created_at`,
-		reporterID, targetID, payload.TargetType, payload.Reason, payload.Description,
+		`INSERT INTO reports (reporter_id, target_id, target_type, reason, description, owner_id)
+		 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, created_at`,
+		reporterID, targetID, payload.TargetType, payload.Reason, payload.Description, owner,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return Report{}, err
@@ -3019,6 +3009,7 @@ func GetChatMessages(userA, userB, limit, offset int) []ChatMessage {
 		    OR (m.sender_id = $2 AND m.receiver_id = $1))
 		   -- Nothing from a chat with an account waiting to be deleted.
 		   AND s.deletion_requested_at IS NULL AND r.deletion_requested_at IS NULL
+		   AND s.suspended_at IS NULL AND r.suspended_at IS NULL
 		   AND m.created_at > COALESCE(
 		         (SELECT cleared_at FROM chat_cleared WHERE user_id = $1 AND other_id = $2),
 		         '-infinity'::timestamptz)
@@ -3140,7 +3131,7 @@ func GetConversations(userID int) []Conversation {
 		// A chat with an account waiting to be deleted is not on the list
 		// (account_leaving.go); it comes back if they keep the account.
 		err := db.QueryRow(`SELECT username, league FROM users
-		                     WHERE id=$1 AND deletion_requested_at IS NULL`, pid).Scan(&username, &league)
+		                     WHERE id=$1 AND deletion_requested_at IS NULL AND suspended_at IS NULL`, pid).Scan(&username, &league)
 		if err != nil {
 			continue
 		}
@@ -3331,7 +3322,7 @@ func GetSavedChallenges(userID string) []Challenge {
 		 JOIN challenges c ON sc.challenge_id = c.id
 		 JOIN users u ON c.creator_id = u.id
 		 WHERE sc.user_id = $1
-		   AND u.deletion_requested_at IS NULL
+		   AND u.deletion_requested_at IS NULL AND u.suspended_at IS NULL
 		 ORDER BY sc.created_at DESC`, uid,
 	)
 	if err != nil {

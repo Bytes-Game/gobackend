@@ -185,6 +185,22 @@ that the column does not exist.
 
 ---
 
+## The legal documents live in the app
+
+The Terms, Privacy Policy and Community Guidelines are written in the
+Frontend repo (`lib/pages/legal_texts.dart`). The server's web pages
+(`legal_pages.go`: /terms, /privacy, /community-guidelines) show a copy,
+`legal/texts.json`, made by:
+
+```
+python3 tools/legal_from_app.py ../Frontend/lib/pages/legal_texts.dart
+```
+
+Change the words in the app, run that, and commit both on the same day.
+`/delete-account` and `/child-safety` exist only here, in `legal_pages.go`.
+
+---
+
 ## Before release
 
 The owner's before-release list is kept in the Frontend repo's CLAUDE.md,
@@ -197,5 +213,7 @@ plan, since the free one blocks the email ports), `GOOGLE_CLIENT_IDS`,
 `APPLE_CLIENT_IDS` and `ANDROID_PACKAGE_NAME` (Google and Apple sign-in),
 `APP_DOWNLOAD_URL` (the shared web pages) and `R2_PUBLIC_BASE_URL` (videos
 from media.flexete.com), plus the Cloudflare steps for the app's domain,
-flexete.com. A new server setting the owner must fill in goes on that list
-the day it is added.
+flexete.com. And one setting that must stay OFF on the live server:
+`TEST_SERVER` (test_server.go), which allows the wipe and the demo
+accounts with public passwords. A new server setting the owner must fill
+in goes on that list the day it is added.

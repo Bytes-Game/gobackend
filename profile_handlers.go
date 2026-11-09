@@ -722,7 +722,7 @@ func ListBlockedUsersHandler(w http.ResponseWriter, r *http.Request) {
 		   JOIN users u ON u.id = ub.blocked_id
 		  WHERE ub.blocker_id = $1
 		    -- Hidden here too while waiting to be deleted (account_leaving.go).
-		    AND u.deletion_requested_at IS NULL
+		    AND u.deletion_requested_at IS NULL AND u.suspended_at IS NULL
 		  ORDER BY ub.created_at DESC`,
 		userID,
 	)

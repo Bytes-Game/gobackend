@@ -72,7 +72,7 @@ func activityHidden(username string) bool {
 	// An account waiting to be deleted never shows as active either.
 	err := db.QueryRow(`
 		SELECT COALESCE(settings->>'showActivity', 'true') = 'false'
-		       OR deletion_requested_at IS NOT NULL
+		       OR deletion_requested_at IS NOT NULL OR suspended_at IS NOT NULL
 		  FROM users WHERE username = $1`, username).Scan(&hidden)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false

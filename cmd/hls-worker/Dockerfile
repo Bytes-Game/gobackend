@@ -1,117 +1,182 @@
 # syntax=docker/dockerfile:1.6
 #
-# ⚠ THIS FILE IS NOT WHAT RUNS IN PRODUCTION. ⚠
+# The video worker, always on: one container that waits for new videos and
+# handles each the moment it is posted.
 #
-# The transcode worker runs in GitHub Actions, on a schedule, from
-# .github/workflows/hls-worker.yml. That is where tools get installed and
-# where environment variables get set. Changing this Dockerfile alone
-# changes nothing about the live app. Keep the two in step, but treat the
-# workflow as the real one.
+# What it does to each video, the same as the GitHub job
+# (.github/workflows/hls-worker.yml) does today: makes the streaming
+# versions, reads the words on screen (tesseract), listens to what is said
+# (whisper.cpp), and works out what the video is about (llama.cpp with the
+# Qwen3-VL model). Everything runs inside the container; no outside AI
+# service, nothing to pay per video.
 #
-# This file is the always-on container version, kept working for the day
-# somebody wants to pay for a background worker instead of running the
-# queue down every 30 minutes for free.
+# The GitHub job starts from nothing on a schedule, or when a video is
+# posted, so each run first spends a minute or more setting up. This
+# container sets up once, then polls the server every few seconds for
+# work, for as long as it runs.
 #
 # ────────────────────────────────────────────────────────────────────────
+# KEEP IN STEP WITH THE GITHUB JOB
 #
-# Dockerfile for the HLS transcode worker (sibling binary of the main
-# devb backend). Designed to deploy as a Render Background Worker but
-# works on any container host with outbound HTTPS to the backend +
-# Cloudflare R2.
+# The versions below (WHISPER_RELEASE, LLAMA_RELEASE, the model files) are
+# the job's. Change one, change both.
 #
-# Two-stage build:
-#   1. `builder` — full golang image, compiles ./cmd/hls-worker into a
-#      static-ish binary. We build with CGO disabled so the final image
-#      doesn't need glibc; that lets us land on the smaller debian-slim
-#      runtime even though Go itself doesn't strictly need musl.
-#   2. `runtime` — debian-slim with ffmpeg + ca-certificates only. Ships
-#      around ~250MB, dominated by ffmpeg's codec libraries — there's no
-#      smaller-but-still-correct way to get x264 + AAC encoding.
+# ────────────────────────────────────────────────────────────────────────
+# WHAT IT NEEDS
 #
-# Why debian-slim and not alpine: alpine's ffmpeg package omits some
-# codec libraries we want (notably libfdk_aac, though we use the built-
-# in `aac` encoder so it's not strictly required) and uses musl, which
-# has tripped us up with DNS resolution on some hosting providers in
-# the past. The size difference (~250MB vs ~180MB) is not worth the
-# debugging time.
+# Memory: at least 8 GB. The understanding model takes about 4 GB while it
+# runs, the speech model about 2 GB, ffmpeg the rest. With less, the system
+# kills a model mid-video and the video gets no description, quietly.
+# CPU: 4 cores is comfortable; each video then takes one to two minutes.
+# Disk: the image is about 5.5 GB: 1 GB of programs, the rest the three
+# model files.
 #
-# Build context expectation: build from the devb/ module root so the
-# go.mod / go.sum / vendor-or-not all resolve correctly:
+# Settings (environment variables), the same as the GitHub job's secrets:
+#   BACKEND_URL           the server, e.g. https://api.flexete.com
+#   HLS_WORKER_TOKEN      the same value as the server's
+#   R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+#   R2_PUBLIC_BASE_URL    optional; the server sends its own with each job
 #
-#     docker build -f cmd/hls-worker/Dockerfile -t devf-hls-worker .
+# Run ONE of these, or turn the GitHub job's schedule off once it runs:
+# two workers do not share out a video, but each costs its own machine.
 #
-# Or on Render: set the Dockerfile path to `cmd/hls-worker/Dockerfile`
-# and the root directory to `devb/`.
+# ────────────────────────────────────────────────────────────────────────
+# BUILD AND RUN
+#
+#   docker build -f cmd/hls-worker/Dockerfile -t flexete-worker .
+#   docker run -d --restart unless-stopped --env-file worker.env flexete-worker
+#
+# from the repository's root. On a container host (Render "Background
+# Worker", Railway, Fly.io, a VPS) point it at this file with the
+# repository root as the build context.
 
-# ────────────── builder stage ──────────────
-FROM golang:1.23-bookworm AS builder
+ARG WHISPER_RELEASE=v1.9.3
+ARG WHISPER_MODEL_NAME=medium
+ARG LLAMA_RELEASE=b10819
+ARG UNDERSTAND_REPO=Qwen/Qwen3-VL-4B-Instruct-GGUF
+ARG UNDERSTAND_MODEL_FILE=Qwen3VL-4B-Instruct-Q4_K_M.gguf
+ARG UNDERSTAND_PROJECTOR_FILE=mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf
+
+# ────────────── the worker itself ──────────────
+FROM golang:1.25-bookworm AS worker
 
 WORKDIR /src
-
-# Cache module downloads in their own layer. go.sum changes much less
-# often than the source, so this keeps incremental builds fast.
+# Module downloads in their own layer: go.sum changes far less often than
+# the code, so rebuilds stay fast.
 COPY go.mod go.sum ./
 RUN go mod download
-
-# Now copy the rest of the module (everything we need to compile the
-# worker binary lives in the same Go module as the backend, even though
-# we only build cmd/hls-worker here).
 COPY . .
+# No C libraries needed, so the binary runs on the slim image below.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+      -o /out/hls-worker ./cmd/hls-worker
 
-# Static-ish build: CGO_ENABLED=0 produces a binary with no libc deps,
-# so it runs on any glibc-or-musl runtime. -trimpath strips local paths
-# from stack traces (smaller binary, no leaked $HOME). -ldflags "-s -w"
-# removes debug symbols (another ~30% size reduction).
-RUN CGO_ENABLED=0 GOOS=linux go build \
-    -trimpath \
-    -ldflags="-s -w" \
-    -o /out/hls-worker \
-    ./cmd/hls-worker
+# ────────────── whisper.cpp and llama.cpp ──────────────
+FROM debian:bookworm AS engines
+ARG WHISPER_RELEASE
+ARG LLAMA_RELEASE
 
-# ────────────── runtime stage ──────────────
-FROM debian:bookworm-slim AS runtime
-
-# ffmpeg     — the transcoder, and now also the measuring tool: the worker
-#              runs one extra pass over each source to work out how fast it
-#              cuts, how loud it is and how much of it is silence. See
-#              analyze.go. No extra package needed for that part.
-# tesseract  — reads words burned into the picture. Adds roughly 40MB, and
-#              earns it: on short video the caption a creator types onto the
-#              screen is very often the single best description of what the
-#              video is, and it is invisible to everything else. The eng
-#              language data is a separate package and is required — the
-#              binary alone cannot read anything.
-# ca-certificates — needed for HTTPS GETs against R2 / the backend
-# tini       — proper PID 1 so signals from Render (SIGTERM on redeploy)
-#              reach the worker and let it exit cleanly mid-poll instead of
-#              being SIGKILLed.
-#
-# Speech-to-text is deliberately NOT installed here. It wants a few hundred
-# megabytes of model and real CPU time per video, which is a decision about
-# hosting cost rather than about code — so the worker looks for a whisper
-# binary and model at run time via WHISPER_BIN and WHISPER_MODEL, and simply
-# skips the pass when they are not set. To turn it on, add whisper.cpp and a
-# model to this image and set both variables.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        ffmpeg \
-        tesseract-ocr \
-        tesseract-ocr-eng \
-        ca-certificates \
-        tini \
+        build-essential cmake git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# Run as a non-root user. The worker only needs to read/write inside
-# its own tmp dir and make outbound HTTP calls — there's no reason to
-# give it the rest of the container.
+# GGML_NATIVE=OFF: built for any x86-64 machine with AVX2 (every cloud
+# server of the last ten years), not just for the one that builds it.
+# Built "native", the image can crash with "illegal instruction" the
+# first time it runs on a different processor.
+ARG CPU_FLAGS="-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON"
+
+# whisper.cpp — the speech model's program. Its libraries are found next
+# to the program (RPATH $ORIGIN), as in the GitHub job.
+RUN git clone --depth 1 --branch "${WHISPER_RELEASE}" \
+      https://github.com/ggml-org/whisper.cpp.git /tmp/whisper-src \
+ && cmake -S /tmp/whisper-src -B /tmp/whisper-build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DWHISPER_BUILD_TESTS=OFF \
+      -DWHISPER_BUILD_SERVER=OFF \
+      -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+      -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+      ${CPU_FLAGS} \
+ && cmake --build /tmp/whisper-build -j 4 --config Release \
+ && mkdir -p /opt/whisper \
+ && cp -r /tmp/whisper-build/bin /opt/whisper/bin \
+ && rm -rf /tmp/whisper-build /tmp/whisper-src
+
+# llama.cpp — runs the understanding model. Built into the programs
+# (BUILD_SHARED_LIBS=OFF). Do not turn LLAMA_BUILD_SERVER off: llama-cli
+# is built only with it on (see the GitHub job for the whole story).
+RUN git clone --depth 1 --branch "${LLAMA_RELEASE}" \
+      https://github.com/ggml-org/llama.cpp.git /tmp/llama-src \
+ && cmake -S /tmp/llama-src -B /tmp/llama-build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=OFF \
+      -DLLAMA_CURL=OFF \
+      -DLLAMA_BUILD_TESTS=OFF \
+      ${CPU_FLAGS} \
+ && cmake --build /tmp/llama-build --config Release -j 4 \
+      --target llama-cli llama-mtmd-cli \
+ && mkdir -p /opt/llama \
+ && cp /tmp/llama-build/bin/llama-cli /tmp/llama-build/bin/llama-mtmd-cli /opt/llama/ \
+ && rm -rf /tmp/llama-build /tmp/llama-src
+
+# ────────────── the three model files ──────────────
+FROM debian:bookworm-slim AS models
+ARG WHISPER_MODEL_NAME
+ARG UNDERSTAND_REPO
+ARG UNDERSTAND_MODEL_FILE
+ARG UNDERSTAND_PROJECTOR_FILE
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /opt/models \
+ && curl -fsSL --retry 3 -o /opt/models/whisper.bin \
+      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${WHISPER_MODEL_NAME}.bin" \
+ && curl -fsSL --retry 3 -o /opt/models/understand.gguf \
+      "https://huggingface.co/${UNDERSTAND_REPO}/resolve/main/${UNDERSTAND_MODEL_FILE}" \
+ && curl -fsSL --retry 3 -o /opt/models/projector.gguf \
+      "https://huggingface.co/${UNDERSTAND_REPO}/resolve/main/${UNDERSTAND_PROJECTOR_FILE}" \
+ && test -s /opt/models/whisper.bin \
+ && test -s /opt/models/understand.gguf \
+ && test -s /opt/models/projector.gguf
+
+# ────────────── what runs ──────────────
+FROM debian:bookworm-slim AS runtime
+
+# ffmpeg     the streaming versions, and the measuring pass (analyze.go)
+# tesseract  reads words burned into the picture; the eng data is needed
+# libgomp1   lets whisper.cpp and llama.cpp use every core
+# tini       passes the stop signal on, so a redeploy stops the worker
+#            cleanly between jobs instead of killing it mid-video
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ffmpeg tesseract-ocr tesseract-ocr-eng ca-certificates libgomp1 tini \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=engines /opt/whisper /opt/whisper
+COPY --from=engines /opt/llama /opt/llama
+COPY --from=models /opt/models /opt/models
+COPY --from=worker /out/hls-worker /usr/local/bin/hls-worker
+
+# Where the worker finds the three passes: the same names the GitHub job
+# sets. One that is missing is skipped, and the video says so in the
+# passes it lists.
+ENV WHISPER_BIN=/opt/whisper/bin/whisper-cli \
+    WHISPER_MODEL=/opt/models/whisper.bin \
+    LD_LIBRARY_PATH=/opt/whisper/bin \
+    UNDERSTAND_BIN=/opt/llama/llama-cli \
+    UNDERSTAND_MODEL=/opt/models/understand.gguf \
+    UNDERSTAND_FRAMES_BIN=/opt/llama/llama-mtmd-cli \
+    UNDERSTAND_PROJECTOR=/opt/models/projector.gguf
+
+# Not as root: it only reads and writes its own temporary files and makes
+# outgoing connections.
 RUN useradd --system --create-home --shell /usr/sbin/nologin worker
 USER worker
 WORKDIR /home/worker
 
-COPY --from=builder /out/hls-worker /usr/local/bin/hls-worker
-
-# tini handles signal forwarding so SIGTERM from the orchestrator
-# actually reaches our Go process. Without it, you get 30s shutdown
-# delays on every Render redeploy.
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["/usr/local/bin/hls-worker"]
+# Polls for new videos every 5 seconds, for ever. -job-timeout as in the
+# GitHub job: a video that takes longer than 16 minutes is given up on and
+# tried again later, instead of holding the worker.
+CMD ["/usr/local/bin/hls-worker", "-poll", "5s", "-job-timeout", "16m"]

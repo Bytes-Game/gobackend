@@ -110,13 +110,6 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	completeSignIn(w, r, user, creds.KeepAccount)
 }
 
-// ReseedHandler drops all data and reseeds the database.
-func ReseedHandler(w http.ResponseWriter, r *http.Request) {
-	ReseedDatabase()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "reseeded"})
-}
-
 // GetAllUsersHandler returns a bounded page of users.
 // GET /api/v1/users?page=&limit=  (limit default 50, capped at 100).
 //
@@ -556,6 +549,8 @@ func main() {
 	limiter := newNamedRateLimiter("ip", 10, 20)
 	r.Use(rateLimitMiddleware(limiter))
 	r.Use(metricsMiddleware)
+	// Nobody may send more than 1 MB at once (request_limits.go).
+	r.Use(limitRequestBodies)
 
 	api := r.PathPrefix("/api/v1").Subrouter()
 	api.HandleFunc("/users", GetAllUsersHandler).Methods("GET", "OPTIONS")
@@ -696,6 +691,10 @@ func main() {
 	api.HandleFunc("/watch", authed(HandleWatchEvent)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/report", authed(HandleReportEvent)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/admin/reseed", adminOnly(ReseedHandler)).Methods("POST", "OPTIONS")
+	// Reports: read and decide (moderation.go; the page is /admin/reports).
+	api.HandleFunc("/admin/reports", adminOnly(AdminOpenReportsHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/admin/reports/resolve", adminOnly(AdminResolveReportHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/admin/unsuspend", adminOnly(AdminUnsuspendHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/admin/funnels", adminOnly(AdminFunnelsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/errors", adminOnly(AdminErrorsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/health", adminOnly(AdminHealthHandler)).Methods("GET", "OPTIONS")
@@ -752,6 +751,7 @@ func main() {
 	api.HandleFunc("/creator/insights/content", authed(HandleCreatorInsightsPerContent)).Methods("GET", "OPTIONS")
 
 	r.HandleFunc("/admin", adminOnly(AdminDashboardHandler)).Methods("GET")
+	r.HandleFunc("/admin/reports", adminOnly(AdminReportsPageHandler)).Methods("GET")
 	api.HandleFunc("/chat/send", authed(SendMessageHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/chat/conversations/{userId}", authed(GetConversationsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/chat/messages/{userId}/{otherUserId}", authed(GetMessagesHandler)).Methods("GET", "OPTIONS")
@@ -807,6 +807,10 @@ func main() {
 	// What a shared link or a scanned QR code opens: a person, or one video.
 	// No sign-in. public_pages.go.
 	r.HandleFunc("/u/{username}", PublicProfilePageHandler).Methods("GET", "HEAD")
+	// The pages the app stores ask for (legal_pages.go).
+	for _, path := range []string{"/terms", "/privacy", "/community-guidelines", "/delete-account", "/child-safety"} {
+		r.HandleFunc(path, LegalPageHandler).Methods("GET", "HEAD")
+	}
 	r.HandleFunc("/v/{id:[0-9]+}", PublicVideoPageHandler).Methods("GET", "HEAD")
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

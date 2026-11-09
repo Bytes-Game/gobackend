@@ -57,7 +57,7 @@ func tokenCutoff(userID string) (time.Time, bool) {
 	var leaving bool
 	err = db.QueryRow(`
 		SELECT GREATEST(password_changed_at, signed_out_at),
-		       deletion_requested_at IS NOT NULL
+		       deletion_requested_at IS NOT NULL OR suspended_at IS NOT NULL
 		  FROM users WHERE id = $1`, id).Scan(&at, &leaving)
 	if err != nil && err != sql.ErrNoRows {
 		queryFailed("reading when user "+userID+" last changed their password or was signed out",
@@ -77,7 +77,8 @@ func forgetCutoff(userID string) { cutoffCache.Delete(userID) }
 
 // signedInBeforeCutoff is whether a sign-in made at [issued] by [userID]
 // is no longer good: from before their last password change or sign-out,
-// or any sign-in at all while the account waits to be deleted.
+// or any sign-in at all while the account waits to be deleted or is
+// suspended (moderation.go).
 func signedInBeforeCutoff(userID string, issued time.Time) bool {
 	cut, leaving := tokenCutoff(userID)
 	if leaving {

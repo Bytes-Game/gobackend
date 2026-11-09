@@ -529,6 +529,13 @@ func TrackBatchEventsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
 		return
 	}
+	// Each report becomes several database writes, done after the answer
+	// is sent, so the number per batch is what bounds the work one request
+	// can cause (request_limits.go).
+	if len(payload.Events) > maxEventsPerBatch {
+		http.Error(w, `{"error":"too many events in one batch"}`, http.StatusRequestEntityTooLarge)
+		return
+	}
 	// Every event in the batch is attributed to the authenticated user — a
 	// client can't smuggle in events authored as someone else.
 	uid := authUserID(r)
