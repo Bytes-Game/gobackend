@@ -382,10 +382,25 @@ func TestPush_ThePhoneIsToldToGroupByChat(t *testing.T) {
 	if data["type"] != "chat" || data["senderId"] != "9" || data["outboxId"] != "0" {
 		t.Fatalf("data %v", data)
 	}
-	// The app's own nudges, with no tag, stay as they were.
+	if sound := apns["payload"].(map[string]interface{})["aps"].(map[string]interface{})["sound"]; sound != "default" {
+		t.Fatalf("a chat push makes no sound on an iPhone: %v", apns)
+	}
+	// The app's own nudges, with no tag, are not grouped — but they make a
+	// sound on an iPhone too. Without an iPhone part they arrived silently.
 	plain := fcmPayload(OutboxRow{Title: "t", Body: "b"}, "tok")["message"].(map[string]interface{})
-	if _, ok := plain["apns"]; ok {
+	plainApns, ok := plain["apns"].(map[string]interface{})
+	if !ok {
+		t.Fatal("a push without a tag has no iPhone part, so an iPhone plays no sound for it")
+	}
+	if _, grouped := plainApns["headers"]; grouped {
 		t.Fatal("a push without a tag grew an iPhone grouping")
+	}
+	plainAps := plainApns["payload"].(map[string]interface{})["aps"].(map[string]interface{})
+	if plainAps["sound"] != "default" {
+		t.Fatalf("a push without a tag makes no sound on an iPhone: %v", plainAps)
+	}
+	if _, grouped := plainAps["thread-id"]; grouped {
+		t.Fatal("a push without a tag grew an iPhone thread")
 	}
 }
 
