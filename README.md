@@ -189,9 +189,7 @@ go run .
 ```
 
 It listens on `:8081` unless `PORT` says otherwise. The schema is created on
-first boot. Sample content (ten demo accounts, `player1`/`pass1` and so on,
-with their videos) is added to an empty database only with
-`TEST_SERVER=true` — see below.
+first boot. A new database starts empty: there is no demo data.
 
 Health check: `GET /health`.
 
@@ -243,7 +241,6 @@ Everything is environment variables. Only the first two are required.
 | `MEILISEARCH_URL`, `MEILI_MASTER_KEY` | Full-text search. Search degrades gracefully when absent. |
 | `FCM_SERVICE_ACCOUNT_JSON`, `FCM_PROJECT` | Push notifications via FCM HTTP v1. Raw or base64-encoded service-account JSON. |
 | `OPENVERSE_CLIENT_ID`, `OPENVERSE_CLIENT_SECRET` | The free music search behind the video editor's Music button (`free_music.go`). Without them the whole server gets Openverse's visitor allowance — 200 searches a day — which is fine for testing and runs out fast with real users. Register a free app at Openverse (one form, then click the link in the email) and put the two values here; that allows 10,000 a day. Either way every answer is saved in the database (`music_searches`) and used again, by everybody, for 30 days — at most 5,000 saved searches, about 1 KB each plus about 0.5 KB per song kept. |
-| `TEST_SERVER` | `true` only on a server for testing. It allows the wipe (`/api/v1/admin/reseed`), gives an empty database the demo data, and lets the ten demo accounts sign in with the passwords written in `test_server.go`. **Never on the live server**: without it the wipe is refused, and at every start a demo account still using its public password gets a random one (`test_server.go`). |
 | `MULTI_REPLICA` | Set to `1` when running more than one instance. Switches rate limiting to a shared Redis token bucket and turns on cross-replica WebSocket delivery. |
 
 ---
@@ -251,8 +248,7 @@ Everything is environment variables. Only the first two are required.
 ## Security notes worth reading before you deploy
 
 **Rotate `ADMIN_PASS`.** The admin surface reads user analytics and operational
-internals, and `/admin/reseed` **drops and rebuilds the database** (on a
-server with `TEST_SERVER=true`; everywhere else it is refused). Guessing
+internals, and `/admin/reports` **deletes videos and suspends accounts**. Guessing
 that password is not a read-only mistake. Boot logs a warning if the value is a
 common one or is shorter than 12 characters.
 
@@ -312,8 +308,6 @@ do rather than by folder.
 | Path | What it is |
 |---|---|
 | `cmd/hls-worker/` | The FFmpeg transcode worker. Runs as a GitHub Actions cron job every 30 minutes, which makes the transcode fleet cost nothing. |
-| `cmd/seed/` | Replaces feed content with known sample reels. |
-| `cmd/mediaimport/` | Imports MP4s into the bucket and the catalogue. |
 | `smoketest/`, `loadtest/` | Black-box checks against a deployed instance. |
 | `monitoring/` | Prometheus, Grafana and Alertmanager configuration. |
 

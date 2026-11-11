@@ -5,10 +5,10 @@ package main
 // password stays kept as plain text.
 
 import (
+	"context"
 	"database/sql"
 	"strconv"
 	"testing"
-	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -46,76 +46,99 @@ func passwordColumns(t *testing.T, id int) (plain, hash string, changed sql.Null
 	return
 }
 
-func TestDemoAccounts_PublicPasswordsStopWorking(t *testing.T) {
+func TestDemoAccounts_AreDeletedForGood(t *testing.T) {
 	defer withDB(t)()
-	t.Setenv("TEST_SERVER", "")
-	fastScrambling(t)
+	resetRedis(t)
 
 	const (
-		withHash  = 9951 // player1: scrambled public password
-		withPlain = 9952 // player2: very old row, public password as plain text
-		ownPass   = 9953 // player3: someone's own password under a demo name
-		notDemo   = 9954 // not a demo name, but the same password as player1
+		seeded     = 9951 // player1, as the old start-up data made it
+		toolMade   = 9952 // maya, as the old seed tool made it
+		renamed    = 9953 // omar with another name, but the tool's password still opens it
+		oldPlain   = 9954 // player2, a very old row with its password as plain text
+		ownAccount = 9955 // nina: a real person who signed up under a free demo name
+		ownOld     = 9956 // deven: a real early account (no email, no terms), own name and password
+		notDemo    = 9957 // not a demo name, though its password is a demo one
 	)
-	names := map[int]string{withHash: "player1", withPlain: "player2", ownPass: "player3", notDemo: "not_a_demo_9954"}
+	ids := []int{seeded, toolMade, renamed, oldPlain, ownAccount, ownOld, notDemo}
+	names := []string{"player1", "maya", "omar", "player2", "nina", "deven", "not_a_demo_9957"}
 	clean := func() {
-		for id, name := range names {
-			db.Exec(`DELETE FROM users WHERE id = $1 OR LOWER(username) = LOWER($2)`, id, name)
+		for i, id := range ids {
+			db.Exec(`DELETE FROM challenges WHERE creator_id = $1`, id)
+			db.Exec(`DELETE FROM users WHERE id = $1 OR LOWER(username) = $2`, id, names[i])
 			forgetCutoff(strconv.Itoa(id))
 		}
+		forgetLeaving()
 	}
 	clean()
 	defer clean()
-	mustExec(t, `INSERT INTO users (id, username, password, password_hash) VALUES ($1, 'player1', '', $2)`, withHash, fastHash(t, "pass1"))
-	mustExec(t, `INSERT INTO users (id, username, password, password_hash) VALUES ($1, 'player2', 'pass2', '')`, withPlain)
-	mustExec(t, `INSERT INTO users (id, username, password, password_hash) VALUES ($1, 'player3', '', $2)`, ownPass, fastHash(t, "player three's own password"))
-	mustExec(t, `INSERT INTO users (id, username, password, password_hash) VALUES ($1, 'not_a_demo_9954', '', $2)`, notDemo, fastHash(t, "pass1"))
+	add := func(id int, username, fullName, plain, password string) {
+		t.Helper()
+		hash := ""
+		if password != "" {
+			hash = fastHash(t, password)
+		}
+		mustExec(t, `INSERT INTO users (id, username, full_name, password, password_hash) VALUES ($1, $2, $3, $4, $5)`,
+			id, username, fullName, plain, hash)
+	}
+	add(seeded, "player1", "Player One", "", "pass1")
+	add(toolMade, "maya", "Maya Rivera", "", "password123")
+	add(renamed, "omar", "Somebody Else", "", "password123")
+	add(oldPlain, "player2", "Renamed Too", "pass2", "")
+	add(ownOld, "deven", "Deven Someone", "", "deven's own password")
+	add(notDemo, "not_a_demo_9957", "Player One", "", "pass1")
+	// A real sign-up under a demo name records an email and the terms.
+	mustExec(t, `INSERT INTO users (id, username, full_name, password, password_hash, email, terms_accepted_at)
+	             VALUES ($1, 'nina', 'Nina Kapoor', '', $2, 'nina@example.com', NOW())`, ownAccount, fastHash(t, "password123"))
 
-	// Signed in as player1 an hour ago, as anyone could have.
-	oldSignIn := signedInAt(t, strconv.Itoa(withHash), "player1", time.Now().Add(-time.Hour))
-	if _, err := parseToken(oldSignIn); err != nil {
-		t.Fatalf("the sign-in from before should work before the lock: %v", err)
-	}
+	video := mustID(t, `INSERT INTO challenges (creator_id, prefix, subject) VALUES ($1, 'Show', 'a demo trick') RETURNING id`, seeded)
+	answerTo := mustID(t, `INSERT INTO challenges (creator_id, prefix, subject) VALUES ($1, 'Sing', 'a song') RETURNING id`, ownOld)
+	mustExec(t, `INSERT INTO challenge_responses (challenge_id, responder_id, video_url) VALUES ($1, $2, '')`, answerTo, toolMade)
+	mustExec(t, `INSERT INTO follows (follower_id, following_id) VALUES ($1, $2)`, seeded, ownOld)
 
-	if got := lockDemoAccounts(); got != 2 {
-		t.Errorf("locked %d demo accounts, want 2 (player1 and player2)", got)
-	}
-
-	if IsValidUser("player1", "pass1") {
-		t.Error("player1 still signs in with the password written in the public code")
-	}
-	if IsValidUser("player2", "pass2") {
-		t.Error("player2 (an old plain-text row) still signs in with its public password")
-	}
-	if plain, _, _ := passwordColumns(t, withPlain); plain != "" {
-		t.Errorf("player2's public password is still kept as plain text: %q", plain)
-	}
-	if _, err := parseToken(oldSignIn); err == nil {
-		t.Error("someone signed in as player1 before the lock is still signed in")
-	}
-
-	if !IsValidUser("player3", "player three's own password") {
-		t.Error("an account with a demo name but its own password was locked")
-	}
-	if _, _, changed := passwordColumns(t, ownPass); changed.Valid {
-		t.Error("an account with its own password was signed out")
-	}
-	if !IsValidUser("not_a_demo_9954", "pass1") {
-		t.Error("an account that is not a demo account was locked")
+	exists := func(id int) bool {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM users WHERE id = $1`, id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n == 1
 	}
 
-	if got := lockDemoAccounts(); got != 0 {
-		t.Errorf("a second start locked %d more; the first should have done them all", got)
+	if got := removeDemoAccounts(context.Background()); got != 4 {
+		t.Errorf("deleted %d demo accounts, want 4 (player1, maya, omar, player2)", got)
+	}
+	for _, id := range []int{seeded, toolMade, renamed, oldPlain} {
+		if exists(id) {
+			t.Errorf("demo account %d is still there", id)
+		}
+	}
+	for _, id := range []int{ownAccount, ownOld, notDemo} {
+		if !exists(id) {
+			t.Errorf("account %d is somebody's own, and was deleted", id)
+		}
+	}
+	if IsValidUser("player1", "pass1") || IsValidUser("maya", "password123") {
+		t.Error("a demo account still signs in with a password from the public code")
+	}
+	var left int
+	db.QueryRow(`SELECT COUNT(*) FROM challenges WHERE id = $1`, video).Scan(&left)
+	if left != 0 {
+		t.Error("the demo account's video is still there")
+	}
+	db.QueryRow(`SELECT COUNT(*) FROM challenge_responses WHERE challenge_id = $1`, answerTo).Scan(&left)
+	if left != 0 {
+		t.Error("the demo account's answer to a real person's post is still there")
+	}
+	db.QueryRow(`SELECT COUNT(*) FROM challenges WHERE id = $1`, answerTo).Scan(&left)
+	if left != 1 {
+		t.Error("a real person's post was deleted along with a demo account's answer to it")
+	}
+	db.QueryRow(`SELECT COUNT(*) FROM follows WHERE following_id = $1`, ownOld).Scan(&left)
+	if left != 0 {
+		t.Error("a real person is still followed by a deleted demo account")
 	}
 
-	// On a server for testing, nothing is locked.
-	t.Setenv("TEST_SERVER", "true")
-	mustExec(t, `UPDATE users SET password_hash = $1 WHERE id = $2`, fastHash(t, "pass1"), withHash)
-	if got := lockDemoAccounts(); got != 0 {
-		t.Errorf("on a server for testing, %d demo accounts were locked", got)
-	}
-	if !IsValidUser("player1", "pass1") {
-		t.Error("on a server for testing, player1 cannot sign in with its demo password")
+	if got := removeDemoAccounts(context.Background()); got != 0 {
+		t.Errorf("a second start deleted %d more; the first should have done them all", got)
 	}
 }
 

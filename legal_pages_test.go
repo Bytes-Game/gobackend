@@ -85,9 +85,25 @@ func TestLegalPages_ChildSafety(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("status %d", code)
 	}
-	for _, want := range []string{"child sexual abuse", "A child may be at risk", "cybercrime.gov.in", supportEmail, "13"} {
+	for _, want := range []string{"child sexual abuse", "A child may be at risk", "local emergency services", supportEmail, "13"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the child safety page does not say %q", want)
+		}
+	}
+}
+
+// The owner asked for no helpline numbers anywhere (TikTok's own pages give
+// none, only "local emergency services"): a number is right in one country
+// and wrong in the next.
+func TestLegalPages_GiveNoHelplineNumbers(t *testing.T) {
+	number := regexp.MustCompile(`(?i)\b(call|dial|helpline|childline)\b[^.<]{0,40}\b\d{3,}\b|\b(112|911|999|1098|14416)\b`)
+	for path := range legalPages() {
+		_, body, _ := get(t, path)
+		if body == "" {
+			t.Fatalf("%s is empty", path)
+		}
+		if m := number.FindString(body); m != "" {
+			t.Errorf("%s gives a helpline number: %q", path, m)
 		}
 	}
 }

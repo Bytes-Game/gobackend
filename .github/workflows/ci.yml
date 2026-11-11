@@ -94,9 +94,14 @@ jobs:
 
       # Race detector. CGO is available on Linux runners, so -race works
       # here even when developers on Windows machines can't run it locally.
+      #
+      # Fifteen minutes, not ten. On 9 November a run that passed took nine
+      # and a half: the suite has grown with every feature, and a limit that
+      # close fails a good change on a slow runner. A run that really hangs
+      # is still stopped.
       - name: go test -race
         run: go test -race -count=1 ./...
-        timeout-minutes: 10
+        timeout-minutes: 15
 
       # Every check staticcheck has, not the default subset.
       #

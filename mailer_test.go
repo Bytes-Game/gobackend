@@ -6,7 +6,6 @@ package main
 // plan blocks the email ports, and nothing said so anywhere.
 
 import (
-	"bytes"
 	"log"
 	"net"
 	"os"
@@ -69,7 +68,7 @@ func TestMail_ABlockedEmailPortIsCalledThat(t *testing.T) {
 
 func checkMailLog(t *testing.T) string {
 	t.Helper()
-	var logged bytes.Buffer
+	var logged lockedLog
 	log.SetOutput(&logged)
 	defer log.SetOutput(os.Stderr)
 	checkMailConfig()

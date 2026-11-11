@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -177,53 +178,10 @@ func TestAdminChanges_RefusedFromOtherWebsites(t *testing.T) {
 	}
 }
 
-// ─── the wipe ───────────────────────────────────────────────────────────
+// ─── no demo data, no wipe ──────────────────────────────────────────────
 
-func TestWipe_RefusedUnlessThisIsATestServer(t *testing.T) {
-	wiped := 0
-	prev := wipeAndReseed
-	wipeAndReseed = func() { wiped++ }
-	defer func() { wipeAndReseed = prev }()
-
-	for _, v := range []string{"", "false", "no", "0"} {
-		t.Setenv("TEST_SERVER", v)
-		rec := httptest.NewRecorder()
-		ReseedHandler(rec, httptest.NewRequest("POST", "/api/v1/admin/reseed", nil))
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("TEST_SERVER=%q: status %d, want 403", v, rec.Code)
-		}
-		if !strings.Contains(rec.Body.String(), "TEST_SERVER=true") {
-			t.Errorf("TEST_SERVER=%q: the refusal does not say how to allow it: %s", v, rec.Body.String())
-		}
-	}
-	if wiped != 0 {
-		t.Fatalf("the database was wiped %d times on a server that is not for testing", wiped)
-	}
-
-	t.Setenv("TEST_SERVER", "true")
-	rec := httptest.NewRecorder()
-	ReseedHandler(rec, httptest.NewRequest("POST", "/api/v1/admin/reseed", nil))
-	if rec.Code != http.StatusOK || wiped != 1 {
-		t.Errorf("on a server for testing: status %d, wiped %d times; want 200 and once", rec.Code, wiped)
-	}
-}
-
-func TestDemoData_OnlyOnATestServer(t *testing.T) {
-	t.Setenv("TEST_SERVER", "")
-	if shouldSeedDemoData(0) {
-		t.Error("an empty live database got demo data, with ten accounts whose passwords are public")
-	}
-	t.Setenv("TEST_SERVER", "true")
-	if !shouldSeedDemoData(0) {
-		t.Error("an empty database on a server for testing got no demo data")
-	}
-	if shouldSeedDemoData(3) {
-		t.Error("a database that already has accounts got demo data on top")
-	}
-}
-
-// The wires: the start-up uses the decision, the start-up runs the two
-// account jobs, and the wipe route is still the guarded handler.
+// The wires: the start-up runs the two account jobs once the cache is up,
+// and nothing that made or reloaded demo data is left.
 func TestSecurityFixes_AreWiredIn(t *testing.T) {
 	read := func(name string) string {
 		src, err := os.ReadFile(name)
@@ -232,22 +190,17 @@ func TestSecurityFixes_AreWiredIn(t *testing.T) {
 		}
 		return regexp.MustCompile(`(?m)^\s*//.*$`).ReplaceAllString(string(src), "")
 	}
-	database := read("database.go")
-	if body := funcBody(database, "func InitDatabase() error {"); !strings.Contains(body, "go startupAccountChecks()") {
-		t.Error("starting the database no longer runs the account checks (plain passwords, demo accounts)")
+	main := read("main.go")
+	redisUp := strings.Index(main, `gate.bringUp("valkey", InitRedis)`)
+	checksStart := strings.Index(main, "go startupAccountChecks()")
+	if redisUp < 0 || checksStart < redisUp {
+		t.Error("main.go does not run the account checks (plain passwords, demo accounts) after the cache is up")
 	}
-	if body := funcBody(database, "func seedIfEmpty() {"); !strings.Contains(body, "shouldSeedDemoData(") {
-		t.Error("the start-up no longer asks whether demo data is allowed")
-	}
-	checks := funcBody(read("leftover_passwords.go"), "func startupAccountChecks() {")
-	for _, want := range []string{"hashLeftoverPasswords()", "lockDemoAccounts()"} {
+	checks := funcBody(read("demo_accounts.go"), "func startupAccountChecks() {")
+	for _, want := range []string{"hashLeftoverPasswords()", "removeDemoAccounts(ctx)"} {
 		if !strings.Contains(checks, want) {
 			t.Errorf("startupAccountChecks no longer runs %s", want)
 		}
-	}
-	main := read("main.go")
-	if !strings.Contains(main, `"/admin/reseed", adminOnly(ReseedHandler)`) {
-		t.Error("the wipe route is not the guarded handler behind the admin sign-in")
 	}
 	if !strings.Contains(main, "r.Use(limitRequestBodies)") {
 		t.Error("the size limit is not applied to the server's routes")
@@ -258,6 +211,35 @@ func TestSecurityFixes_AreWiredIn(t *testing.T) {
 	}
 	if regexp.MustCompile(`got\s*[!=]=\s*want|want\s*[!=]=\s*got`).MatchString(worker) {
 		t.Error("the worker's key is (also) compared with == or !=, which stops at the first wrong character")
+	}
+}
+
+// No demo data and no wipe, anywhere in the server: no route, no loader,
+// no switch that could turn either back on. Read from the code with its
+// comments removed.
+func TestNoDemoDataOrWipeIsLeft(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) < 100 {
+		t.Fatalf("could not list the server's files: %v (%d found)", err, len(files))
+	}
+	gone := regexp.MustCompile(`TEST_SERVER|/admin/reseed|ReseedDatabase|seedIfEmpty|TRUNCATE TABLE`)
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := regexp.MustCompile(`(?m)^\s*//.*$`).ReplaceAllString(string(src), "")
+		if m := gone.FindString(code); m != "" {
+			t.Errorf("%s still has %q", f, m)
+		}
+	}
+	for _, dir := range []string{"cmd/seed", "cmd/mediaimport"} {
+		if _, err := os.Stat(dir); err == nil {
+			t.Errorf("%s is still there: it made demo accounts with a public password, or fed the tool that did", dir)
+		}
 	}
 }
 

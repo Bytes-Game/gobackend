@@ -81,8 +81,8 @@ func adminOnly(h http.HandlerFunc) http.HandlerFunc {
 //
 // The admin surface is not a minor one: /admin/diagnostics, /admin/errors and
 // /admin/feed-health expose user behaviour and operational internals, and
-// /admin/reseed DROPS AND REBUILDS THE DATABASE. Guessing this password is
-// not a read-only mistake.
+// /admin/reports can DELETE VIDEOS AND SUSPEND ACCOUNTS. Guessing this
+// password is not a read-only mistake.
 var weakAdminPasswords = map[string]bool{
 	"password":      true,
 	"password123":   true,
@@ -134,9 +134,9 @@ func checkAdminConfig() {
 	switch {
 	case weakAdminPasswords[strings.ToLower(pass)]:
 		log.Println("SECURITY WARNING: ADMIN_PASS is one of the most commonly guessed " +
-			"passwords. The admin surface can read user analytics and can WIPE AND " +
-			"RESEED THE DATABASE (/admin/reseed). Rotate it before this service takes " +
-			"real traffic.")
+			"passwords. The admin surface can read user analytics and can DELETE " +
+			"VIDEOS AND SUSPEND ACCOUNTS (/admin/reports). Rotate it before this service " +
+			"takes real traffic.")
 	case len(pass) < minAdminPassLen:
 		log.Printf("SECURITY WARNING: ADMIN_PASS is only %d characters. The admin gate "+
 			"has no lockout of its own, so short passwords are brute-forceable. Use at "+

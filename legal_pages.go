@@ -166,14 +166,14 @@ func childSafetyPage() legalPage {
 			})},
 			{Title: "What we do", Paras: paragraphs([]string{
 				"We remove the content, suspend the account, and keep what the law requires us to keep. " +
-					"We report child sexual abuse material and child exploitation to the police or to the " +
-					"National Cyber Crime Reporting Portal (cybercrime.gov.in), as Indian law requires, " +
-					"and to the authorities of other countries where their law requires it. We help the " +
-					"police with their investigations.",
+					"We report child sexual abuse material and child exploitation to the authority each " +
+					"country's law names: in India the police or the National Cyber Crime Reporting " +
+					"Portal, in the United States the National Center for Missing & Exploited Children, " +
+					"and the matching authority elsewhere. We help the police with their investigations.",
 			})},
 			{Title: "If a child is in danger now", Paras: paragraphs([]string{
-				"Call 112, or your country's emergency number. In India, Childline is 1098, any time. " +
-					"You can report child sexual abuse material at cybercrime.gov.in.",
+				"Contact your local emergency services straight away. A report to us is read later, " +
+					"and help should not wait for it.",
 			})},
 			{Title: "Contact", Paras: paragraphs([]string{
 				"Our child safety contact, for anyone, including the police and organisations that " +

@@ -8,7 +8,6 @@ package main
 // handler against a real database.
 
 import (
-	"bytes"
 	"log"
 	"os"
 	"strings"
@@ -118,7 +117,7 @@ func TestUsernames_TheLockComesOnAtStartOnceNoTwoNamesClash(t *testing.T) {
 	}
 	start := func() string {
 		t.Helper()
-		var buf bytes.Buffer
+		var buf lockedLog
 		log.SetOutput(&buf)
 		defer log.SetOutput(os.Stderr)
 		if err := runMigrations(); err != nil {

@@ -474,12 +474,16 @@ func main() {
 	gate.bringUp("database", InitDatabase)
 	gate.bringUp("valkey", InitRedis)
 	InitMeilisearch()
+	// No password kept as plain text, and no demo account (demo_accounts.go).
+	// In the background, and only now: deleting an account also clears what
+	// the cache and the search index hold for it.
+	go startupAccountChecks()
 	// Warn loudly (but don't crash) if the session-token signing key is missing,
 	// so it's noticed at boot rather than on the first failed login.
 	checkAuthConfig()
 	// Same idea for the admin surface: warn loudly at boot when the dashboard
 	// credentials are missing or are an obvious placeholder, rather than
-	// letting an unrotated dev password quietly guard /admin/reseed.
+	// letting an unrotated dev password quietly guard the admin pages.
 	checkAdminConfig()
 	// And for email: say how it is set up and whether it can get out, since
 	// otherwise the first sign of a broken setup is somebody locked out of
@@ -690,7 +694,6 @@ func main() {
 	api.HandleFunc("/suggestions/accepted", authed(SuggestionAcceptedHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/watch", authed(HandleWatchEvent)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/report", authed(HandleReportEvent)).Methods("POST", "OPTIONS")
-	api.HandleFunc("/admin/reseed", adminOnly(ReseedHandler)).Methods("POST", "OPTIONS")
 	// Reports: read and decide (moderation.go; the page is /admin/reports).
 	api.HandleFunc("/admin/reports", adminOnly(AdminOpenReportsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/reports/resolve", adminOnly(AdminResolveReportHandler)).Methods("POST", "OPTIONS")

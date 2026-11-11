@@ -213,7 +213,9 @@ plan, since the free one blocks the email ports), `GOOGLE_CLIENT_IDS`,
 `APPLE_CLIENT_IDS` and `ANDROID_PACKAGE_NAME` (Google and Apple sign-in),
 `APP_DOWNLOAD_URL` (the shared web pages) and `R2_PUBLIC_BASE_URL` (videos
 from media.flexete.com), plus the Cloudflare steps for the app's domain,
-flexete.com. And one setting that must stay OFF on the live server:
-`TEST_SERVER` (test_server.go), which allows the wipe and the demo
-accounts with public passwords. A new server setting the owner must fill
-in goes on that list the day it is added.
+flexete.com. A new server setting the owner must fill in goes on that list
+the day it is added.
+
+There is no demo data and no "wipe the database" route any more, on any
+server (`demo_accounts.go`). Do not add either back: the demo accounts'
+passwords were in the public code, and the wipe worked on the live server.

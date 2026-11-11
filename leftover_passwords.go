@@ -22,10 +22,10 @@ import "log"
 // takes about a tenth of a second, so a round is about twenty seconds.
 const leftoverBatch = 200
 
-// scramble is how the two start-up jobs scramble a password: hashPassword,
-// the same as every other. A variable only so their tests can use bcrypt's
-// fastest setting; at full strength, under the race detector, they took
-// half a minute of CI's ten.
+// scramble is how this job scrambles a password: hashPassword, the same
+// as every other. A variable only so its test can use bcrypt's fastest
+// setting; at full strength, under the race detector, it took half a
+// minute of CI's ten.
 var scramble = hashPassword
 
 // hashLeftoverPasswords scrambles every password still kept as plain text,
@@ -107,14 +107,4 @@ func hashLeftoverPasswords() (hashed, cleared int) {
 		log.Printf("passwords: %d kept as plain text are now scrambled, and %d plain copies beside scrambled ones are cleared; nobody was signed out", hashed, cleared)
 	}
 	return hashed, cleared
-}
-
-// startupAccountChecks runs, once the database is ready, the two jobs that
-// close old doors: no readable passwords, and no demo account that signs
-// in with a password from the public code. In that order, so a demo
-// account with a very old plain password is scrambled before it is
-// checked — though the check reads both places anyway.
-func startupAccountChecks() {
-	hashLeftoverPasswords()
-	lockDemoAccounts()
 }
