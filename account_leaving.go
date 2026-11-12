@@ -274,6 +274,9 @@ func accountPurgeRound(ctx context.Context) {
 	} else if n > 0 {
 		log.Printf("deleted %d account(s) for good: their 30 days were up", n)
 	}
+	// Sign-ups whose parent did not answer in time, or said no
+	// (parent_consent.go).
+	purgeExpiredPendingSignups()
 }
 
 // purgeDueAccounts deletes for good every account that asked to be deleted

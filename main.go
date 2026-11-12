@@ -78,6 +78,18 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 
 	// First, validate the user's credentials.
 	if !IsValidUser(creds.Username, creds.Password) {
+		// Not an account. A sign-up that is still waiting for a parent is
+		// not one either (parent_consent.go): when this is its username or
+		// email AND its password, say what it is waiting for. The password
+		// is checked first, so a guess learns nothing about who is waiting.
+		if db != nil {
+			waiting, err := pendingByLogin(creds.Username, creds.Password)
+			if !queryFailed("whether a sign-in is for a sign-up that is waiting for a parent",
+				"it is answered as a wrong username or password", err) && waiting != nil {
+				refusedWaiting(w, waiting)
+				return
+			}
+		}
 		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
 		log.Printf("Failed login attempt for user %s.", creds.Username)
 		return
@@ -773,6 +785,17 @@ func main() {
 	// anonymous-rate-limited via the "signup" action bucket).
 	r.HandleFunc("/signup", SignupHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/signup/available", UsernameAvailableHandler).Methods("GET", "OPTIONS")
+	// The ages for where the person is, and the country this server sees
+	// for them (age_rules.go, country.go).
+	r.HandleFunc("/signup/rules", SignupRulesHandler).Methods("GET", "OPTIONS")
+	// A parent's consent for a young person (parent_consent.go): the app
+	// sends the parent's email again or cancels; the parent answers on a
+	// web page, and can take the consent back on another.
+	r.HandleFunc("/signup/parent", ParentEmailHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/parent-consent", ParentConsentPageHandler).Methods("GET")
+	r.HandleFunc("/parent-consent", ParentConsentAnswerHandler).Methods("POST")
+	r.HandleFunc("/parent-consent/withdraw", ParentWithdrawPageHandler).Methods("GET")
+	r.HandleFunc("/parent-consent/withdraw", ParentWithdrawHandler).Methods("POST")
 	// Forgot password: a code by email, then a new password (password_reset.go).
 	r.HandleFunc("/password/forgot", ForgotPasswordHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/password/verify", VerifyResetCodeHandler).Methods("POST", "OPTIONS")

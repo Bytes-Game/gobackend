@@ -155,8 +155,12 @@ func childSafetyPage() legalPage {
 		Support: supportEmail,
 		Sections: []legalPageSection{
 			{Title: "Who can use Flexete", Paras: paragraphs([]string{
-				"Flexete is for people aged 13 and over. When we learn that someone under 13 has an " +
+				"Flexete is for people aged 13 and over, and 16 and over in Australia, Brazil, " +
+					"Indonesia and Malaysia. When we learn that someone under that age has an " +
 					"account, we delete it.",
+				"Anyone under 18 can have an account only after a parent or legal guardian has " +
+					"agreed. We email the parent a link; no account is made until they say yes, and " +
+					"they can close the account and delete everything in it at any time.",
 			})},
 			{Title: "Reporting it", Paras: paragraphs([]string{
 				"• On any video: tap More (⋯), then Report, then \"A child may be at risk\".",

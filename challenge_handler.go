@@ -140,6 +140,11 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	if measured {
 		go recordVideoDimensions("challenge", challenge.ID, dims)
 	}
+	// Where it was posted from, so the feed can show it first to people in
+	// the same country (country.go). Off the response path too.
+	if country, _ := countryOf(r); country != "" {
+		go stampCountry(challenge.ID, country)
+	}
 
 	// A challenge for friends: every friend it is for hears about it — all
 	// of them, or only the ones chosen. See friends_only.go.

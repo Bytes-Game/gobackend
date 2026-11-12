@@ -240,6 +240,10 @@ type ContentScore struct {
 	Topics        []string           `json:"topics,omitempty"`
 	Tags          []string           `json:"tags,omitempty"` // Creator's own words — see content_tags.go
 	EmotionVector map[string]float64 `json:"emotionVector"`  // "happy":0.5, "competitive":0.3
+	// Country is where the video was posted from (two capital letters), or
+	// failing that where its creator is; "" when neither is known. The feed
+	// prefers the viewer's own country a little — see country.go.
+	Country string `json:"country,omitempty"`
 	// === Creator info (denormalized for speed) ===
 	CreatorID        string  `json:"creatorId"`
 	CreatorLeague    string  `json:"creatorLeague"`
@@ -3231,14 +3235,15 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			u.wins, u.losses, c.created_at,
 			`+visibleAnswersOfC+`,
 			COALESCE(c.views, 0),
-			(SELECT COUNT(*) FROM challenge_likes WHERE challenge_id = c.id)
+			(SELECT COUNT(*) FROM challenge_likes WHERE challenge_id = c.id),
+			COALESCE(NULLIF(c.country, ''), u.country, '')
 			FROM challenges c
 			JOIN users u ON c.creator_id = u.id
 			WHERE c.id = $1`, contentID).Scan(
 			&subject, &prefix, &dbCategory, &creatorCategory, &dbEnergy, &emotionJSON, &tagsJSON,
 			&autoTagsJSON, &topicsJSON, &analysisJSON,
 			&creatorID, &league, &followers, &wins, &losses, &createdAt, &respCount,
-			&chViews, &chLikes); err != nil {
+			&chViews, &chLikes, &cs.Country); err != nil {
 			queryFailed("computeContentScore: could not read follows",
 				"carrying on as if the answer were empty", err)
 		}
@@ -3434,12 +3439,12 @@ func computeContentScore(contentID, contentType string) *ContentScore {
 			COALESCE(p.emotion_tags,'[]'::JSONB),
 			CAST(u.id AS TEXT), u.league,
 			(SELECT COUNT(*) FROM follows WHERE following_id = u.id),
-			u.wins, u.losses, p.created_at
+			u.wins, u.losses, p.created_at, u.country
 			FROM posts p
 			JOIN users u ON p.author_id = u.id
 			WHERE p.id = $1`, contentID).Scan(
 			&caption, &dbCategory, &dbEnergy, &emotionJSON,
-			&authorID, &league, &followers, &wins, &losses, &createdAt); err != nil {
+			&authorID, &league, &followers, &wins, &losses, &createdAt, &cs.Country); err != nil {
 			queryFailed("computeContentScore: could not read follows",
 				"carrying on as if the answer were empty", err)
 		}
@@ -5431,6 +5436,19 @@ func rankColdStartItems(userID string, items []HomeFeedItem) []HomeFeedItem {
 		item  HomeFeedItem
 		score float64
 	}
+	// Where the viewer is, and where each video is from: somebody new is
+	// shown their own country's videos a little sooner (country.go).
+	viewerIn := viewerCountry(userID)
+	var from map[string]string
+	if viewerIn != "" {
+		ids := make([]string, 0, len(items))
+		for _, it := range items {
+			if it.Challenge != nil {
+				ids = append(ids, it.Challenge.ID)
+			}
+		}
+		from = videoCountries(ids)
+	}
 	now := time.Now()
 	ranked := make([]scoredCold, 0, len(items))
 	for _, it := range items {
@@ -5447,6 +5465,7 @@ func rankColdStartItems(userID string, items []HomeFeedItem) []HomeFeedItem {
 			if interests[strings.ToLower(ch.Category)] {
 				s += 0.35
 			}
+			s += countryBonus(viewerIn, from[ch.ID])
 		}
 		ranked = append(ranked, scoredCold{it, s})
 	}
@@ -5871,6 +5890,10 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Where the viewer is, once for the page: a video made in the same
+	// country gains a little (country.go).
+	viewerIn := viewerCountry(userID)
+
 	// Step 6: Score each candidate
 	scored := make([]ScoredItem, 0, len(candidates))
 	for _, item := range candidates {
@@ -5884,6 +5907,10 @@ func SmartFeedHandler(w http.ResponseWriter, r *http.Request) {
 		cs := getContentScore(contentID, contentType)
 
 		score, breakdown := scoreForUser(cs, profile, session, followingSet, fofSet, watched)
+
+		// A video from the viewer's own country gains a little, never enough
+		// to lift a bad one over a good one from elsewhere (country.go).
+		score = addCountryBonus(score, breakdown, viewerIn, cs.Country)
 
 		// Two-tower cosine bonus: ± up to 0.20 for strong matches. Gated on
 		// having a warm user vector; cold users keep base scoring as-is.

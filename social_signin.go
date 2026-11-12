@@ -157,7 +157,7 @@ func suggestUsername(name, email string) string {
 	if len(base) < 3 {
 		base = "flexer"
 	}
-	if usernameProblem(base) == "" && !UserExists(base) {
+	if usernameProblem(base) == "" && !usernameTaken(base) {
 		return base
 	}
 	for i := 0; i < 6; i++ {
@@ -166,7 +166,7 @@ func suggestUsername(name, email string) string {
 			return ""
 		}
 		try := base + "_" + n.Add(n, big.NewInt(1000)).String()
-		if usernameProblem(try) == "" && !UserExists(try) {
+		if usernameProblem(try) == "" && !usernameTaken(try) {
 			return try
 		}
 	}
@@ -248,6 +248,18 @@ func socialSignIn(p *identityProvider) http.HandlerFunc {
 			}
 		}
 
+		// A sign-up with this Google or Apple account that is still waiting
+		// for a parent (parent_consent.go): not an account yet.
+		waiting, err := pendingBySocial(p.id, who.Subject)
+		if queryFailed("whether a "+p.name+" sign-up is waiting for a parent", "the sign-in is refused", err) {
+			http.Error(w, "Login temporarily unavailable", http.StatusInternalServerError)
+			return
+		}
+		if waiting != nil {
+			refusedWaiting(w, waiting)
+			return
+		}
+
 		// New here.
 		if who.Email != "" && emailTaken(who.Email) {
 			log.Printf("%s sign-in: new, but a password account already uses the email", p.name)
@@ -294,6 +306,9 @@ func SocialSignupHandler(w http.ResponseWriter, r *http.Request) {
 		FullName     string `json:"fullName"`
 		BirthDate    string `json:"birthDate"`
 		AcceptTerms  bool   `json:"acceptTerms"`
+		// A parent's or guardian's email: needed only under the consent
+		// age (age_rules.go).
+		ParentEmail string `json:"parentEmail"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&in); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -331,10 +346,22 @@ func SocialSignupHandler(w http.ResponseWriter, r *http.Request) {
 		writeFieldError(w, http.StatusBadRequest, refuse("username", why))
 		return
 	}
-	born, why := parseBirthDate(in.BirthDate, time.Now())
+	// The ages for where the person is (country.go, age_rules.go).
+	country, _ := countryOf(r)
+	rule := ageRuleFor(country)
+	now := time.Now()
+	born, why := parseBirthDate(in.BirthDate, now, rule)
 	if why != "" {
 		writeFieldError(w, http.StatusBadRequest, refuse("birthDate", why))
 		return
+	}
+	// Young enough to need a parent: who to ask.
+	parentEmail := ""
+	if ageOn(born, now) < rule.ConsentAge {
+		if parentEmail, why = parentEmailProblem(in.ParentEmail, t.Email); why != "" {
+			writeFieldError(w, http.StatusBadRequest, refuse("parentEmail", why))
+			return
+		}
 	}
 	if !in.AcceptTerms {
 		writeFieldError(w, http.StatusBadRequest,
@@ -344,7 +371,20 @@ func SocialSignupHandler(w http.ResponseWriter, r *http.Request) {
 	if fullName == "" {
 		fullName = username
 	}
-	if UserExists(username) {
+	// A sign-up waiting for a parent holds its username and its email. One
+	// made with this same Google or Apple account is this person's own
+	// earlier try, and makes way.
+	own, err := pendingBySocial(t.Provider, t.Subject)
+	if queryFailed("whether a "+p.name+" sign-up is already waiting for a parent", "the sign-up is refused", err) {
+		http.Error(w, "signup failed", http.StatusInternalServerError)
+		return
+	}
+	var ownIDs []int
+	if own != nil {
+		ownIDs = []int{own.id}
+	}
+	nameHeld, emailHeld := pendingHolds(username, t.Email, ownIDs)
+	if UserExists(username) || nameHeld {
 		writeFieldError(w, http.StatusConflict, refuse("username", "That username is taken."))
 		return
 	}
@@ -363,7 +403,7 @@ func SocialSignupHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "signup failed", http.StatusInternalServerError)
 		return
 	}
-	if t.Email != "" && emailTaken(t.Email) {
+	if t.Email != "" && (emailTaken(t.Email) || emailHeld) {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error": "An account already uses this email. Sign in with your username or email " +
 				"and your password.",
@@ -372,7 +412,17 @@ func SocialSignupHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := createSocialAccount(r, t, username, fullName, born)
+	// Under the consent age: no account yet. The sign-up waits, and the
+	// parent is asked (parent_consent.go).
+	if parentEmail != "" {
+		startParentConsent(w, r, pendingSignup{
+			username: username, fullName: fullName, email: t.Email, birthDate: born,
+			country: country, provider: t.Provider, subject: t.Subject, parentEmail: parentEmail,
+		}, ownIDs)
+		return
+	}
+
+	id, err := createSocialAccount(r, t, username, fullName, born, country)
 	if err != nil {
 		var pqErr *pq.Error
 		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
@@ -401,7 +451,7 @@ func SocialSignupHandler(w http.ResponseWriter, r *http.Request) {
 
 // createSocialAccount makes the account and joins it to the sign-in, both
 // or neither.
-func createSocialAccount(r *http.Request, t *signupTicketClaims, username, fullName string, born time.Time) (string, error) {
+func createSocialAccount(r *http.Request, t *signupTicketClaims, username, fullName string, born time.Time, country string) (string, error) {
 	tx, err := db.BeginTx(r.Context(), nil)
 	if err != nil {
 		return "", err
@@ -412,10 +462,10 @@ func createSocialAccount(r *http.Request, t *signupTicketClaims, username, fullN
 	// No password: '' in both columns, which IsValidUser never accepts.
 	if err := tx.QueryRowContext(r.Context(), `
 		INSERT INTO users (username, password, password_hash, full_name, email,
-		                   birth_date, terms_accepted_at, wins, losses, league)
-		VALUES ($1, '', '', $2, $3, $4, NOW(), 0, 0, 'Bronze')
+		                   birth_date, terms_accepted_at, wins, losses, league, country)
+		VALUES ($1, '', '', $2, $3, $4, NOW(), 0, 0, 'Bronze', $5)
 		RETURNING CAST(id AS TEXT)`,
-		username, fullName, email, born).Scan(&id); err != nil {
+		username, fullName, email, born, country).Scan(&id); err != nil {
 		return "", err
 	}
 	if _, err := tx.ExecContext(r.Context(), `

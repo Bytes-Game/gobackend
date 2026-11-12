@@ -168,6 +168,22 @@ That is the only check that catches this class, and it takes a minute.
 
 ---
 
+## Countries and ages
+
+`age_rules.go` holds one strict rule for everywhere (13 to join, a parent's
+consent under 18) and a short list of countries whose law is stricter (16 to
+join). A country is only ever added to make it stricter:
+`TestAgeRules_NoCountryIsWeakerThanTheUsualRule` fails otherwise. When a
+country changes its law, add a line there, say the same in the app's
+`legal_texts.dart`, and run the legal tool below.
+
+The country comes from the network header first (`CF-IPCountry`), then from
+the app's own `X-Device-Country`. `GET /signup/rules` answers with the
+country the server sees for the caller: open it in a browser after a deploy
+to check the host is passing the header ("source" should say "network").
+
+---
+
 ## Two systems build the schema
 
 `runMigrations()` in `database.go` re-runs `CREATE TABLE IF NOT EXISTS` and
@@ -211,10 +227,15 @@ It includes everything the server needs set on Render: `RESEND_API_KEY`
 and `MAIL_FROM` (forgot password; `SMTP_*` instead works only on a paid
 plan, since the free one blocks the email ports), `GOOGLE_CLIENT_IDS`,
 `APPLE_CLIENT_IDS` and `ANDROID_PACKAGE_NAME` (Google and Apple sign-in),
-`APP_DOWNLOAD_URL` (the shared web pages) and `R2_PUBLIC_BASE_URL` (videos
-from media.flexete.com), plus the Cloudflare steps for the app's domain,
-flexete.com. A new server setting the owner must fill in goes on that list
-the day it is added.
+`APP_DOWNLOAD_URL` (the shared web pages), `R2_PUBLIC_BASE_URL` (videos
+from media.flexete.com) and `PUBLIC_BASE_URL` (the address in the links
+emailed to parents, once flexete.com points at the server), plus the
+Cloudflare steps for the app's domain, flexete.com. A new server setting the
+owner must fill in goes on that list the day it is added.
+
+Email is needed for more than forgotten passwords now: somebody under 18
+gets no account until a parent agrees by an emailed link
+(`parent_consent.go`). Without email set up, nobody under 18 can join.
 
 There is no demo data and no "wipe the database" route any more, on any
 server (`demo_accounts.go`). Do not add either back: the demo accounts'

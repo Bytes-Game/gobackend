@@ -118,6 +118,14 @@ var actionLimitTable = map[string]actionLimitConfig{
 	"password_reset_ip":  {tokensPerSecond: 10.0 / 3600, burst: 10},
 	"password_reset_try": {tokensPerSecond: 30.0 / 3600, burst: 10},
 	"password_reset":     {tokensPerSecond: 5.0 / 3600, burst: 5},
+	// A parent's consent (parent_consent.go). Asking for the parent's
+	// email again, or cancelling: 20 an hour per internet address. The
+	// parent's own answers: 30 an hour per address. And however many
+	// sign-ups name it, one parent's address is emailed at most 6 times a
+	// day, so this cannot be used to fill a stranger's inbox.
+	"parent_email":   {tokensPerSecond: 20.0 / 3600, burst: 10},
+	"parent_answer":  {tokensPerSecond: 30.0 / 3600, burst: 15},
+	"parent_address": {tokensPerSecond: 6.0 / 86400, burst: 6},
 }
 
 // actionLimiterRegistry holds one rateLimiter per action key. Created

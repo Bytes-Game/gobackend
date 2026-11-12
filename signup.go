@@ -30,18 +30,25 @@ type signupRequest struct {
 	Email       string `json:"email"`
 	BirthDate   string `json:"birthDate"` // YYYY-MM-DD
 	AcceptTerms bool   `json:"acceptTerms"`
+	// ParentEmail is a parent's or guardian's email. Needed only when the
+	// date of birth is under the consent age (age_rules.go).
+	ParentEmail string `json:"parentEmail"`
 }
 
 // newAccount is a sign-up that passed every rule, ready to store.
 type newAccount struct {
 	username, password, fullName, email string
 	birthDate                           time.Time
+	// parentEmail is set when a parent must agree before the account is
+	// made (parent_consent.go), and is who to ask.
+	parentEmail string
 }
 
 // checkSignup applies every rule in account_rules.go to a sign-up, in the
-// order the form shows them, and says which box is wrong first. [now] is
-// passed in so tests can fix the day.
-func checkSignup(in signupRequest, now time.Time) (newAccount, *fieldError) {
+// order the form shows them, and says which box is wrong first. [rule] is
+// the ages for where the person is (age_rules.go). [now] is passed in so
+// tests can fix the day.
+func checkSignup(in signupRequest, now time.Time, rule ageRule) (newAccount, *fieldError) {
 	username := strings.ToLower(strings.TrimSpace(in.Username))
 	fullName, why := cleanFullName(in.FullName)
 	if why != "" {
@@ -54,9 +61,16 @@ func checkSignup(in signupRequest, now time.Time) (newAccount, *fieldError) {
 	if why != "" {
 		return newAccount{}, refuse("email", why)
 	}
-	born, why := parseBirthDate(in.BirthDate, now)
+	born, why := parseBirthDate(in.BirthDate, now, rule)
 	if why != "" {
 		return newAccount{}, refuse("birthDate", why)
+	}
+	// Young enough to need a parent: who to ask.
+	parentEmail := ""
+	if ageOn(born, now) < rule.ConsentAge {
+		if parentEmail, why = parentEmailProblem(in.ParentEmail, email); why != "" {
+			return newAccount{}, refuse("parentEmail", why)
+		}
 	}
 	if why := passwordProblem(in.Password, username); why != "" {
 		return newAccount{}, refuse("password", why)
@@ -68,7 +82,7 @@ func checkSignup(in signupRequest, now time.Time) (newAccount, *fieldError) {
 		fullName = username
 	}
 	return newAccount{username: username, password: in.Password, fullName: fullName,
-		email: email, birthDate: born}, nil
+		email: email, birthDate: born, parentEmail: parentEmail}, nil
 }
 
 // writeFieldError sends a refusal the form can put under the right box.
@@ -97,6 +111,10 @@ func emailTaken(email string) bool {
 // Creates the account and signs the person in: the answer has the same
 // shape as /login ({user, token, allUsers}), so the app's next steps are
 // the same for both. A refusal says which box is wrong ({field, error}).
+//
+// Somebody under the consent age where they are (age_rules.go) gets no
+// account yet: 202 {"parentConsentPending": true, "parentEmail", "ticket"},
+// and the account is made when their parent agrees (parent_consent.go).
 func SignupHandler(w http.ResponseWriter, r *http.Request) {
 	if db == nil {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
@@ -122,18 +140,33 @@ func SignupHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	acct, bad := checkSignup(in, time.Now())
+	// The rules for where the person is: how old they must be, and under
+	// which age a parent must agree first (country.go, age_rules.go).
+	country, _ := countryOf(r)
+	acct, bad := checkSignup(in, time.Now(), ageRuleFor(country))
 	if bad != nil {
 		writeFieldError(w, http.StatusBadRequest, bad)
 		return
 	}
-	if UserExists(acct.username) {
+	// A sign-up of their own that is still waiting for a parent makes way:
+	// signing up again is how a wrong parent's address is put right.
+	var own []int
+	if acct.parentEmail != "" {
+		own = ownPendingSignups(acct.username, acct.email, acct.password)
+	}
+	nameHeld, emailHeld := pendingHolds(acct.username, acct.email, own)
+	if UserExists(acct.username) || nameHeld {
 		writeFieldError(w, http.StatusConflict, refuse("username", "That username is taken."))
 		return
 	}
 	if emailTaken(acct.email) {
 		writeFieldError(w, http.StatusConflict,
 			refuse("email", "An account already uses this email. Try signing in."))
+		return
+	}
+	if emailHeld {
+		writeFieldError(w, http.StatusConflict, refuse("email",
+			"A sign-up with this email is waiting for a parent's answer. Sign in to send their email again."))
 		return
 	}
 
@@ -143,14 +176,26 @@ func SignupHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "signup failed", http.StatusInternalServerError)
 		return
 	}
+
+	// Under the consent age: no account yet. The sign-up waits, and the
+	// parent is asked (parent_consent.go).
+	if acct.parentEmail != "" {
+		startParentConsent(w, r, pendingSignup{
+			username: acct.username, passwordHash: hash, fullName: acct.fullName,
+			email: acct.email, birthDate: acct.birthDate, country: country,
+			parentEmail: acct.parentEmail,
+		}, own)
+		return
+	}
+
 	// The plaintext password column stays '' — bcrypt only, from day one.
 	var id string
 	err = db.QueryRow(`
 		INSERT INTO users (username, password, password_hash, full_name, email,
-		                   birth_date, terms_accepted_at, wins, losses, league)
-		VALUES ($1, '', $2, $3, $4, $5, NOW(), 0, 0, 'Bronze')
+		                   birth_date, terms_accepted_at, wins, losses, league, country)
+		VALUES ($1, '', $2, $3, $4, $5, NOW(), 0, 0, 'Bronze', $6)
 		RETURNING CAST(id AS TEXT)`,
-		acct.username, hash, acct.fullName, acct.email, acct.birthDate).Scan(&id)
+		acct.username, hash, acct.fullName, acct.email, acct.birthDate, country).Scan(&id)
 	if err != nil {
 		// Two sign-ups racing for one name or one email land here.
 		// Anything else is the server's problem, not the person's, and is
@@ -188,15 +233,7 @@ func welcomeNewAccount(w http.ResponseWriter, id, username string) {
 		return
 	}
 
-	// A name can have had an owner before: one deleted for good, or one
-	// who changed theirs. Nothing left waiting under it was meant for this
-	// account (username_change.go).
-	if rdb != nil {
-		if err := rdb.Del(rctx, storedNotificationsKey(username)).Err(); err != nil {
-			log.Printf("sign-up %q: notifications left under the name by its last owner could not be cleared: %v",
-				username, err)
-		}
-	}
+	forgetNameLeftovers(username)
 
 	user, _ := GetUserByUsername(username)
 	go IndexUser(user) // searchable immediately
@@ -210,6 +247,20 @@ func welcomeNewAccount(w http.ResponseWriter, id, username string) {
 	})
 }
 
+// forgetNameLeftovers clears what is left waiting under a username that a
+// new account has just taken. A name can have had an owner before: one
+// deleted for good, or one who changed theirs. Nothing left under it was
+// meant for the new account (username_change.go).
+func forgetNameLeftovers(username string) {
+	if rdb == nil {
+		return
+	}
+	if err := rdb.Del(rctx, storedNotificationsKey(username)).Err(); err != nil {
+		log.Printf("sign-up %q: notifications left under the name by its last owner could not be cleared: %v",
+			username, err)
+	}
+}
+
 // UsernameAvailableHandler — GET /signup/available?username=x.
 // Powers the form's live check: whether the name is allowed, whether it is
 // free, and if not, why, in words for the person typing.
@@ -217,7 +268,7 @@ func UsernameAvailableHandler(w http.ResponseWriter, r *http.Request) {
 	name := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("username")))
 	why := usernameProblem(name)
 	valid := why == ""
-	available := valid && db != nil && !UserExists(name)
+	available := valid && db != nil && !usernameTaken(name)
 	if valid && !available {
 		why = "That username is taken."
 	}

@@ -291,6 +291,8 @@ do rather than by folder.
 |---|---|
 | `main.go` | Routes, CORS, the global per-IP rate limiter, startup, graceful shutdown. |
 | `auth.go`, `signup.go`, `password.go`, `totp.go` | Sessions, registration, bcrypt, two-factor. |
+| `country.go`, `age_rules.go` | Which country a request is from; the ages for joining there; the feed's small lift for videos from the viewer's own country. |
+| `parent_consent.go` | Somebody under 18 gets no account until a parent agrees: the email, the parent's web page, the record of the consent, and the link that takes it back. |
 | `admin_auth.go`, `admin_*.go` | The admin dashboard and its Basic-Auth gate. |
 | `action_limits.go` | Per-user, per-action rate limits (follow, comment, upload, login…). |
 | `database.go` | Connection pool, baseline schema, queries. Large. |

@@ -1,10 +1,10 @@
 {
- "updated": "9 November 2026",
+ "updated": "12 November 2026",
  "terms": {
   "title": "Terms of Service",
   "intro": "These terms are the agreement between you and Flexete (\"Flexete\", \"we\", \"us\") for using the Flexete app, its website pages and its services (together, the \"Service\"). Please read them. By creating an account or using the Service, you agree to them.",
   "summary": [
-   "You must be at least 13 to use Flexete.",
+   "You must be at least 13 to use Flexete, and 16 in some countries. If you are under 18, a parent or guardian must agree first.",
    "You own what you post. You let us show it on Flexete so the Service can work.",
    "Play fair: no fake accounts, no bought votes, likes or followers.",
    "Follow our Community Guidelines. We may remove content or accounts that break them.",
@@ -14,7 +14,9 @@
    {
     "title": "Who can use Flexete",
     "body": [
-     "You must be at least 13 years old to create an account. If you are under the age of adulthood where you live, you need a parent or guardian to agree to these terms with you.",
+     "You must be at least 13 years old to create an account. Where the law of your country sets a higher age, that age applies: 16 in Australia, Brazil, Indonesia and Malaysia.",
+     "If you are under 18, you can have an account only once your parent or legal guardian has agreed. We email them a link. They read what Flexete is and what it keeps about you, and say yes or no. Until they say yes, no account is made. If they say no, or do not answer within 7 days, what you entered is deleted.",
+     "A parent or guardian who agreed can change their mind at any time. The email confirming their answer has a link that closes the account and deletes everything in it, and they can also write to support@flexete.com.",
      "You must give your real date of birth and an email address you use. We use your date of birth only to check your age, and we never show it or your email to anyone.",
      "You cannot use Flexete if you have been banned from it before, or if the law where you live does not allow it."
     ]
@@ -115,6 +117,17 @@
     ]
    },
    {
+    "title": "The law that applies, and where you live",
+    "body": [
+     "Flexete is run from India, and these terms are governed by the laws of India.",
+     "If you use Flexete as a consumer in another country, you keep every protection the law of your own country gives you and that an agreement cannot take away, and you may bring a claim in the courts of your own country where that law says you can.",
+     "European Union, United Kingdom and Switzerland: nothing in these terms limits our responsibility for death or injury caused by our carelessness, for fraud, or for anything else the law does not let us limit. People in the European Union can also use the European Commission's online dispute resolution service.",
+     "Australia: nothing in these terms takes away the guarantees the Australian Consumer Law gives you.",
+     "United States: if a part of these terms cannot be enforced in your state, the rest still applies.",
+     "What our Privacy Policy says for each country is part of how we keep these terms."
+    ]
+   },
+   {
     "title": "Contact",
     "body": [
      "Questions about these terms: support@flexete.com."
@@ -131,6 +144,7 @@
    "Your email and date of birth are private. Nobody else sees them.",
    "We use what you watch to pick videos for you. You can clear your watch history any time.",
    "Passwords and reset codes are stored scrambled, never as typed.",
+   "If you are under 18, a parent or guardian must agree before you have an account, and can close it at any time.",
    "Delete your account and everything in it is gone after 30 days."
   ],
   "sections": [
@@ -143,7 +157,8 @@
      "• Messages and calls: the messages you send, and the fact that a call happened, so a missed call can be shown. Calls themselves are not recorded.",
      "• Reports and feedback: what you tell us when you report a video or a problem.",
      "• Interests: the kinds of videos you pick when you join.",
-     "• Google or Apple: if you sign in with one of them, the name and email address they share with us, and the id they give your account. We never see your Google or Apple password."
+     "• Google or Apple: if you sign in with one of them, the name and email address they share with us, and the id they give your account. We never see your Google or Apple password.",
+     "• If you are under 18: your parent's or guardian's email address, so we can ask them. When they answer, we keep a record that they agreed: their name, whether they are your parent or your guardian, the year they were born, and when and from which internet address and country they answered."
     ]
    },
    {
@@ -151,10 +166,11 @@
     "body": [
      "• Activity: which videos you watch and for how long, what you tap, like, share and vote for, and who you follow and block.",
      "• Device and connection: what kind of video your phone can play smoothly, the app version, and your IP address.",
+     "• Your country: worked out from your internet connection, or failing that from the region your phone is set to. Only the country, never where in it. We use it to apply the rules of your country, such as the age for joining, and to show you more videos made in your country. A video you post is marked with the country you posted it from.",
      "• Notifications: a token from your phone that lets us send you notifications.",
      "• Crash reports: when the app crashes or something fails, a report of what went wrong, with your phone's model and system version, so we can fix it.",
      "• Camera, microphone and photos: used only when you record, call, or pick something to post. We receive only what you choose to post or send.",
-     "We do not collect your phone number, your contacts or your location."
+     "We do not collect your phone number, your contacts or your precise location."
     ]
    },
    {
@@ -163,7 +179,8 @@
      "• To run Flexete: your account, profile, posts, battles, votes, leagues, messages and calls.",
      "• To pick videos for you: your For You feed is chosen from what you and people like you watch and enjoy.",
      "• To keep Flexete safe and fair: checking reports, spotting fake votes and spam, limiting sign-in attempts, and protecting accounts.",
-     "• To talk to you: notifications you have switched on, and emails about your account, such as a password reset code.",
+     "• To follow the law where you are: checking that you are old enough to join, and asking a parent or guardian when the law says one must agree.",
+     "• To talk to you: notifications you have switched on, and emails about your account, such as a password reset code. If you are under 18, we also email your parent or guardian to ask for their permission and to confirm their answer.",
      "• To fix and improve the app: crash reports and usage numbers show us what breaks and what works."
     ]
    },
@@ -185,7 +202,7 @@
      "• Cloudflare, which stores and delivers videos and photos;",
      "• Google Firebase, to deliver notifications to your phone;",
      "• Sentry, to receive crash reports;",
-     "• an email service, to send password reset codes;",
+     "• an email service, to send password reset codes and the emails to a parent or guardian;",
      "• Google or Apple, only if you choose to sign in with them.",
      "We may also share information when the law requires it, to protect someone's safety, or as part of a sale or merger of Flexete, in which case this policy would continue to protect it."
     ]
@@ -196,6 +213,8 @@
      "• Detailed watch activity: about 30 days. After that it is folded into a summary of what you like, and the detail is deleted.",
      "• Your content: until you delete it, or delete your account.",
      "• Password reset codes: 15 minutes, or until used.",
+     "• A sign-up waiting for a parent or guardian: 7 days at most. If they say no, 1 day. Then it is deleted. You can also cancel it yourself, which deletes it at once.",
+     "• The record that a parent or guardian agreed: as long as the account exists. It is deleted with the account.",
      "• Your account: until you delete it. It is then hidden at once and deleted for good, with everything in it, after 30 days.",
      "Some records may be kept longer where the law requires it, or to deal with abuse."
     ]
@@ -214,15 +233,30 @@
     ]
    },
    {
-    "title": "Children",
+    "title": "Children and young people",
     "body": [
-     "Flexete is not for children under 13, and we do not knowingly collect their information. If we learn that someone under 13 has an account, we delete it. If you think a child is using Flexete, tell us at privacy@flexete.com."
+     "Flexete is not for children under 13, or under 16 in Australia, Brazil, Indonesia and Malaysia, and we do not knowingly collect their information. If we learn that someone under that age has an account, we delete it. If you think a child is using Flexete, tell us at privacy@flexete.com.",
+     "Anyone under 18 can have an account only after a parent or legal guardian has agreed. We ask them by email, with a link to a page that explains what Flexete is and what it keeps. This checks that an adult with their own email address agreed. It does not check identity documents.",
+     "A parent or guardian can, at any time: close the young person's account and delete everything in it, with the link in the email we sent them; or write to privacy@flexete.com to see what we keep about the young person, or to have it corrected.",
+     "We do not show advertisements to anyone, and we never sell or share a young person's information for advertising. What a young person watches is used only to choose videos for them and to keep Flexete safe."
     ]
    },
    {
     "title": "Information across borders",
     "body": [
-     "The companies that help run Flexete may store and process information in other countries. When they do, we make sure it stays protected as this policy describes."
+     "Flexete is run from India. The companies that help run it store and process information in other countries, including the United States. When they do, we make sure it stays protected as this policy describes, using the agreements the law asks for."
+    ]
+   },
+   {
+    "title": "Where you live",
+    "body": [
+     "The rights in \"Your choices and rights\" are for everyone, wherever you live. To use any of them, write to privacy@flexete.com. We answer within 30 days, and sooner where your law says so. We never treat you worse for using a right. Some countries add more:",
+     "India. Under the Digital Personal Data Protection Act, 2023, you can ask what we hold about you and how it is used, have it corrected, completed or erased, take back a consent you gave, and name another person to use these rights for you if you die or cannot act. Complaints go first to our Grievance Officer at grievance@flexete.com; if you are not satisfied, you can then complain to the Data Protection Board of India. For anyone under 18 we ask a parent or guardian first, as described above.",
+     "European Economic Area, United Kingdom and Switzerland. We use your information on these grounds: to provide the Service you signed up for (your account, posts, battles and messages); our legitimate interests in keeping Flexete safe, fixing it, and choosing videos for you; your consent, or a parent's or guardian's, where we ask for it, such as notifications; and the law, where it requires something of us. You can ask to see your information, correct it, erase it, limit how it is used, take it with you, object to a use, and take back a consent. You can complain to the data protection authority where you live (in the United Kingdom, the Information Commissioner's Office). When information leaves your region, it is protected by standard contractual clauses or another safeguard the law accepts.",
+     "United States. We do not sell your personal information, and we do not share it for advertising based on what you do on other apps or sites. Depending on your state, you can ask to know what we hold, to get a copy, to correct it, and to delete it, and you may appeal our answer by writing to privacy@flexete.com. If you are under 18, you can remove anything you posted by deleting it in the app. Flexete is not for children under 13, and we do not knowingly collect their information.",
+     "Brazil. Under the Lei Geral de Proteção de Dados, you can ask us to confirm that we hold your information, to see it, to correct it, to make it anonymous, block or delete it where it is not needed, to take it with you, to tell you who we share it with, and to take back a consent. You can complain to the Autoridade Nacional de Proteção de Dados.",
+     "Australia. You can ask to see and correct the information we hold about you, and you can complain to the Office of the Australian Information Commissioner.",
+     "Other countries. If the law where you live gives you rights that are not listed here, you have them with us too."
     ]
    },
    {
@@ -278,7 +312,7 @@
    {
     "title": "Young people",
     "body": [
-     "Accounts are for people 13 and over. Anything that sexualises, endangers or exploits young people is never allowed, is removed, and is reported to the authorities."
+     "Accounts are for people 13 and over, and 16 and over in some countries. Anyone under 18 needs a parent or guardian to agree first. Anything that sexualises, endangers or exploits young people is never allowed, is removed, and is reported to the authorities."
     ]
    },
    {
