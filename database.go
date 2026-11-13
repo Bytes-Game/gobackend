@@ -2847,6 +2847,13 @@ func GetSavedChallenges(userID string) []Challenge {
 // Chat Message Operations
 // ---------------------------------------------------------------------------
 
+// chatRefusal is a "no" the sender is told in its own words: the message
+// is not theirs, is gone, or can no longer be edited. Any other error from
+// the two functions below is the database's, and stays in the log.
+type chatRefusal string
+
+func (e chatRefusal) Error() string { return string(e) }
+
 // EditChatMessage updates the text of a message (only by sender, within 15 minutes).
 func EditChatMessage(msgID int, senderID int, newText string) error {
 	result, err := db.Exec(
@@ -2861,7 +2868,7 @@ func EditChatMessage(msgID int, senderID int, newText string) error {
 	}
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
-		return fmt.Errorf("message not found, not yours, a voice message, or edit window expired (15 min)")
+		return chatRefusal("message not found, not yours, a voice message, or edit window expired (15 min)")
 	}
 	return nil
 }
@@ -2887,7 +2894,7 @@ func DeleteChatMessage(msgID int, senderID int) error {
 		msgID, senderID,
 	).Scan(&oldURL)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("message not found or not yours")
+		return chatRefusal("message not found or not yours")
 	}
 	if err != nil {
 		return err

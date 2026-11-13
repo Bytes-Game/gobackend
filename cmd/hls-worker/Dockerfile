@@ -58,7 +58,7 @@ ARG UNDERSTAND_MODEL_FILE=Qwen3VL-4B-Instruct-Q4_K_M.gguf
 ARG UNDERSTAND_PROJECTOR_FILE=mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf
 
 # ────────────── the worker itself ──────────────
-FROM golang:1.25-bookworm AS worker
+FROM golang:1.27-bookworm AS worker
 
 WORKDIR /src
 # Module downloads in their own layer: go.sum changes far less often than

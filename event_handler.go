@@ -22,12 +22,35 @@ func HandleFollowEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The follower is whoever the token says it is — never trust the body.
+	// Their name too: the notification says "X started following you", and
+	// X used to be whatever name the caller typed, so anybody could send a
+	// follow notice that looked as if it came from somebody else.
 	payload.FollowerID = authUserID(r)
+	payload.FollowerUsername = authUsername(r)
 
 	// Per-user follow rate-limit. Catches follow-bombing without
 	// blocking organic follow flurries (burst is 5 in actionLimitTable).
 	if !allowAction(payload.FollowerID, "follow") {
 		writeRateLimited(w, "follow")
+		return
+	}
+
+	// Who is being followed, worked out once, here: the account the id (or,
+	// for an older app, the name) points at. Everything after this uses
+	// that one account. The id and the name used to be read separately, so
+	// a caller could follow one person and have the notice sent to another.
+	followingID, err := resolveUserID(payload.FollowingID, payload.FollowingUsername)
+	if err != nil {
+		http.Error(w, "That account doesn't exist.", http.StatusNotFound)
+		return
+	}
+	payload.FollowingID = strconv.Itoa(followingID)
+	if payload.FollowingUsername, err = currentUsername(payload.FollowingID); err != nil {
+		http.Error(w, "That account doesn't exist.", http.StatusNotFound)
+		return
+	}
+	if payload.FollowingID == payload.FollowerID {
+		http.Error(w, "You can't follow yourself.", http.StatusBadRequest)
 		return
 	}
 
@@ -42,7 +65,8 @@ func HandleFollowEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := ProcessFollowEvent(payload); err != nil {
+	created, requested, err := ProcessFollowEvent(payload)
+	if err != nil {
 		// Across a block: said plainly, with a reason the app can act on.
 		switch {
 		case errors.Is(err, errYouBlocked):
@@ -56,13 +80,29 @@ func HandleFollowEvent(w http.ResponseWriter, r *http.Request) {
 				"reason": "unavailable",
 			})
 		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			serverFault(w, "following "+payload.FollowingUsername, err)
 		}
 		return
 	}
 
-	// After successfully processing the follow event, send a notification.
-	go SendFollowNotification(payload)
+	// A private account: nothing is followed yet. They are asked, and the
+	// app shows "Requested" (follow_requests.go).
+	if requested {
+		if created {
+			go SendFollowRequestNotification(payload)
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"requested": true,
+			"message":   "Requested. They'll see your request.",
+		})
+		return
+	}
+
+	// Told once, when the follow is new: following somebody you already
+	// follow is not news.
+	if created {
+		go SendFollowNotification(payload)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -92,7 +132,7 @@ func HandleUnfollowEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := ProcessUnfollowEvent(payload); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverFault(w, "unfollowing", err)
 		return
 	}
 
@@ -136,7 +176,7 @@ func HandleWatchEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := RecordWatchEvent(payload); err != nil {
-		http.Error(w, "Failed to record watch event: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "recording a watch event", err)
 		return
 	}
 

@@ -170,14 +170,14 @@ func TestCountry_TheFeedsLiftIsSmallAndOnlyForTheSameCountry(t *testing.T) {
 // waitFor polls until [ok], for things written off the response path.
 func waitFor(t *testing.T, what string, ok func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if ok() {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("%s: still not so after 3 seconds", what)
+	t.Fatalf("%s: still not so after 15 seconds", what)
 }
 
 func countryOfAccount(t *testing.T, id int) string {

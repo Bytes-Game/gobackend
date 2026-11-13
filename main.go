@@ -155,7 +155,12 @@ func GetUserHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
-	showUserTo(signedInUserID(r), &user)
+	viewer := signedInUserID(r)
+	showUserTo(viewer, &user)
+	// Whether the viewer has asked to follow this account and is waiting
+	// for its owner's answer (follow_requests.go): the app shows
+	// "Requested" instead of "Follow".
+	user.FollowRequested = followRequested(viewer, user.ID)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(user); err != nil {
@@ -401,6 +406,19 @@ func startLimiterJanitor() {
 // to the RemoteAddr host (port stripped) for direct/local connections.
 func clientIP(r *http.Request) string {
 	noteForwardedShape(r)
+	// Behind Cloudflare, which is where Render puts every service, the
+	// caller's address is in a header Cloudflare writes itself and a caller
+	// cannot: CF-Connecting-IP. X-Forwarded-For is a list the caller can
+	// start with any address they like, and the first entry is theirs to
+	// choose — so every per-address limit (sign-in guesses, new accounts,
+	// emails to parents) could be dodged by typing a new one each time.
+	// Trusted only where the host is known to put Cloudflare in front
+	// (forwarded_shape.go, trustCloudflareAddress).
+	if trustCloudflareAddress() {
+		if ip := net.ParseIP(strings.TrimSpace(r.Header.Get("CF-Connecting-IP"))); ip != nil {
+			return ip.String()
+		}
+	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		if i := strings.IndexByte(xff, ','); i >= 0 {
 			return strings.TrimSpace(xff[:i])
@@ -580,6 +598,10 @@ func main() {
 	api.HandleFunc("/users/{username}", GetUserHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/follow", authed(HandleFollowEvent)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/unfollow", authed(HandleUnfollowEvent)).Methods("POST", "OPTIONS")
+	// Asking to follow a private account, and its owner's yes or no
+	// (follow_requests.go).
+	api.HandleFunc("/follow-requests", authed(FollowRequestsHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/follow-requests/answer", authed(AnswerFollowRequestHandler)).Methods("POST", "OPTIONS")
 	// Legacy post-centric routes retired (/feed, /home, /posts/{userId},
 	// /like, /comments) — the home reels feed now serves challenges only
 	// (battles + unaccepted-as-shorts) via /feed/smart, and per-challenge
@@ -701,7 +723,9 @@ func main() {
 	api.HandleFunc("/users/{id}/totp/enroll", authed(EnrollTOTPHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/users/{id}/totp/verify", authed(VerifyTOTPHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/users/{id}/totp/disable", authed(DisableTOTPHandler)).Methods("POST", "OPTIONS")
-	api.HandleFunc("/experiments", ExperimentsListHandler).Methods("GET", "OPTIONS")
+	// The list of experiments is how the feed is being tuned: for the
+	// owner, not for anybody who asks. The app does not read it.
+	api.HandleFunc("/experiments", adminOnly(ExperimentsListHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/experiments/results", authed(ExperimentResultsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/suggestions/accepted", authed(SuggestionAcceptedHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/watch", authed(HandleWatchEvent)).Methods("POST", "OPTIONS")
@@ -756,7 +780,7 @@ func main() {
 	api.HandleFunc("/notifications/unregister", HandleUnregisterPushToken).Methods("POST", "OPTIONS")
 	api.HandleFunc("/notifications/prefs", authed(HandleGetNotificationPrefs)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/notifications/prefs", authed(HandleSetNotificationPrefs)).Methods("POST", "OPTIONS")
-	api.HandleFunc("/notifications/clicked", HandleNotificationClicked).Methods("POST", "OPTIONS")
+	api.HandleFunc("/notifications/clicked", authed(HandleNotificationClicked)).Methods("POST", "OPTIONS")
 	// The notifications list the bell opens. See inbox.go.
 	api.HandleFunc("/notifications", authed(ListNotificationsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/notifications/read", authed(MarkNotificationsReadHandler)).Methods("POST", "OPTIONS")
@@ -775,7 +799,9 @@ func main() {
 	api.HandleFunc("/chat/delete", authed(DeleteMessageHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/chat/clear", authed(ClearChatHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/chat/forward", authed(ForwardMessageHandler)).Methods("POST", "OPTIONS")
-	api.HandleFunc("/chat/online/{username}", OnlineStatusHandler).Methods("GET", "OPTIONS")
+	// Whether somebody is online is for people signed in, and never told
+	// across a block (websocket.go).
+	api.HandleFunc("/chat/online/{username}", authed(OnlineStatusHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/calls/ice", authed(CallIceServersHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/save", authed(SaveChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/saved/{userId}", authed(GetSavedChallengesHandler)).Methods("GET", "OPTIONS")

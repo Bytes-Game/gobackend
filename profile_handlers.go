@@ -177,7 +177,7 @@ func UpdateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 	query := "UPDATE users SET " + strings.Join(sets, ", ") + " WHERE id = $" + strconv.Itoa(idx)
 	res, err := db.Exec(query, args...)
 	if err != nil {
-		http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "updating a profile", err)
 		return
 	}
 	if payload.AvatarURL != nil && oldAvatar != "" && oldAvatar != *payload.AvatarURL {
@@ -189,6 +189,14 @@ func UpdateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
 	if n == 0 {
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
+	}
+
+	// Public again: everybody who was waiting to follow may now, so they
+	// do (follow_requests.go).
+	if payload.Visibility != nil && *payload.Visibility == "public" {
+		if id, err := strconv.Atoi(pathID); err == nil {
+			acceptEveryFollowRequest(id)
+		}
 	}
 
 	// Round-trip the fresh user so the client doesn't have to make a
@@ -321,7 +329,7 @@ func GetLikedChallengesHandler(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := db.Query(q, args...)
 	if err != nil {
-		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "reading from the database", err)
 		return
 	}
 	defer rows.Close()
@@ -464,7 +472,7 @@ func GetWatchHistoryHandler(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := db.Query(q, args...)
 	if err != nil {
-		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "reading from the database", err)
 		return
 	}
 	defer rows.Close()
@@ -583,7 +591,7 @@ func DeleteWatchHistoryHandler(w http.ResponseWriter, r *http.Request) {
 
 	res, err := db.Exec(`DELETE FROM watch_events WHERE user_id = $1`, uidInt)
 	if err != nil {
-		http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "deleting", err)
 		return
 	}
 	n, _ := res.RowsAffected()
@@ -646,7 +654,7 @@ func BlockUserHandler(w http.ResponseWriter, r *http.Request) {
 		 ON CONFLICT DO NOTHING`,
 		payload.BlockerID, payload.BlockedID,
 	); err != nil {
-		http.Error(w, "block insert failed: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "blocking somebody", err)
 		return
 	}
 	// Drop both directions of any follow between them.
@@ -656,7 +664,19 @@ func BlockUserHandler(w http.ResponseWriter, r *http.Request) {
 		     OR (follower_id = $2 AND following_id = $1)`,
 		payload.BlockerID, payload.BlockedID,
 	); err != nil {
-		http.Error(w, "follow cleanup failed: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "removing follows after a block", err)
+		return
+	}
+	// And any request to follow that was waiting, either way round. Left
+	// in place, it stayed on the blocker's list with an Accept button, and
+	// accepting it made a follower of somebody they had blocked.
+	if _, err := tx.Exec(
+		`DELETE FROM follow_requests
+		  WHERE (requester_id = $1 AND target_id = $2)
+		     OR (requester_id = $2 AND target_id = $1)`,
+		payload.BlockerID, payload.BlockedID,
+	); err != nil {
+		serverFault(w, "removing follow requests after a block", err)
 		return
 	}
 	if err := tx.Commit(); err != nil {
@@ -694,7 +714,7 @@ func UnblockUserHandler(w http.ResponseWriter, r *http.Request) {
 		payload.BlockerID, payload.BlockedID,
 	)
 	if err != nil {
-		http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "deleting", err)
 		return
 	}
 	// Keep the ranker's Redis blocked-creators set in sync so the creator can
@@ -727,7 +747,7 @@ func ListBlockedUsersHandler(w http.ResponseWriter, r *http.Request) {
 		userID,
 	)
 	if err != nil {
-		http.Error(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "reading from the database", err)
 		return
 	}
 	defer rows.Close()
@@ -814,7 +834,7 @@ func EnrollTOTPHandler(w http.ResponseWriter, r *http.Request) {
 		        enrolled_at = NOW()`,
 		userID, secret, string(hashesJSON),
 	); err != nil {
-		http.Error(w, "enroll failed: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "starting two-step verification", err)
 		return
 	}
 
@@ -855,6 +875,10 @@ func VerifyTOTPHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.Code == "" {
 		http.Error(w, "code required", http.StatusBadRequest)
+		return
+	}
+	if !allowAction(userID, "totp_code") {
+		writeRateLimited(w, "totp_code")
 		return
 	}
 
@@ -923,6 +947,11 @@ func DisableTOTPHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// Identity comes from the session token; the path id must be the caller's own.
 	if _, ok := requirePathUser(w, r, userID); !ok {
+		return
+	}
+	// Turning it off takes the code too, so tries are counted the same.
+	if !allowAction(userID, "totp_code") {
+		writeRateLimited(w, "totp_code")
 		return
 	}
 

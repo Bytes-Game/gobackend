@@ -184,6 +184,34 @@ to check the host is passing the header ("source" should say "network").
 
 ---
 
+## Who is calling, and what they may see
+
+Three rules the last scan paid for. Each was broken somewhere, and none of
+them showed in a test until one was written for it.
+
+- **Who somebody is comes from their sign-in, never from what they sent.**
+  A follow notice used to carry whatever name the caller typed, so anybody
+  could send "X started following you" as X. Ids and names in a request
+  body are only ever the *other* person. `authUserID(r)` and
+  `authUsername(r)` are the caller.
+- **The caller's address is `clientIP(r)`, and nothing else.** On Render it
+  reads `CF-Connecting-IP`, which only Cloudflare can write. The first
+  entry of `X-Forwarded-For` is the caller's to choose, and every limit per
+  address (sign-in guesses, new accounts, emails to parents) could be
+  dodged with it. On another host, read `TRUST_CF_CONNECTING_IP` in the
+  README before trusting either.
+- **A private account chooses its followers** (`follow_requests.go`).
+  Following one makes a request, not a follower. Anything new that shows a
+  video, a battle, its votes or who is in it has to ask `viewerMayWatch`
+  first: the votes list did not, and named both players of a private
+  battle to anybody.
+
+And when something breaks inside, say so with `serverFault(w, doing, err)`:
+the caller gets one plain sentence, the log gets the error. `err.Error()`
+in an answer hands table and column names to whoever is asking.
+
+---
+
 ## Two systems build the schema
 
 `runMigrations()` in `database.go` re-runs `CREATE TABLE IF NOT EXISTS` and

@@ -176,7 +176,7 @@ a lot of the ranking exists to serve that rather than raw watch time.
 
 ## Running it
 
-You need Go 1.25 and a PostgreSQL database. Redis is strongly recommended —
+You need Go 1.27 and a PostgreSQL database. Redis is strongly recommended —
 without it, session state and most of the learned ranking signals are disabled,
 and the feed falls back to much simpler behaviour.
 
@@ -241,6 +241,7 @@ Everything is environment variables. Only the first two are required.
 | `MEILISEARCH_URL`, `MEILI_MASTER_KEY` | Full-text search. Search degrades gracefully when absent. |
 | `FCM_SERVICE_ACCOUNT_JSON`, `FCM_PROJECT` | Push notifications via FCM HTTP v1. Raw or base64-encoded service-account JSON. |
 | `OPENVERSE_CLIENT_ID`, `OPENVERSE_CLIENT_SECRET` | The free music search behind the video editor's Music button (`free_music.go`). Without them the whole server gets Openverse's visitor allowance — 200 searches a day — which is fine for testing and runs out fast with real users. Register a free app at Openverse (one form, then click the link in the email) and put the two values here; that allows 10,000 a day. Either way every answer is saved in the database (`music_searches`) and used again, by everybody, for 30 days — at most 5,000 saved searches, about 1 KB each plus about 0.5 KB per song kept. |
+| `TRUST_CF_CONNECTING_IP` | Whether the caller's address is read from `CF-Connecting-IP`, the header Cloudflare writes and a caller cannot. **On Render nothing needs setting:** it is on by itself there, because Render puts Cloudflare in front of every service. On another host set it to `true` only if Cloudflare is in front of the server there too; without Cloudflare that header is the caller's to type. Set it to `false` to switch it off. After the first request the log says which address is being used, in the line beginning `how the host forwards the caller's address`. |
 | `MULTI_REPLICA` | Set to `1` when running more than one instance. Switches rate limiting to a shared Redis token bucket and turns on cross-replica WebSocket delivery. |
 
 ---
@@ -257,6 +258,13 @@ been survivable because this API authenticates with a bearer token the client
 attaches deliberately, not a cookie the browser attaches automatically — so a
 random page can ask but learns nothing without the user's token. The day any
 endpoint trusts a cookie, that stops being true.
+
+**The limits per address depend on knowing the caller's real address.** Sign-in
+guesses, new accounts, reset codes and emails to parents are each limited per
+address. `X-Forwarded-For` is a list the caller can start with any address they
+like, so on its own it lets somebody dodge every one of those limits by typing
+a new address each time. On Render the server reads `CF-Connecting-IP` instead
+(see `TRUST_CF_CONNECTING_IP` above). If you move hosts, read that entry first.
 
 **`JWT_SECRET` must be long and random**, and changing it logs everyone out —
 tokens are stateless, so there is no revocation list, and a rotation
@@ -293,6 +301,8 @@ do rather than by folder.
 | `auth.go`, `signup.go`, `password.go`, `totp.go` | Sessions, registration, bcrypt, two-factor. |
 | `country.go`, `age_rules.go` | Which country a request is from; the ages for joining there; the feed's small lift for videos from the viewer's own country. |
 | `parent_consent.go` | Somebody under 18 gets no account until a parent agrees: the email, the parent's web page, the record of the consent, and the link that takes it back. |
+| `private_accounts.go`, `follow_requests.go` | A private account's videos are for its followers, and it chooses them: following one is a request its owner accepts or declines. A block ends a request; going public accepts everybody waiting. |
+| `server_fault.go` | When something breaks inside, the caller is told "Something went wrong on our side" and the real error goes to the log, never to the caller. |
 | `admin_auth.go`, `admin_*.go` | The admin dashboard and its Basic-Auth gate. |
 | `action_limits.go` | Per-user, per-action rate limits (follow, comment, upload, login…). |
 | `database.go` | Connection pool, baseline schema, queries. Large. |

@@ -340,7 +340,9 @@ func SuggestChallengePrefixHandler(w http.ResponseWriter, r *http.Request) {
 // development and emergency redeploys.
 func SuggestChallengeSubjectHandler(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	userID := r.URL.Query().Get("userId")
+	// Ordered for whoever is signed in, never for an id typed in the
+	// address.
+	userID := signedInUserID(r)
 	limit := parseIntOrDefault(r.URL.Query().Get("limit"), 10, 30)
 
 	items := suggestSubjectsRanked(q, userID, limit)

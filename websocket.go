@@ -33,6 +33,37 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin:     func(r *http.Request) bool { return true },
+	// The app offers "bearer" and its sign-in as the two names in the
+	// connection's protocol header (wsToken). Answering with "bearer" is
+	// what tells it the connection was taken.
+	Subprotocols: []string{wsBearerProtocol},
+}
+
+// wsBearerProtocol is the name the app sends in front of its sign-in in
+// the Sec-WebSocket-Protocol header.
+const wsBearerProtocol = "bearer"
+
+// wsToken is the sign-in a phone opened the live connection with.
+//
+// It used to travel in the address (/ws/maya?token=…). An address is the
+// one part of a request that gets written down: in the host's request log,
+// and by anything in between that keeps a log. A sign-in that is written
+// down can be used by whoever reads it, for as long as it lasts.
+//
+// The app now sends it in the connection's protocol header instead:
+// "bearer, <sign-in>". A header is not logged. The address is still read
+// for an app built before this, and can go once no such build is in use.
+func wsToken(r *http.Request) string {
+	offered := websocket.Subprotocols(r)
+	for i, name := range offered {
+		if name == wsBearerProtocol && i+1 < len(offered) {
+			return offered[i+1]
+		}
+	}
+	if tok := bearerToken(r); tok != "" {
+		return tok
+	}
+	return r.URL.Query().Get("token")
 }
 
 // wsClient wraps a connection with a write mutex. gorilla/websocket
@@ -88,7 +119,7 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 	// WebSocket handshake, so the client passes its session token as a query
 	// param. The token's username must match the path — otherwise a caller could
 	// open a socket as someone else and receive their realtime chat/notifications.
-	claims, err := parseToken(r.URL.Query().Get("token"))
+	claims, err := parseToken(wsToken(r))
 	if err != nil || claims.Username != username {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -171,6 +202,27 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		live.handle(message)
 	}
+}
+
+// blockedEitherWay is whether [viewerID] and the account called [username]
+// have a block between them, in either direction. A database that cannot
+// say answers yes: showing nothing is the safe mistake here.
+func blockedEitherWay(viewerID, username string) bool {
+	if db == nil || viewerID == "" || username == "" {
+		return false
+	}
+	var blocked bool
+	err := db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM user_blocks b JOIN users u ON u.username = $2
+			 WHERE (b.blocker_id::text = $1 AND b.blocked_id = u.id)
+			    OR (b.blocked_id::text = $1 AND b.blocker_id = u.id))`,
+		viewerID, username).Scan(&blocked)
+	if queryFailed("whether there is a block between user "+viewerID+" and "+username,
+		"not showing whether they are online", err) {
+		return true
+	}
+	return blocked
 }
 
 // wsSendLocal writes a text payload to a user connected to THIS replica.
@@ -333,8 +385,10 @@ func OnlineStatusHandler(w http.ResponseWriter, r *http.Request) {
 	if !online {
 		lastSeen = GetUserLastSeen(username)
 	}
-	// They chose not to show when they are active: nobody is told.
-	if activityHidden(username) {
+	// They chose not to show when they are active: nobody is told. And
+	// nobody is told across a block, either way round: somebody you blocked
+	// could otherwise still watch for when you are online.
+	if activityHidden(username) || blockedEitherWay(authUserID(r), username) {
 		online, lastSeen = false, ""
 	}
 

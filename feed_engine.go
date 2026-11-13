@@ -410,6 +410,11 @@ func TrackEventHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// Attribute the event to the authenticated user, ignoring any body userId.
 	event.UserID = authUserID(r)
+	// How fast one account may report (action_limits.go, "events").
+	if !allowAction(event.UserID, "events") {
+		writeRateLimited(w, "events")
+		return
+	}
 
 	// Lifecycle events legitimately have no contentId (the user wasn't watching
 	// anything when they backgrounded/returned). Allow those past the check.
@@ -543,6 +548,12 @@ func TrackBatchEventsHandler(w http.ResponseWriter, r *http.Request) {
 	// Every event in the batch is attributed to the authenticated user — a
 	// client can't smuggle in events authored as someone else.
 	uid := authUserID(r)
+	// How fast one account may report: a bigger batch costs more
+	// (action_limits.go, "events").
+	if !allowActionN(uid, "events", 1+len(payload.Events)/eventsPerToken) {
+		writeRateLimited(w, "events")
+		return
+	}
 
 	go func() {
 		for _, event := range payload.Events {

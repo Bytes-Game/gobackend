@@ -243,21 +243,35 @@ func MarkNotificationsReadHandler(w http.ResponseWriter, r *http.Request) {
 // ── What happens that people are told about ─────────────────────────────
 
 // SendFollowNotification tells someone they have a new follower.
+//
+// Who followed and who was followed are the ids the handler worked out
+// from the sign-in and the account followed, never names the caller sent.
 func SendFollowNotification(payload FollowEventPayload) {
-	followed, ok := GetUserByUsername(payload.FollowingUsername)
+	sendFollowNote(payload, noteFollow, "started following you.")
+}
+
+// SendFollowRequestNotification tells the owner of a private account that
+// somebody is asking to follow them (follow_requests.go).
+func SendFollowRequestNotification(payload FollowEventPayload) {
+	sendFollowNote(payload, noteFollowRequest, "wants to follow you.")
+}
+
+func sendFollowNote(payload FollowEventPayload, kind, body string) {
+	uid, _ := strconv.Atoi(payload.FollowingID)
+	fid, _ := strconv.Atoi(payload.FollowerID)
+	if uid <= 0 || fid <= 0 {
+		return
+	}
+	follower, ok := GetUserByID(payload.FollowerID)
 	if !ok {
 		return
 	}
-	follower, _ := GetUserByUsername(payload.FollowerUsername)
-	uid, _ := strconv.Atoi(followed.ID)
-	fid, _ := strconv.Atoi(follower.ID)
 	notifyUser(InboxNote{
 		UserID:    uid,
-		Username:  followed.Username,
-		Kind:      noteFollow,
+		Kind:      kind,
 		ActorID:   fid,
-		ActorName: payload.FollowerUsername,
-		Body:      "started following you.",
+		ActorName: follower.Username,
+		Body:      body,
 	})
 }
 

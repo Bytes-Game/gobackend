@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"path"
 	"regexp"
@@ -131,13 +132,14 @@ func ChatMediaPresignHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg, err := chatMediaStorage()
 	if err != nil {
-		http.Error(w, "media storage not configured: "+err.Error(), http.StatusServiceUnavailable)
+		log.Printf("chat media: storage is not set up: %v", err)
+		http.Error(w, "Sending photos and voice notes isn't available right now.", http.StatusServiceUnavailable)
 		return
 	}
 	key := fmt.Sprintf("chat/%s/%s/%s", me, newUploadID(), file)
 	uploadURL, err := cfg.PresignPutURL(key, presignExpiry)
 	if err != nil {
-		http.Error(w, "failed to sign URL: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "signing a chat media upload", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

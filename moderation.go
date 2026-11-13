@@ -389,7 +389,7 @@ func AdminResolveReportHandler(w http.ResponseWriter, r *http.Request) {
 		gone, err := removeReported(req.TargetType, req.TargetID)
 		if err != nil {
 			log.Printf("admin: %s %d could not be removed: %v", req.TargetType, req.TargetID, err)
-			http.Error(w, "it could not be removed: "+err.Error(), http.StatusInternalServerError)
+			serverFault(w, "removing reported content", err)
 			return
 		}
 		out["removed"] = gone
