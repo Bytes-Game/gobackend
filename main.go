@@ -78,6 +78,18 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 
 	// First, validate the user's credentials.
 	if !IsValidUser(creds.Username, creds.Password) {
+		// Not an account. A sign-up that is still waiting for a parent is
+		// not one either (parent_consent.go): when this is its username or
+		// email AND its password, say what it is waiting for. The password
+		// is checked first, so a guess learns nothing about who is waiting.
+		if db != nil {
+			waiting, err := pendingByLogin(creds.Username, creds.Password)
+			if !queryFailed("whether a sign-in is for a sign-up that is waiting for a parent",
+				"it is answered as a wrong username or password", err) && waiting != nil {
+				refusedWaiting(w, waiting)
+				return
+			}
+		}
 		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
 		log.Printf("Failed login attempt for user %s.", creds.Username)
 		return
@@ -108,13 +120,6 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	// and keep it only when the person has chosen to — never as a side effect
 	// of signing in. Then the session token.
 	completeSignIn(w, r, user, creds.KeepAccount)
-}
-
-// ReseedHandler drops all data and reseeds the database.
-func ReseedHandler(w http.ResponseWriter, r *http.Request) {
-	ReseedDatabase()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "reseeded"})
 }
 
 // GetAllUsersHandler returns a bounded page of users.
@@ -150,7 +155,12 @@ func GetUserHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
-	showUserTo(signedInUserID(r), &user)
+	viewer := signedInUserID(r)
+	showUserTo(viewer, &user)
+	// Whether the viewer has asked to follow this account and is waiting
+	// for its owner's answer (follow_requests.go): the app shows
+	// "Requested" instead of "Follow".
+	user.FollowRequested = followRequested(viewer, user.ID)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(user); err != nil {
@@ -396,6 +406,19 @@ func startLimiterJanitor() {
 // to the RemoteAddr host (port stripped) for direct/local connections.
 func clientIP(r *http.Request) string {
 	noteForwardedShape(r)
+	// Behind Cloudflare, which is where Render puts every service, the
+	// caller's address is in a header Cloudflare writes itself and a caller
+	// cannot: CF-Connecting-IP. X-Forwarded-For is a list the caller can
+	// start with any address they like, and the first entry is theirs to
+	// choose — so every per-address limit (sign-in guesses, new accounts,
+	// emails to parents) could be dodged by typing a new one each time.
+	// Trusted only where the host is known to put Cloudflare in front
+	// (forwarded_shape.go, trustCloudflareAddress).
+	if trustCloudflareAddress() {
+		if ip := net.ParseIP(strings.TrimSpace(r.Header.Get("CF-Connecting-IP"))); ip != nil {
+			return ip.String()
+		}
+	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		if i := strings.IndexByte(xff, ','); i >= 0 {
 			return strings.TrimSpace(xff[:i])
@@ -481,12 +504,16 @@ func main() {
 	gate.bringUp("database", InitDatabase)
 	gate.bringUp("valkey", InitRedis)
 	InitMeilisearch()
+	// No password kept as plain text, and no demo account (demo_accounts.go).
+	// In the background, and only now: deleting an account also clears what
+	// the cache and the search index hold for it.
+	go startupAccountChecks()
 	// Warn loudly (but don't crash) if the session-token signing key is missing,
 	// so it's noticed at boot rather than on the first failed login.
 	checkAuthConfig()
 	// Same idea for the admin surface: warn loudly at boot when the dashboard
 	// credentials are missing or are an obvious placeholder, rather than
-	// letting an unrotated dev password quietly guard /admin/reseed.
+	// letting an unrotated dev password quietly guard the admin pages.
 	checkAdminConfig()
 	// And for email: say how it is set up and whether it can get out, since
 	// otherwise the first sign of a broken setup is somebody locked out of
@@ -556,6 +583,8 @@ func main() {
 	limiter := newNamedRateLimiter("ip", 10, 20)
 	r.Use(rateLimitMiddleware(limiter))
 	r.Use(metricsMiddleware)
+	// Nobody may send more than 1 MB at once (request_limits.go).
+	r.Use(limitRequestBodies)
 
 	api := r.PathPrefix("/api/v1").Subrouter()
 	api.HandleFunc("/users", GetAllUsersHandler).Methods("GET", "OPTIONS")
@@ -569,6 +598,10 @@ func main() {
 	api.HandleFunc("/users/{username}", GetUserHandler).Methods("GET", "OPTIONS")
 	api.HandleFunc("/follow", authed(HandleFollowEvent)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/unfollow", authed(HandleUnfollowEvent)).Methods("POST", "OPTIONS")
+	// Asking to follow a private account, and its owner's yes or no
+	// (follow_requests.go).
+	api.HandleFunc("/follow-requests", authed(FollowRequestsHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/follow-requests/answer", authed(AnswerFollowRequestHandler)).Methods("POST", "OPTIONS")
 	// Legacy post-centric routes retired (/feed, /home, /posts/{userId},
 	// /like, /comments) — the home reels feed now serves challenges only
 	// (battles + unaccepted-as-shorts) via /feed/smart, and per-challenge
@@ -690,12 +723,17 @@ func main() {
 	api.HandleFunc("/users/{id}/totp/enroll", authed(EnrollTOTPHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/users/{id}/totp/verify", authed(VerifyTOTPHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/users/{id}/totp/disable", authed(DisableTOTPHandler)).Methods("POST", "OPTIONS")
-	api.HandleFunc("/experiments", ExperimentsListHandler).Methods("GET", "OPTIONS")
+	// The list of experiments is how the feed is being tuned: for the
+	// owner, not for anybody who asks. The app does not read it.
+	api.HandleFunc("/experiments", adminOnly(ExperimentsListHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/experiments/results", authed(ExperimentResultsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/suggestions/accepted", authed(SuggestionAcceptedHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/watch", authed(HandleWatchEvent)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/report", authed(HandleReportEvent)).Methods("POST", "OPTIONS")
-	api.HandleFunc("/admin/reseed", adminOnly(ReseedHandler)).Methods("POST", "OPTIONS")
+	// Reports: read and decide (moderation.go; the page is /admin/reports).
+	api.HandleFunc("/admin/reports", adminOnly(AdminOpenReportsHandler)).Methods("GET", "OPTIONS")
+	api.HandleFunc("/admin/reports/resolve", adminOnly(AdminResolveReportHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/admin/unsuspend", adminOnly(AdminUnsuspendHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/admin/funnels", adminOnly(AdminFunnelsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/errors", adminOnly(AdminErrorsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/admin/health", adminOnly(AdminHealthHandler)).Methods("GET", "OPTIONS")
@@ -742,7 +780,7 @@ func main() {
 	api.HandleFunc("/notifications/unregister", HandleUnregisterPushToken).Methods("POST", "OPTIONS")
 	api.HandleFunc("/notifications/prefs", authed(HandleGetNotificationPrefs)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/notifications/prefs", authed(HandleSetNotificationPrefs)).Methods("POST", "OPTIONS")
-	api.HandleFunc("/notifications/clicked", HandleNotificationClicked).Methods("POST", "OPTIONS")
+	api.HandleFunc("/notifications/clicked", authed(HandleNotificationClicked)).Methods("POST", "OPTIONS")
 	// The notifications list the bell opens. See inbox.go.
 	api.HandleFunc("/notifications", authed(ListNotificationsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/notifications/read", authed(MarkNotificationsReadHandler)).Methods("POST", "OPTIONS")
@@ -752,6 +790,7 @@ func main() {
 	api.HandleFunc("/creator/insights/content", authed(HandleCreatorInsightsPerContent)).Methods("GET", "OPTIONS")
 
 	r.HandleFunc("/admin", adminOnly(AdminDashboardHandler)).Methods("GET")
+	r.HandleFunc("/admin/reports", adminOnly(AdminReportsPageHandler)).Methods("GET")
 	api.HandleFunc("/chat/send", authed(SendMessageHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/chat/conversations/{userId}", authed(GetConversationsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/chat/messages/{userId}/{otherUserId}", authed(GetMessagesHandler)).Methods("GET", "OPTIONS")
@@ -760,7 +799,9 @@ func main() {
 	api.HandleFunc("/chat/delete", authed(DeleteMessageHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/chat/clear", authed(ClearChatHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/chat/forward", authed(ForwardMessageHandler)).Methods("POST", "OPTIONS")
-	api.HandleFunc("/chat/online/{username}", OnlineStatusHandler).Methods("GET", "OPTIONS")
+	// Whether somebody is online is for people signed in, and never told
+	// across a block (websocket.go).
+	api.HandleFunc("/chat/online/{username}", authed(OnlineStatusHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/calls/ice", authed(CallIceServersHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/save", authed(SaveChallengeHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/saved/{userId}", authed(GetSavedChallengesHandler)).Methods("GET", "OPTIONS")
@@ -770,6 +811,17 @@ func main() {
 	// anonymous-rate-limited via the "signup" action bucket).
 	r.HandleFunc("/signup", SignupHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/signup/available", UsernameAvailableHandler).Methods("GET", "OPTIONS")
+	// The ages for where the person is, and the country this server sees
+	// for them (age_rules.go, country.go).
+	r.HandleFunc("/signup/rules", SignupRulesHandler).Methods("GET", "OPTIONS")
+	// A parent's consent for a young person (parent_consent.go): the app
+	// sends the parent's email again or cancels; the parent answers on a
+	// web page, and can take the consent back on another.
+	r.HandleFunc("/signup/parent", ParentEmailHandler).Methods("POST", "OPTIONS")
+	r.HandleFunc("/parent-consent", ParentConsentPageHandler).Methods("GET")
+	r.HandleFunc("/parent-consent", ParentConsentAnswerHandler).Methods("POST")
+	r.HandleFunc("/parent-consent/withdraw", ParentWithdrawPageHandler).Methods("GET")
+	r.HandleFunc("/parent-consent/withdraw", ParentWithdrawHandler).Methods("POST")
 	// Forgot password: a code by email, then a new password (password_reset.go).
 	r.HandleFunc("/password/forgot", ForgotPasswordHandler).Methods("POST", "OPTIONS")
 	r.HandleFunc("/password/verify", VerifyResetCodeHandler).Methods("POST", "OPTIONS")
@@ -807,6 +859,10 @@ func main() {
 	// What a shared link or a scanned QR code opens: a person, or one video.
 	// No sign-in. public_pages.go.
 	r.HandleFunc("/u/{username}", PublicProfilePageHandler).Methods("GET", "HEAD")
+	// The pages the app stores ask for (legal_pages.go).
+	for _, path := range []string{"/terms", "/privacy", "/community-guidelines", "/delete-account", "/child-safety"} {
+		r.HandleFunc(path, LegalPageHandler).Methods("GET", "HEAD")
+	}
 	r.HandleFunc("/v/{id:[0-9]+}", PublicVideoPageHandler).Methods("GET", "HEAD")
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

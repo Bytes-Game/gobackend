@@ -143,7 +143,7 @@ func UserAvatarsHandler(w http.ResponseWriter, r *http.Request) {
 	// "no photo" (account_leaving.go).
 	rows, err := db.Query(
 		`SELECT username, avatar_url FROM users
-		  WHERE username = ANY($1) AND deletion_requested_at IS NULL`,
+		  WHERE username = ANY($1) AND deletion_requested_at IS NULL AND suspended_at IS NULL`,
 		pq.Array(names))
 	if queryFailed("reading people's profile photos", "answering with an error", err) {
 		http.Error(w, "could not read the photos", http.StatusInternalServerError)

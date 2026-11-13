@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -183,9 +186,40 @@ func AdminOnlineUsersHandler(w http.ResponseWriter, r *http.Request) {
 // AdminDashboardHandler serves an inline HTML page that fetches the JSON
 // endpoints and renders them as tables. Kept inline so deployment stays a
 // single binary with no separate static assets to serve.
+//
+// The page shows text that signed-in people can type (the app reports its
+// own errors by name), so it is built to show everything as plain text.
+// The page rules below are a second lock on the same door: the browser runs
+// only the one script written here, so even text that did get read as HTML
+// could not run anything, and no other site can show the page in a frame.
 func AdminDashboardHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", adminDashboardRules)
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Cache-Control", "no-store")
 	fmt.Fprint(w, adminDashboardHTML)
+}
+
+// adminDashboardRules lets the admin page run its own script and nothing
+// else. The script is named by its fingerprint, so a changed script needs
+// no change here — and any other script, inline or loaded, is refused.
+var adminDashboardRules = "default-src 'none'; " +
+	"script-src " + scriptFingerprint(adminDashboardHTML) + "; " +
+	"style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; " +
+	"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+// scriptFingerprint is the browser's name for the one inline script in
+// page: 'sha256-' and the script's SHA-256 in base64.
+func scriptFingerprint(page string) string {
+	const open, shut = "<script>", "</script>"
+	i := strings.Index(page, open)
+	j := strings.Index(page, shut)
+	if i < 0 || j < i {
+		return "'none'"
+	}
+	sum := sha256.Sum256([]byte(page[i+len(open) : j]))
+	return "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
 }
 
 const adminDashboardHTML = `<!doctype html>
@@ -204,8 +238,10 @@ code{background:#222;padding:1px 5px;border-radius:3px;color:#ffb}
 .pct.low{color:#ff8a8a}
 .pct.mid{color:#ffd27a}
 .pct.hi{color:#8af0a8}
+.muted{color:#7a7c85}
 </style></head><body>
 <h1>Flexete — funnels & errors</h1>
+<div class="tiny"><a href="/admin/reports" style="color:#8ab4ff">Reports waiting for a decision →</a></div>
 <div class="tiny">Windows: last 7 days. Pulled live from feed_events. Reload to refresh.</div>
 
 <h2>Nightly analytics job</h2>
@@ -218,9 +254,25 @@ code{background:#222;padding:1px 5px;border-radius:3px;color:#ffb}
 <div id="errors">loading…</div>
 
 <script>
+// Every value from the server goes on the page as plain text, never as
+// HTML. Some of it (the error names) is typed by the app, so by anyone
+// signed in; read as HTML it could run code in the admin's browser.
+function el(tag, cls, ...kids){
+  const n = document.createElement(tag);
+  if(cls) n.className = cls;
+  for(const k of kids){ if(k !== null && k !== undefined) n.append(k instanceof Node ? k : String(k)); }
+  return n;
+}
+function table(head, rows){
+  const t = el('table');
+  t.append(el('tr', null, ...head.map(h => el('th', null, h))));
+  for(const r of rows) t.append(el('tr', null, ...r.map(c => c instanceof Node && c.tagName === 'TD' ? c : el('td', null, c))));
+  return t;
+}
+function show(id, ...nodes){ document.getElementById(id).replaceChildren(...nodes); }
 function rateClass(r){if(r<0.3)return 'low';if(r<0.6)return 'mid';return 'hi'}
 function fmtAgo(iso){
-  if(!iso||iso.startsWith('0001-01-01'))return 'never';
+  if(!iso||String(iso).startsWith('0001-01-01'))return 'never';
   const t=new Date(iso), d=Date.now()-t.getTime();
   if(d<60000)return Math.floor(d/1000)+'s ago';
   if(d<3600000)return Math.floor(d/60000)+'m ago';
@@ -230,40 +282,33 @@ async function render(){
   try{
     const h = await fetch('/api/v1/admin/health').then(r=>r.json());
     const stale = h.startedAt && (Date.now()-new Date(h.startedAt).getTime() > 30*3600*1000);
-    let head = '<div class="tiny">run #'+(h.runCount||0)+' · started '+fmtAgo(h.startedAt)+' · took '+(h.duration||'—');
-    if(stale) head += ' · <span class="pct low">STALE (>30h)</span>';
-    head += '</div>';
-    let hh = head + '<table><tr><th>job</th><th>users</th><th>duration</th><th>error</th></tr>';
+    const head = el('div', 'tiny', 'run #'+(h.runCount||0)+' · started '+fmtAgo(h.startedAt)+' · took '+(h.duration||'—'));
+    if(stale) head.append(' · ', el('span', 'pct low', 'STALE (>30h)'));
+    const rows = [];
     for(const name of ['tie_strength','social_drive','creator_affinity','page_dwell']){
       const r = (h.results||{})[name] || {};
-      const errCell = r.err ? '<span class="pct low">'+r.err+'</span>' : 'ok';
-      hh += '<tr><td><code>'+name+'</code></td><td>'+(r.users||0)+'</td><td>'+(r.duration||'—')+'</td><td>'+errCell+'</td></tr>';
+      rows.push([el('code', null, name), r.users||0, r.duration||'—', r.err ? el('span', 'pct low', r.err) : 'ok']);
     }
-    hh += '</table>';
-    document.getElementById('health').innerHTML = hh;
+    show('health', head, table(['job','users','duration','error'], rows));
   }catch(e){document.getElementById('health').textContent='error: '+e}
 
   try{
     const f = await fetch('/api/v1/admin/funnels').then(r=>r.json());
-    let html = '<table><tr><th>type</th><th>start</th><th>complete</th><th>abandon</th><th>rate</th><th>abandon by step</th></tr>';
-    for(const k of Object.keys(f)){
-      const b = f[k];
+    const rows = [];
+    for(const k of Object.keys(f||{})){
+      const b = f[k] || {};
       const byStep = Object.entries(b.abandonByStep||{}).map(([s,n])=>s+': '+n).join(', ') || '—';
-      const pct = (b.completionRate*100).toFixed(1)+'%';
-      const cls = rateClass(b.completionRate);
-      html += '<tr><td><code>'+k+'</code></td><td>'+b.start+'</td><td>'+b.complete+'</td><td>'+b.abandon+'</td><td class="pct '+cls+'">'+pct+'</td><td>'+byStep+'</td></tr>';
+      const rate = Number(b.completionRate)||0;
+      rows.push([el('code', null, k), b.start, b.complete, b.abandon, el('td', 'pct '+rateClass(rate), (rate*100).toFixed(1)+'%'), byStep]);
     }
-    html += '</table>';
-    document.getElementById('funnels').innerHTML = html;
+    show('funnels', table(['type','start','complete','abandon','rate','abandon by step'], rows));
   }catch(e){document.getElementById('funnels').textContent='error: '+e}
 
   try{
     const e = await fetch('/api/v1/admin/errors').then(r=>r.json());
-    let eh = '<table><tr><th>surface</th><th>errorType</th><th>count</th></tr>';
-    for(const r of (e||[])) eh += '<tr><td>'+r.surface+'</td><td>'+r.errorType+'</td><td>'+r.count+'</td></tr>';
-    if(!e||!e.length) eh += '<tr><td colspan="3" style="color:#7a7c85">no errors in window</td></tr>';
-    eh += '</table>';
-    document.getElementById('errors').innerHTML = eh;
+    const rows = (e||[]).map(r => [r.surface, r.errorType, r.count]);
+    if(!rows.length){ const none = el('td', 'muted', 'no errors in window'); none.colSpan = 3; rows.push([none]); }
+    show('errors', table(['surface','errorType','count'], rows));
   }catch(e){document.getElementById('errors').textContent='error: '+e}
 }
 render();

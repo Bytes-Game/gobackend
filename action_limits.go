@@ -118,7 +118,44 @@ var actionLimitTable = map[string]actionLimitConfig{
 	"password_reset_ip":  {tokensPerSecond: 10.0 / 3600, burst: 10},
 	"password_reset_try": {tokensPerSecond: 30.0 / 3600, burst: 10},
 	"password_reset":     {tokensPerSecond: 5.0 / 3600, burst: 5},
+	// A parent's consent (parent_consent.go). Asking for the parent's
+	// email again, or cancelling: 20 an hour per internet address. The
+	// parent's own answers: 30 an hour per address. And however many
+	// sign-ups name it, one parent's address is emailed at most 6 times a
+	// day, so this cannot be used to fill a stranger's inbox.
+	"parent_email":   {tokensPerSecond: 20.0 / 3600, burst: 10},
+	"parent_answer":  {tokensPerSecond: 30.0 / 3600, burst: 15},
+	"parent_address": {tokensPerSecond: 6.0 / 86400, burst: 6},
+	// Starting an upload (media_handlers.go, media_multipart.go): 60 an
+	// hour, 20 at once. A post is one or two; a busy chat a handful. Each
+	// one hands out an address that puts a file in paid storage.
+	"upload_start": {tokensPerSecond: 60.0 / 3600, burst: 20},
+	// Pieces of a big upload: 600 an hour, 120 at once.
+	"upload_part": {tokensPerSecond: 600.0 / 3600, burst: 120},
+	// The two-step code when turning it on or off in Settings: 5 tries
+	// every ten minutes, like the code at sign-in. A code is one in a
+	// million; this keeps guessing it out of reach.
+	"totp_code": {tokensPerSecond: 5.0 / 600, burst: 5},
+	// Activity reports from the app (what was watched, tapped, opened). One
+	// token is 25 reports. The app sends a handful every few seconds, and
+	// up to 200 at once after being offline: 25 a second for good, 1,500 in
+	// a burst. Every report is rows in the database, so without this one
+	// account with a script could fill it.
+	"events": {tokensPerSecond: 1.0, burst: 60},
 }
+
+// allowActionN is allowAction for something that costs [n] tokens at once.
+func allowActionN(userID, action string, n int) bool {
+	for i := 0; i < n; i++ {
+		if !allowAction(userID, action) {
+			return false
+		}
+	}
+	return true
+}
+
+// eventsPerToken is how many activity reports one "events" token pays for.
+const eventsPerToken = 25
 
 // actionLimiterRegistry holds one rateLimiter per action key. Created
 // lazily on first use — cheaper than initializing the full table at

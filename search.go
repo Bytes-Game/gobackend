@@ -95,7 +95,10 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	searchType := r.URL.Query().Get("type")
-	userID := r.URL.Query().Get("userId")
+	// Results are ordered for whoever is signed in. The id used to come
+	// from the address (?userId=), which is anybody's to type: a stranger
+	// got results ordered by somebody else's tastes and follows.
+	userID := signedInUserID(r)
 
 	if query == "" {
 		http.Error(w, `{"error":"missing search query parameter 'q'"}`, http.StatusBadRequest)
