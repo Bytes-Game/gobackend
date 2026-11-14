@@ -438,10 +438,13 @@ func withStorageSettings(t *testing.T) {
 	t.Setenv("R2_ACCESS_KEY_ID", "key")
 	t.Setenv("R2_SECRET_ACCESS_KEY", "secret")
 	t.Setenv("R2_PUBLIC_BASE_URL", "https://media.example")
-	forget := func() { r2Once, r2Cached, r2Err = sync.Once{}, nil, nil }
-	forget()
-	t.Cleanup(forget)
+	forgetStorageSettings()
+	t.Cleanup(forgetStorageSettings)
 }
+
+// forgetStorageSettings drops the storage settings the server has read, so
+// the next ask reads them afresh from what is set now.
+var forgetStorageSettings = func() { r2Once, r2Cached, r2Err = sync.Once{}, nil, nil }
 
 func TestScan_UploadsAndReportsHaveABudget(t *testing.T) {
 	defer withDB(t)()

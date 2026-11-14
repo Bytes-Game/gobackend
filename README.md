@@ -229,7 +229,8 @@ Everything is environment variables. Only the first two are required.
 | Variable | What it does |
 |---|---|
 | `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | Cloudflare R2 credentials. Uploads are signed here and sent by the phone straight to R2 — video bytes never pass through this server. |
-| `R2_PUBLIC_BASE_URL` | The public host clients fetch media from. |
+| `R2_PUBLIC_BASE_URL` | The public address files are handed out at: put in front of every new file's name, and sent to the video worker with every job. It can be changed (to a custom domain such as `https://media.flexete.com`). The server writes down each address it has started with, so files saved under an earlier one are still cleared from storage when deleted (`media_addresses.go`). At every start the log says which is in use: the line starting `media:`. Keep the earlier address working for as long as files saved under it are shown. |
+| `R2_OLD_PUBLIC_BASE_URLS` | Optional. Earlier values of `R2_PUBLIC_BASE_URL`, separated by commas. Only needed for an address the server never started with, which is rare: it writes down the ones it did. Without the earlier address on record, a file saved under it stays in storage after its video, account or message is deleted. |
 | `HLS_WORKER_TOKEN` | Shared secret for the transcode worker's three internal endpoints. Must match the worker's copy. |
 
 ### Optional

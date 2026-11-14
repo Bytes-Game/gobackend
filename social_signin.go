@@ -484,8 +484,11 @@ func createSocialAccount(r *http.Request, t *signupTicketClaims, username, fullN
 // sends the token to /auth/apple like an iPhone does. Nothing is checked
 // or kept here: the token is checked there.
 //
-// Set ANDROID_PACKAGE_NAME to the app's Android id (applicationId) when it
-// changes for release; until then it is the template's com.example.devf.
+// The app's Android id is com.flexete.app (applicationId in the app's
+// android/app/build.gradle.kts). Set ANDROID_PACKAGE_NAME only if that id
+// ever changes: a result sent to the wrong id reaches no app at all.
+const defaultAndroidPackage = "com.flexete.app"
+
 func AppleCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
@@ -494,7 +497,7 @@ func AppleCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	pkg := strings.TrimSpace(os.Getenv("ANDROID_PACKAGE_NAME"))
 	if pkg == "" {
-		pkg = "com.example.devf"
+		pkg = defaultAndroidPackage
 	}
 	http.Redirect(w, r, "intent://callback?"+r.PostForm.Encode()+
 		"#Intent;package="+pkg+";scheme=signinwithapple;end", http.StatusTemporaryRedirect)

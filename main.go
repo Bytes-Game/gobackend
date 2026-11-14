@@ -504,6 +504,11 @@ func main() {
 	gate.bringUp("database", InitDatabase)
 	gate.bringUp("valkey", InitRedis)
 	InitMeilisearch()
+	// Write down the address files are handed out at, and read back the
+	// earlier ones (media_addresses.go). Before anything is deleted: a file
+	// saved under an earlier address is only cleared from storage if the
+	// server knows that address was its own.
+	rememberMediaAddresses()
 	// No password kept as plain text, and no demo account (demo_accounts.go).
 	// In the background, and only now: deleting an account also clears what
 	// the cache and the search index hold for it.

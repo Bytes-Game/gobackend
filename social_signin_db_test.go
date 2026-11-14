@@ -404,9 +404,9 @@ func TestSocialSignup_EveryAccountRuleStillHolds(t *testing.T) {
 
 func TestSocialSignIn_AppleGivesTheNameToTheAppOnly(t *testing.T) {
 	defer withDB(t)()
-	a := standInFor(t, appleProvider, "com.example.devf")
+	a := standInFor(t, appleProvider, "com.flexete.app")
 	code, got := socialPost(t, socialSignIn(appleProvider), "/auth/apple", map[string]any{
-		"idToken": a.token(t, jwt.MapClaims{"aud": "com.example.devf", "sub": "001234.apple",
+		"idToken": a.token(t, jwt.MapClaims{"aud": "com.flexete.app", "sub": "001234.apple",
 			"email": "x7q@privaterelay.appleid.com", "email_verified": "true"}),
 		"fullName": "Maya Apple",
 	})
@@ -428,17 +428,19 @@ func TestAppleCallback_HandsTheResultBackToTheApp(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
 	AppleCallbackHandler(rec, req)
-	want := "intent://callback?code=c-1&id_token=tok.en.x&state=s-9#Intent;package=com.example.devf;scheme=signinwithapple;end"
+	// With nothing set: the app's own id, the one in its build file.
+	want := "intent://callback?code=c-1&id_token=tok.en.x&state=s-9#Intent;package=com.flexete.app;scheme=signinwithapple;end"
 	if rec.Code != http.StatusTemporaryRedirect || rec.Header().Get("Location") != want {
 		t.Fatalf("answered %d to %q, want %q", rec.Code, rec.Header().Get("Location"), want)
 	}
-	t.Setenv("ANDROID_PACKAGE_NAME", "com.flexete.app")
+	t.Setenv("ANDROID_PACKAGE_NAME", "com.flexete.beta")
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest("POST", "/auth/apple/callback", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	AppleCallbackHandler(rec, req)
-	if !strings.Contains(rec.Header().Get("Location"), ";package=com.flexete.app;") {
-		t.Fatalf("the release id is not used: %q", rec.Header().Get("Location"))
+	// With the setting: that id, whatever the app's own is.
+	if !strings.Contains(rec.Header().Get("Location"), ";package=com.flexete.beta;") {
+		t.Fatalf("the id that was set is not used: %q", rec.Header().Get("Location"))
 	}
 }
 

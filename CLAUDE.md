@@ -229,6 +229,26 @@ that the column does not exist.
 
 ---
 
+## When the videos' address changes
+
+A file's full address is saved with its row and never changes. So the
+address in `R2_PUBLIC_BASE_URL` is only the address of NEW files. Every
+"is this file one of ours?" question about a file already saved has to
+accept the earlier addresses too: ask `keyOfStoredFile`
+(`media_addresses.go`), never compare with `PublicBaseURL` by hand. Two
+places did, and after a change of address a deleted video's file would
+have stayed in storage for good, with nothing logged.
+
+A NEW upload is the other way round: it must be under today's address
+(`ownUpload`, `validProfilePhoto`, the chat check). The list of earlier
+addresses is not a way to post a file kept somewhere else.
+
+The video worker uses the address the server sends with each job
+(`publicBaseFor` in `cmd/hls-worker`). Its own `R2_PUBLIC_BASE_URL` is
+only for a server too old to send one.
+
+---
+
 ## The legal documents live in the app
 
 The Terms, Privacy Policy and Community Guidelines are written in the
@@ -253,13 +273,17 @@ release, and not before.
 
 It includes everything the server needs set on Render: `RESEND_API_KEY`
 and `MAIL_FROM` (forgot password; `SMTP_*` instead works only on a paid
-plan, since the free one blocks the email ports), `GOOGLE_CLIENT_IDS`,
-`APPLE_CLIENT_IDS` and `ANDROID_PACKAGE_NAME` (Google and Apple sign-in),
-`APP_DOWNLOAD_URL` (the shared web pages), `R2_PUBLIC_BASE_URL` (videos
-from media.flexete.com) and `PUBLIC_BASE_URL` (the address in the links
+plan, since the free one blocks the email ports), `GOOGLE_CLIENT_IDS`
+and `APPLE_CLIENT_IDS` (Google and Apple sign-in), `APP_DOWNLOAD_URL`
+(the shared web pages), `R2_PUBLIC_BASE_URL` (videos from
+media.flexete.com) and `PUBLIC_BASE_URL` (the address in the links
 emailed to parents, once flexete.com points at the server), plus the
 Cloudflare steps for the app's domain, flexete.com. A new server setting the
 owner must fill in goes on that list the day it is added.
+
+`ANDROID_PACKAGE_NAME` is not on it any more: the app's Android id is
+`com.flexete.app`, and the server knows it (`social_signin.go`). Set it
+only if the id ever changes.
 
 Email is needed for more than forgotten passwords now: somebody under 18
 gets no account until a parent agrees by an emailed link

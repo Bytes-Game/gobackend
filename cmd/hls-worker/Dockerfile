@@ -35,7 +35,8 @@
 #   BACKEND_URL           the server, e.g. https://api.flexete.com
 #   HLS_WORKER_TOKEN      the same value as the server's
 #   R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
-#   R2_PUBLIC_BASE_URL    optional; the server sends its own with each job
+#   R2_PUBLIC_BASE_URL    best left out: the server sends its own with each
+#                         job, and that one is used whenever it is there
 #
 # Run ONE of these, or turn the GitHub job's schedule off once it runs:
 # two workers do not share out a video, but each costs its own machine.
