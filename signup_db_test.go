@@ -345,7 +345,7 @@ func TestForwardedShape_SaysHowManyNotWhich(t *testing.T) {
 	}
 
 	// And clientIP says it, once.
-	var buf bytes.Buffer
+	var buf lockedLog
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
 	forwardedShapeOnce = sync.Once{}

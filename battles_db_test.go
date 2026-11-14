@@ -333,11 +333,16 @@ func TestStandings_CountOnlyWhatIsGenuine(t *testing.T) {
 	watched(t, 5103, "challenge", cid, 0, "")
 	watched(t, 5105, "challenge", cid, 0, "")
 	voter(t, 5106, 6) // watches but does not vote
+	// An hour ago, the same moment as the views above, and not "now". A
+	// voter's days of history are counted by the calendar: with 5103's view
+	// an hour ago and their share now, a run between midnight and 1 a.m.
+	// (UTC) put the two on different days, their vote counted in full
+	// instead of half, and this test failed for that hour of every day.
 	if _, err := db.Exec(`
-		INSERT INTO feed_events (user_id, content_id, content_type, event_type, watch_duration_ms)
-		VALUES ('5102', $1, 'response', 'complete', 5000),
-		       ('5103', $1, 'response', 'share', 0),
-		       ('5106', $2, 'challenge', 'view', 9000)`, rid, cid); err != nil {
+		INSERT INTO feed_events (user_id, content_id, content_type, event_type, watch_duration_ms, created_at)
+		VALUES ('5102', $1, 'response', 'complete', 5000, NOW() - INTERVAL '1 hour'),
+		       ('5103', $1, 'response', 'share', 0, NOW() - INTERVAL '1 hour'),
+		       ('5106', $2, 'challenge', 'view', 9000, NOW() - INTERVAL '1 hour')`, rid, cid); err != nil {
 		t.Fatal(err)
 	}
 	// 5106's view above is UNTAGGED: from before the app said which side it

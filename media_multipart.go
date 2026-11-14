@@ -27,12 +27,18 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 )
 
 const multipartPresignExpiry = 30 * time.Minute
+
+// multipartMaxParts is the most pieces one file may be uploaded in. The
+// app cuts a file into pieces of a few megabytes, so 200 pieces is far
+// more than the longest video it makes.
+const multipartMaxParts = 200
 
 type multipartRequest struct {
 	Action     string `json:"action"`
@@ -76,6 +82,11 @@ func MultipartPresignHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Action {
 	case "init":
+		// The same budget as a one-piece upload (media_handlers.go).
+		if !allowAction(userID, "upload_start") {
+			writeRateLimited(w, "upload_start")
+			return
+		}
 		key, err := buildObjectKey(userID, newUploadID(), req.Kind, req.Variant)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -97,6 +108,19 @@ func MultipartPresignHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "key not owned by caller", http.StatusForbidden)
 			return
 		}
+		// A file in pieces has at most multipartMaxParts of them, and one
+		// person signs only so many pieces an hour. Storage takes up to
+		// 10,000 pieces of 5 GB each: nothing here ever needs that.
+		if req.Action == "part" {
+			if req.PartNumber < 1 || req.PartNumber > multipartMaxParts {
+				http.Error(w, "that file is too big to upload", http.StatusRequestEntityTooLarge)
+				return
+			}
+			if !allowAction(userID, "upload_part") {
+				writeRateLimited(w, "upload_part")
+				return
+			}
+		}
 		var u string
 		var err error
 		switch req.Action {
@@ -108,7 +132,8 @@ func MultipartPresignHandler(w http.ResponseWriter, r *http.Request) {
 			u, err = cfg.PresignMultipartAbortURL(req.Key, req.UploadID, multipartPresignExpiry)
 		}
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Printf("upload in pieces: signing %s for user %s failed: %v", req.Action, userID, err)
+			http.Error(w, "that upload could not be signed", http.StatusBadRequest)
 			return
 		}
 		writeURL(u, nil)

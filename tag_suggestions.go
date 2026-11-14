@@ -197,7 +197,7 @@ func decideTagSuggestions(w http.ResponseWriter, r *http.Request, s tagSurface) 
 	said := dismissTags(dismissed, offered, req.Dismiss)
 
 	if err := saveTagDecision(s, id, keep, said); err != nil {
-		http.Error(w, "could not save: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "saving a tag decision", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, tagSuggestions{
@@ -309,7 +309,7 @@ func writeTagStateError(w http.ResponseWriter, err error) {
 		http.Error(w, "response not found", http.StatusNotFound)
 		return
 	}
-	http.Error(w, "could not read: "+err.Error(), http.StatusInternalServerError)
+	serverFault(w, "reading tag suggestions", err)
 }
 
 // readTagState loads everything both handlers need in one query.

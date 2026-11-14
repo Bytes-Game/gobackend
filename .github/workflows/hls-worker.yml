@@ -15,10 +15,14 @@ name: hls-worker
 # Required repo secrets (Settings → Secrets and variables → Actions):
 #   HLS_WORKER_TOKEN     — same value as the backend's env var
 #   R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
-#   R2_PUBLIC_BASE_URL   — optional OVERRIDE (custom domain/CDN). When
-#                          unset, the worker uses the publicBaseUrl the
-#                          backend sends with each job — same base the
-#                          backend builds every other media URL from.
+#   R2_PUBLIC_BASE_URL   — optional, and best left unset. The backend
+#                          sends its own publicBaseUrl with each job (the
+#                          base it builds every other media URL from), and
+#                          the worker uses that whenever it is there. This
+#                          one is only used for a backend too old to send
+#                          one. It used to win, so a value left here kept
+#                          new videos on the old address after the backend
+#                          had moved to media.flexete.com.
 #
 # Concurrency-safe by construction: the backend's FOR UPDATE SKIP LOCKED
 # claim means overlapping runs never double-transcode; the group setting
@@ -159,7 +163,9 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          # The Go in go.mod, so a build here is the Go the server is
+          # built with and cannot drift behind it.
+          go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
 

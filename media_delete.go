@@ -314,17 +314,17 @@ var mediaDeleteStorage = loadR2Config
 // thumbnail — sits in the same folder. So we strip the public prefix off the
 // front and the filename off the end, leaving "u/29/4ab2fd.../".
 //
+// The public prefix is today's, or any earlier one this server handed files
+// out at (keyOfStoredFile): a video posted before the address changed is
+// still ours, and must still be cleared.
+//
 // Returns "" for anything that is not one of our own uploads, which is the
 // safe answer: a link to somewhere else must never make us delete anything.
 func mediaPrefixFromPublicURL(c *R2Config, publicURL string) string {
-	if c == nil || publicURL == "" {
+	key, ours := c.keyOfStoredFile(publicURL)
+	if !ours {
 		return ""
 	}
-	base := strings.TrimRight(c.PublicBaseURL, "/")
-	if base == "" || !strings.HasPrefix(publicURL, base+"/") {
-		return ""
-	}
-	key := strings.TrimPrefix(publicURL, base+"/")
 	if i := strings.IndexAny(key, "?#"); i >= 0 {
 		key = key[:i]
 	}

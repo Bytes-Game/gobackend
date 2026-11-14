@@ -199,6 +199,13 @@ func makeBigLongSource(t *testing.T, dir, name string) string {
 	return path
 }
 
+// The two addresses a whole job is given: the one the server sends with
+// the job, and the one in the worker's own settings.
+const (
+	wholeJobServers    = "https://media.test"
+	wholeJobWorkersOwn = "https://left-behind.test"
+)
+
 // runWholeJob runs processJob on a 1080p clip served over HTTP, into a
 // pretend bucket.
 func runWholeJob(t *testing.T, ctx context.Context, b *fakeBucket) jobResult {
@@ -209,8 +216,12 @@ func runWholeJob(t *testing.T, ctx context.Context, b *fakeBucket) jobResult {
 	t.Cleanup(srv.Close)
 	useFakeBucket(t, b)
 
-	res, err := processJob(ctx, &workerConfig{R2PublicBase: "https://cdn.test"}, pendingJob{
+	// The server sends one address and the worker's own setting holds
+	// another, as on the day the videos move and the old value is still in
+	// the worker's settings. See publicBaseFor.
+	res, err := processJob(ctx, &workerConfig{R2PublicBase: wholeJobWorkersOwn}, pendingJob{
 		ChallengeID: "77", SourceURL: srv.URL + "/big.mp4", Kind: "challenge", MaxSeconds: 180,
+		PublicBaseURL: wholeJobServers + "/",
 	})
 	if err != nil {
 		t.Fatalf("processJob: %v", err)
@@ -260,6 +271,21 @@ func TestProcessJob_TheH264HalfIsUpBeforeAnyH265FileIsMade(t *testing.T) {
 	}
 	if !strings.HasSuffix(res.ManifestURL, "/master.m3u8") {
 		t.Errorf("manifest %q", res.ManifestURL)
+	}
+	// Every address the job reports is under the SERVER's address, though
+	// the worker's own settings name another: the files the app plays, the
+	// picture, and the streaming list.
+	addresses := map[string]string{"the streaming list": res.ManifestURL, "the picture": res.ThumbnailURL}
+	for label, u := range res.VideoVariants {
+		addresses[label] = u
+	}
+	for what, u := range addresses {
+		if u != "" && !strings.HasPrefix(u, wholeJobServers+"/hls/77/") {
+			t.Errorf("%s is at %q, not under the address the server sent (%s)", what, u, wholeJobServers)
+		}
+	}
+	if len(res.VideoVariants) == 0 || res.ManifestURL == "" {
+		t.Error("nothing to check the address of")
 	}
 }
 

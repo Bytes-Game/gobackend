@@ -158,6 +158,11 @@ func authed(h http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "invalid or expired token", http.StatusUnauthorized)
 			return
 		}
+		// Where this person is right now (country.go): kept on the account
+		// when it changes, for the feed and for the rules of that country.
+		if country, _ := countryOf(r); country != "" {
+			noteCountry(claims.Subject, country)
+		}
 		ctx := context.WithValue(r.Context(), userIDContextKey, claims.Subject)
 		ctx = context.WithValue(ctx, usernameContextKey, claims.Username)
 		h(w, r.WithContext(ctx))

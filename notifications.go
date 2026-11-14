@@ -160,16 +160,25 @@ func saveNotificationPrefs(p NotificationPrefs) error {
 // app on this phone draws message notifications itself, with Reply; it is
 // set again on every registration, so an app updated to (or back from) a
 // version that draws its own is believed the next time it starts.
+// errPushTokenInput marks a refusal that is about what the app sent, which
+// the app is told. Any other error from registerDeviceToken is the
+// database's, and stays in the log.
+var errPushTokenInput = errors.New("notification address not accepted")
+
 func registerDeviceToken(userID, token, platform string, drawsOwn bool) error {
 	if db == nil {
 		return errors.New("db missing")
 	}
 	if userID == "" || token == "" {
-		return errors.New("userID and token required")
+		return fmt.Errorf("%w: userID and token required", errPushTokenInput)
+	}
+	// A real one is a few hundred characters. Longer is not a phone's.
+	if len(token) > 4096 {
+		return fmt.Errorf("%w: token too long", errPushTokenInput)
 	}
 	platform = strings.ToLower(platform)
 	if platform != "fcm" && platform != "apns" {
-		return fmt.Errorf("unsupported platform %q", platform)
+		return fmt.Errorf("%w: unsupported platform %q", errPushTokenInput, platform)
 	}
 	_, err := db.Exec(`
 		INSERT INTO device_tokens (token, user_id, platform, registered_at, last_seen_at, active, draws_own)
@@ -424,10 +433,14 @@ func markFailed(id int64, reason string) {
 // markClicked is called from the click-tracking endpoint. The transition
 // 'sent' → 'clicked' is what powers the notification → open conversion
 // funnel in /admin/funnels.
-func markClicked(id int64) {
-	if db == nil {
+func markClicked(id int64, userID string) {
+	if db == nil || userID == "" {
 		return
 	}
-	_, _ = db.Exec(`UPDATE notification_outbox
-		SET status='clicked', clicked_at = NOW() WHERE id = $1 AND status = 'sent'`, id)
+	// Only the person it was sent to can say they tapped it. This used to
+	// take any number from anybody, signed in or not.
+	_, err := db.Exec(`UPDATE notification_outbox
+		SET status='clicked', clicked_at = NOW()
+		WHERE id = $1 AND user_id = $2 AND status = 'sent'`, id, userID)
+	queryFailed("noting that a notification was tapped", "the tap is not counted", err)
 }

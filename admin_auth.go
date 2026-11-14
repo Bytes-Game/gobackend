@@ -23,12 +23,31 @@ import (
 // Constant-time comparison prevents timing side-channels (not critical for a
 // private admin, but cheap to get right).
 
+// adminCrossSite tells a request sent by this server's own pages (or by a
+// tool like curl, which no other website can make a browser act as) from
+// one a page on another website made the browser send. Go's own check: it
+// reads the Sec-Fetch-Site header browsers add, and the Origin header when
+// that is missing. Reads (GET, HEAD, OPTIONS) always pass.
+var adminCrossSite = http.NewCrossOriginProtection()
+
 // adminOnly wraps a handler and requires valid Basic Auth credentials.
 // Usage:
 //
 //	api.HandleFunc("/admin/foo", adminOnly(FooHandler)).Methods("GET")
 func adminOnly(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// A change (anything but a read) must come from this server's own
+		// pages or from a tool like curl, never from another website. The
+		// browser remembers the admin's sign-in and sends it along with any
+		// request to this server — including one a page elsewhere makes it
+		// send — so without this, visiting the wrong page while signed in
+		// to /admin could delete videos or block music without a click.
+		if err := adminCrossSite.Check(r); err != nil {
+			log.Printf("admin: refused a %s to %s sent from another website", r.Method, r.URL.Path)
+			http.Error(w, "admin changes must come from the admin pages themselves", http.StatusForbidden)
+			return
+		}
+
 		wantUser := os.Getenv("ADMIN_USER")
 		wantPass := os.Getenv("ADMIN_PASS")
 
@@ -62,8 +81,8 @@ func adminOnly(h http.HandlerFunc) http.HandlerFunc {
 //
 // The admin surface is not a minor one: /admin/diagnostics, /admin/errors and
 // /admin/feed-health expose user behaviour and operational internals, and
-// /admin/reseed DROPS AND REBUILDS THE DATABASE. Guessing this password is
-// not a read-only mistake.
+// /admin/reports can DELETE VIDEOS AND SUSPEND ACCOUNTS. Guessing this
+// password is not a read-only mistake.
 var weakAdminPasswords = map[string]bool{
 	"password":      true,
 	"password123":   true,
@@ -115,9 +134,9 @@ func checkAdminConfig() {
 	switch {
 	case weakAdminPasswords[strings.ToLower(pass)]:
 		log.Println("SECURITY WARNING: ADMIN_PASS is one of the most commonly guessed " +
-			"passwords. The admin surface can read user analytics and can WIPE AND " +
-			"RESEED THE DATABASE (/admin/reseed). Rotate it before this service takes " +
-			"real traffic.")
+			"passwords. The admin surface can read user analytics and can DELETE " +
+			"VIDEOS AND SUSPEND ACCOUNTS (/admin/reports). Rotate it before this service " +
+			"takes real traffic.")
 	case len(pass) < minAdminPassLen:
 		log.Printf("SECURITY WARNING: ADMIN_PASS is only %d characters. The admin gate "+
 			"has no lockout of its own, so short passwords are brute-forceable. Use at "+

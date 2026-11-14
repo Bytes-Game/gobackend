@@ -182,14 +182,17 @@ func fcmPayload(notif OutboxRow, token string) map[string]interface{} {
 		"data":    data,
 		"android": android,
 	}
+	// An iPhone plays no sound for a push unless the push asks for one, so
+	// every push asks. Only a push with a Tag is grouped: before this, a
+	// push without one (a battle result, a new follower) had no iPhone
+	// part at all, and arrived silently.
+	aps := map[string]interface{}{"sound": "default"}
+	apns := map[string]interface{}{"payload": map[string]interface{}{"aps": aps}}
 	if notif.Tag != "" {
-		message["apns"] = map[string]interface{}{
-			"headers": map[string]string{"apns-collapse-id": notif.Tag},
-			"payload": map[string]interface{}{
-				"aps": map[string]interface{}{"thread-id": notif.Tag, "sound": "default"},
-			},
-		}
+		aps["thread-id"] = notif.Tag
+		apns["headers"] = map[string]string{"apns-collapse-id": notif.Tag}
 	}
+	message["apns"] = apns
 	return map[string]interface{}{"message": message}
 }
 

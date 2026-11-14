@@ -18,6 +18,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 )
@@ -90,6 +91,13 @@ func PresignMediaUploadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "userId is required", http.StatusBadRequest)
 		return
 	}
+	// How many uploads one person may start. Every address handed out here
+	// lets them put a file in storage that the owner pays for; without a
+	// limit one account could ask for thousands.
+	if !allowAction(payload.UserID, "upload_start") {
+		writeRateLimited(w, "upload_start")
+		return
+	}
 	if len(payload.Items) == 0 {
 		http.Error(w, "items must contain at least one entry", http.StatusBadRequest)
 		return
@@ -113,7 +121,8 @@ func PresignMediaUploadHandler(w http.ResponseWriter, r *http.Request) {
 		// instance with missing R2_* env vars fails loudly instead of
 		// returning malformed URLs. This is a 503 because the
 		// dependency (R2 credentials) isn't ready, not the request.
-		http.Error(w, "media storage not configured: "+err.Error(), http.StatusServiceUnavailable)
+		log.Printf("upload: storage is not set up: %v", err)
+		http.Error(w, "Uploading isn't available right now.", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -142,7 +151,7 @@ func PresignMediaUploadHandler(w http.ResponseWriter, r *http.Request) {
 
 		uploadURL, err := cfg.PresignPutURL(key, presignExpiry)
 		if err != nil {
-			http.Error(w, "failed to sign URL: "+err.Error(), http.StatusInternalServerError)
+			serverFault(w, "signing an upload", err)
 			return
 		}
 		out.Items = append(out.Items, presignItemResponse{

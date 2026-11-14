@@ -82,7 +82,9 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          # The Go in go.mod, so a build here is the Go the server is
+          # built with and cannot drift behind it.
+          go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
 
@@ -94,9 +96,14 @@ jobs:
 
       # Race detector. CGO is available on Linux runners, so -race works
       # here even when developers on Windows machines can't run it locally.
+      #
+      # Fifteen minutes, not ten. On 9 November a run that passed took nine
+      # and a half: the suite has grown with every feature, and a limit that
+      # close fails a good change on a slow runner. A run that really hangs
+      # is still stopped.
       - name: go test -race
         run: go test -race -count=1 ./...
-        timeout-minutes: 10
+        timeout-minutes: 15
 
       # Every check staticcheck has, not the default subset.
       #
@@ -110,10 +117,14 @@ jobs:
       # function's own name). Real style points, no bearing on whether the code
       # is correct, and thirteen of them would train everybody to ignore this
       # job's output. Correctness checks stay on; typography does not.
+      # The version moves with Go. 2025.1 cannot read what Go 1.27 writes
+      # ("export data version 5 is greater than maximum supported"): it
+      # failed on every file without having looked at one. When go.mod's Go
+      # goes up, check the newest staticcheck against it and set it here.
       - name: staticcheck
         uses: dominikh/staticcheck-action@v1
         with:
-          version: '2025.1'
+          version: '2026.2.2'
           install-go: false
           checks: 'all,-ST1003,-ST1020,-ST1021,-ST1022'
 
@@ -170,7 +181,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          # The Go in go.mod, so a build here is the Go the server is
+          # built with and cannot drift behind it.
+          go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
       - name: smoke test

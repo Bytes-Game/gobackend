@@ -74,6 +74,10 @@ func withDB(t *testing.T) func() {
 	prevCS, prevUP := disableContentScoreCache, disableUserProfileCache
 	disableContentScoreCache, disableUserProfileCache = true, true
 
+	// What is remembered about where each account is (country.go) is
+	// per-process too.
+	forgetCountries()
+
 	// The real schema, built by the real migration path.
 	runMigrations()
 	// …and then UNDO the part of it that would quietly disarm your test.
@@ -138,7 +142,7 @@ func truncateAudit(t *testing.T) {
 	t.Helper()
 	// No RESTART IDENTITY: ids keep climbing, so no two tests can ever land on
 	// the same content id and read each other's cached score.
-	for _, tbl := range []string{"feed_events", "challenges", "user_profiles", "users"} {
+	for _, tbl := range []string{"feed_events", "challenges", "user_profiles", "users", "pending_signups"} {
 		if _, err := db.Exec("TRUNCATE " + tbl + " CASCADE"); err != nil {
 			t.Logf("truncate %s: %v", tbl, err)
 		}

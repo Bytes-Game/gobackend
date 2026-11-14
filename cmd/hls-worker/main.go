@@ -208,7 +208,7 @@ type workerConfig struct {
 	R2Bucket     string
 	R2AccessKey  string
 	R2SecretKey  string
-	R2PublicBase string // e.g. https://media.devf.com  (no trailing slash)
+	R2PublicBase string // only used when the server sends none with a job (publicBaseFor)
 }
 
 func loadConfig() (*workerConfig, error) {
@@ -246,9 +246,10 @@ func loadConfig() (*workerConfig, error) {
 	// subdomain is a random per-bucket hash, and dev URLs take the object
 	// key directly, no bucket segment) — which poisoned every stored
 	// manifest URL with a 401ing host while the uploads themselves were
-	// fine. When the env is unset we now use the backend-provided
-	// publicBaseUrl from each job (see processJob), which is authoritative
-	// because the backend builds all other media URLs from it.
+	// fine. The backend sends its own publicBaseUrl with each job, and
+	// that one is used whenever it is there (see publicBaseFor): the
+	// backend builds all other media URLs from it. This setting is only
+	// the fallback for a backend too old to send one.
 	return c, nil
 }
 
@@ -385,6 +386,49 @@ type jobResult struct {
 	Ladder        []string
 }
 
+// publicBaseFor is the address put in front of every file this job makes.
+//
+// The server's wins. It sends the one it builds every other file's address
+// from, and that is the one that changes when the videos move to their own
+// address (media.flexete.com). The worker's own R2_PUBLIC_BASE_URL used to
+// win, so a value left behind in the GitHub secret would have kept the
+// playing files of every new video on the old address after the server
+// had moved, with nothing anywhere to show for it. The worker's own is now
+// for a server too old to send one.
+//
+// One exception. A server with no R2_PUBLIC_BASE_URL of its own sends a
+// guess (guessedPublicBase), and Cloudflare does not answer at it. When
+// the worker has an address of its own, that beats the guess.
+//
+// Neither: an error. Refusing to guess beats writing an address that
+// answers 401 to every viewer while the job "succeeds".
+func publicBaseFor(cfg *workerConfig, job pendingJob) (string, error) {
+	sent := strings.TrimRight(strings.TrimSpace(job.PublicBaseURL), "/")
+	own := ""
+	if cfg != nil {
+		own = cfg.R2PublicBase
+	}
+	if sent != "" && (own == "" || sent != guessedPublicBase(cfg)) {
+		return sent, nil
+	}
+	if own != "" {
+		return own, nil
+	}
+	return "", fmt.Errorf("no public base URL: the server sent none with the job, " +
+		"and R2_PUBLIC_BASE_URL is not set here")
+}
+
+// guessedPublicBase is the address a server with no R2_PUBLIC_BASE_URL
+// makes up (loadR2Config in the server): the account and the bucket in a
+// shape Cloudflare never answers at. The real public address of a bucket
+// is a random name, and takes no bucket after it.
+func guessedPublicBase(cfg *workerConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return fmt.Sprintf("https://pub-%s.r2.dev/%s", cfg.R2AccountID, cfg.R2Bucket)
+}
+
 func runJob(cfg *workerConfig, job pendingJob, timeout time.Duration) (jobResult, error) {
 	if timeout <= 0 {
 		return processJob(context.Background(), cfg, job)
@@ -458,15 +502,9 @@ func processJob(ctx context.Context, cfg *workerConfig, job pendingJob) (jobResu
 		return jobResult{}, err
 	}
 
-	// Env override wins (custom domain / CDN in front of R2); otherwise
-	// trust the backend's base. Refusing to guess beats writing a URL
-	// that 401s for every viewer while the transcode "succeeds".
-	base := cfg.R2PublicBase
-	if base == "" {
-		base = strings.TrimRight(strings.TrimSpace(job.PublicBaseURL), "/")
-	}
-	if base == "" {
-		return jobResult{}, fmt.Errorf("no public base URL: set R2_PUBLIC_BASE_URL or deploy a backend that sends publicBaseUrl")
+	base, err := publicBaseFor(cfg, job)
+	if err != nil {
+		return jobResult{}, err
 	}
 	manifestURL := base + "/" + prefix + "/master.m3u8"
 

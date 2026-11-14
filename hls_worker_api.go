@@ -26,6 +26,7 @@ package main
 // the token is a config change.
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -182,12 +183,12 @@ func hlsTableForKind(kind string) string {
 	return "challenges"
 }
 
-// workerAuthed wraps a handler with the X-Worker-Token check. We do
-// constant-time comparison via crypto/subtle indirectly through string
-// equality (Go's == on strings is constant-time-ish for equal-length
-// strings, which is good enough for an internal-only token whose only
-// adversary is a misconfigured external caller, not a side-channel
-// attacker — the workers themselves see plaintext tokens anyway).
+// workerAuthed wraps a handler with the X-Worker-Token check. The token is
+// compared in constant time (crypto/subtle): Go's == stops at the first
+// byte that differs, so how long a wrong guess takes to be refused tells
+// the guesser how much of it was right. Slow to use over the internet, but
+// these routes are on the public internet, and the safe compare costs
+// nothing.
 func workerAuthed(h http.HandlerFunc) http.HandlerFunc {
 	want := strings.TrimSpace(os.Getenv("HLS_WORKER_TOKEN"))
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -198,7 +199,7 @@ func workerAuthed(h http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		got := strings.TrimSpace(r.Header.Get("X-Worker-Token"))
-		if got != want {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}

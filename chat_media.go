@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"path"
 	"regexp"
@@ -131,13 +132,14 @@ func ChatMediaPresignHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg, err := chatMediaStorage()
 	if err != nil {
-		http.Error(w, "media storage not configured: "+err.Error(), http.StatusServiceUnavailable)
+		log.Printf("chat media: storage is not set up: %v", err)
+		http.Error(w, "Sending photos and voice notes isn't available right now.", http.StatusServiceUnavailable)
 		return
 	}
 	key := fmt.Sprintf("chat/%s/%s/%s", me, newUploadID(), file)
 	uploadURL, err := cfg.PresignPutURL(key, presignExpiry)
 	if err != nil {
-		http.Error(w, "failed to sign URL: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "signing a chat media upload", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -309,10 +311,11 @@ func chatFileFolder(url string) string {
 	if err != nil || cfg == nil || url == "" {
 		return ""
 	}
-	base := strings.TrimRight(cfg.PublicBaseURL, "/") + "/"
-	key := strings.TrimPrefix(url, base)
+	// Under today's address, or an earlier one: a photo sent before the
+	// address changed is still ours to clear (keyOfStoredFile).
+	key, ours := cfg.keyOfStoredFile(url)
 	parts := strings.Split(key, "/")
-	if key == url || len(parts) != 4 || parts[0] != "chat" ||
+	if !ours || len(parts) != 4 || parts[0] != "chat" ||
 		!chatSenderNumber.MatchString(parts[1]) ||
 		!chatMediaRest.MatchString(parts[2]+"/"+parts[3]) {
 		return ""

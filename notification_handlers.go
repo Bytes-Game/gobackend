@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 )
@@ -49,7 +50,13 @@ func HandleRegisterPushToken(w http.ResponseWriter, r *http.Request) {
 	// Register the token against the authenticated user.
 	body.UserID = authUserID(r)
 	if err := registerDeviceToken(body.UserID, body.Token, body.Platform, body.DrawsOwn); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		// What the app sent wrong is said back to it. A database that
+		// could not save is ours to know about, not the caller's.
+		if errors.Is(err, errPushTokenInput) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		serverFault(w, "saving a phone's notification address", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -124,7 +131,7 @@ func HandleSetNotificationPrefs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := saveNotificationPrefs(p); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverFault(w, "saving notification settings", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -150,7 +157,7 @@ func HandleNotificationClicked(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id must be numeric", http.StatusBadRequest)
 		return
 	}
-	markClicked(id)
+	markClicked(id, authUserID(r))
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }

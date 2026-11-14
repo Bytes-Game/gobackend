@@ -45,6 +45,16 @@ type R2Config struct {
 	// public-bucket URL or a custom domain bound to the bucket). Trailing
 	// slash optional — we trim it.
 	PublicBaseURL string
+	// OldPublicBaseURLs are earlier public addresses of the same bucket,
+	// listed by hand in R2_OLD_PUBLIC_BASE_URLS. Files saved under them are
+	// still ours (media_addresses.go). The server also writes down each
+	// address it starts with, so this is only needed for an address it
+	// never ran with.
+	OldPublicBaseURLs []string
+	// PublicBaseGuessed is true when R2_PUBLIC_BASE_URL was not set and
+	// PublicBaseURL is the stand-in below. Cloudflare does not answer at
+	// that address, so the server says so at start (mediaAddressLine).
+	PublicBaseGuessed bool
 }
 
 var (
@@ -59,11 +69,12 @@ var (
 func loadR2Config() (*R2Config, error) {
 	r2Once.Do(func() {
 		cfg := &R2Config{
-			AccountID:       strings.TrimSpace(getEnvFromOS("R2_ACCOUNT_ID")),
-			Bucket:          strings.TrimSpace(getEnvFromOS("R2_BUCKET")),
-			AccessKeyID:     strings.TrimSpace(getEnvFromOS("R2_ACCESS_KEY_ID")),
-			SecretAccessKey: strings.TrimSpace(getEnvFromOS("R2_SECRET_ACCESS_KEY")),
-			PublicBaseURL:   strings.TrimRight(strings.TrimSpace(getEnvFromOS("R2_PUBLIC_BASE_URL")), "/"),
+			AccountID:         strings.TrimSpace(getEnvFromOS("R2_ACCOUNT_ID")),
+			Bucket:            strings.TrimSpace(getEnvFromOS("R2_BUCKET")),
+			AccessKeyID:       strings.TrimSpace(getEnvFromOS("R2_ACCESS_KEY_ID")),
+			SecretAccessKey:   strings.TrimSpace(getEnvFromOS("R2_SECRET_ACCESS_KEY")),
+			PublicBaseURL:     strings.TrimRight(strings.TrimSpace(getEnvFromOS("R2_PUBLIC_BASE_URL")), "/"),
+			OldPublicBaseURLs: publicAddressList(getEnvFromOS("R2_OLD_PUBLIC_BASE_URLS")),
 		}
 		missing := []string{}
 		if cfg.AccountID == "" {
@@ -84,6 +95,7 @@ func loadR2Config() (*R2Config, error) {
 			// real traffic until the bucket is actually marked public, but
 			// it lets the API respond consistently.
 			cfg.PublicBaseURL = fmt.Sprintf("https://pub-%s.r2.dev/%s", cfg.AccountID, cfg.Bucket)
+			cfg.PublicBaseGuessed = true
 		}
 		if len(missing) > 0 {
 			r2Err = fmt.Errorf("R2 not configured: missing env %s", strings.Join(missing, ","))

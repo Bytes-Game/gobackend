@@ -479,7 +479,7 @@ func TestPasswordReset_ResendRefusingIsSaidAndCanBeAskedAgain(t *testing.T) {
 	resetActionLimiters(t)
 	emails, answer := resendStandIn(t)
 	defer resetter(t, 9943, "refused_once", "refused.once@example.com")()
-	var logged bytes.Buffer
+	var logged lockedLog
 	log.SetOutput(&logged)
 	defer log.SetOutput(os.Stderr)
 
@@ -616,7 +616,7 @@ func TestPasswordReset_TheCodeIsNeverKept(t *testing.T) {
 	resetActionLimiters(t)
 	mails := smtpStandIn(t)
 	defer resetter(t, 9908, "keeps_nothing", "keeps.nothing@example.com")()
-	var logged bytes.Buffer
+	var logged lockedLog
 	log.SetOutput(&logged)
 	defer log.SetOutput(os.Stderr)
 

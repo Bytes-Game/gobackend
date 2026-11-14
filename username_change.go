@@ -140,7 +140,11 @@ func ChangeUsernameHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var taken bool
-	err = db.QueryRow(`SELECT EXISTS (SELECT 1 FROM users WHERE lower(username) = lower($1) AND id::text <> $2)`,
+	// Taken by an account, or held by a sign-up that is waiting for a
+	// parent (parent_consent.go).
+	err = db.QueryRow(`
+		SELECT EXISTS (SELECT 1 FROM users WHERE lower(username) = lower($1) AND id::text <> $2)
+		    OR EXISTS (SELECT 1 FROM pending_signups WHERE lower(username) = lower($1) AND expires_at > NOW())`,
 		name, uid).Scan(&taken)
 	if queryFailed("whether "+name+" is taken", "the change is refused", err) {
 		http.Error(w, "temporarily unavailable", http.StatusInternalServerError)

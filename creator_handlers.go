@@ -33,7 +33,7 @@ func HandleCreatorInsightsOverview(w http.ResponseWriter, r *http.Request) {
 
 	overview, err := buildCreatorOverview(creatorID, windowDays)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverFault(w, "reading creator insights", err)
 		return
 	}
 
@@ -67,7 +67,7 @@ func HandleCreatorInsightsPerContent(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this content does not belong to you", http.StatusForbidden)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverFault(w, "reading insights for one video", err)
 		return
 	}
 

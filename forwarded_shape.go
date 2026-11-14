@@ -21,10 +21,27 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 )
+
+// trustCloudflareAddress is whether the header Cloudflare writes with the
+// caller's address (CF-Connecting-IP) is believed.
+//
+// Yes on Render: Render puts Cloudflare in front of every service, and
+// Cloudflare replaces that header on the way in, so a caller cannot set it.
+// Render marks its machines with RENDER=true. Anywhere else it is believed
+// only when the owner says the same is true there, with
+// TRUST_CF_CONNECTING_IP=true: on a host with no Cloudflare in front, the
+// header would be the caller's to type.
+func trustCloudflareAddress() bool {
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("TRUST_CF_CONNECTING_IP"))); v != "" {
+		return v == "true" || v == "1" || v == "yes"
+	}
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("RENDER")), "true")
+}
 
 var forwardedShapeOnce sync.Once
 
@@ -57,10 +74,13 @@ func noteForwardedShape(r *http.Request) {
 		return
 	}
 	forwardedShapeOnce.Do(func() {
+		using := "the first address in X-Forwarded-For, which a caller can choose"
+		if trustCloudflareAddress() && r.Header.Get("CF-Connecting-IP") != "" {
+			using = "CF-Connecting-IP, which only Cloudflare can write"
+		} else if trustCloudflareAddress() {
+			using += " — CF-Connecting-IP is trusted here but did not arrive, so the per-address limits can be dodged"
+		}
 		log.Printf("how the host forwards the caller's address (first request since start): %s. "+
-			"On a request from the app, one address means the host writes the "+
-			"list and the per-address limits hold; more than one means entries "+
-			"were added on the way and clientIP's choice needs checking.",
-			forwardedShape(r))
+			"The per-address limits use %s.", forwardedShape(r), using)
 	})
 }

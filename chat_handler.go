@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -282,7 +283,7 @@ func EditMessageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := EditChatMessage(msgID, senderID, payload.Text); err != nil {
-		http.Error(w, err.Error(), http.StatusForbidden)
+		chatChangeRefused(w, "editing a message", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -308,7 +309,7 @@ func DeleteMessageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := DeleteChatMessage(msgID, senderID); err != nil {
-		http.Error(w, err.Error(), http.StatusForbidden)
+		chatChangeRefused(w, "deleting a message", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -329,6 +330,12 @@ func ForwardMessageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// The forwarder is the authenticated user.
 	payload.SenderID = authUserID(r)
+	// Forwarding is sending: the same budget, or one message could be
+	// passed on to thousands of people.
+	if !allowAction(payload.SenderID, "chat") {
+		writeRateLimited(w, "chat")
+		return
+	}
 	msgID, _ := strconv.Atoi(payload.MessageID)
 	senderID, _ := strconv.Atoi(payload.SenderID)
 	receiverID, _ := strconv.Atoi(payload.ReceiverID)
@@ -435,7 +442,7 @@ func SaveChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	payload.UserID = authUserID(r)
 	saved, err := ToggleSaveChallenge(payload.UserID, payload.ChallengeID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverFault(w, "saving a video", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -505,4 +512,18 @@ func deliverChatMessage(recipientUsername string, msg ChatMessage) {
 	if id, err := strconv.Atoi(msg.ID); err == nil {
 		markDeliveredAndTell(id, msg.SenderUsername, msg.ReceiverID)
 	}
+}
+
+// chatChangeRefused answers a failed edit or delete. A "no" about the
+// message itself (not yours, too late) is said as it is. A database that
+// failed used to be said the same way, with its own error text and "403":
+// the app showed a table's name, and the sender was told they were not
+// allowed when the truth was that it had not been tried.
+func chatChangeRefused(w http.ResponseWriter, doing string, err error) {
+	var no chatRefusal
+	if errors.As(err, &no) {
+		http.Error(w, no.Error(), http.StatusForbidden)
+		return
+	}
+	serverFault(w, doing, err)
 }

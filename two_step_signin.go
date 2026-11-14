@@ -122,6 +122,13 @@ func askForSecondStep(w http.ResponseWriter, user User) {
 // answer ("keep it") needs nothing typed again: not the password, not a
 // code that has been used already.
 func completeSignIn(w http.ResponseWriter, r *http.Request, user User, keep bool) {
+	// Suspended by the admin (moderation.go): no sign-in, by any way in.
+	// Every way in (password, two-step, Google, Apple) ends here.
+	if accountSuspended(user.ID) {
+		log.Printf("sign-in: %s is suspended; refused", user.Username)
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": suspendedMessage, "suspended": true})
+		return
+	}
 	if deleteOn, waiting := deletionDate(user.ID); waiting {
 		if !keep {
 			ticket, err := issueTicket(user.ID, stageVerified)

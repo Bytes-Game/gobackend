@@ -132,13 +132,18 @@ func CreateChallengeHandler(w http.ResponseWriter, r *http.Request) {
 
 	challenge, err := CreateChallenge(payload)
 	if err != nil {
-		http.Error(w, "Failed to create challenge: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "creating a challenge for user "+payload.CreatorID, err)
 		return
 	}
 	// Keep what the gate measured. The row is already published and useful
 	// without it, so this is off the response path.
 	if measured {
 		go recordVideoDimensions("challenge", challenge.ID, dims)
+	}
+	// Where it was posted from, so the feed can show it first to people in
+	// the same country (country.go). Off the response path too.
+	if country, _ := countryOf(r); country != "" {
+		go stampCountry(challenge.ID, country)
 	}
 
 	// A challenge for friends: every friend it is for hears about it — all
@@ -370,7 +375,7 @@ func AcceptChallengeHandler(w http.ResponseWriter, r *http.Request) {
 
 	response, err := AcceptChallenge(payload)
 	if err != nil {
-		http.Error(w, "Failed to accept challenge: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "accepting challenge "+payload.ChallengeID+" for user "+payload.ResponderID, err)
 		return
 	}
 	if measured {
@@ -428,7 +433,7 @@ func VoteChallengeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		http.Error(w, "Failed to cast vote: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "casting a vote on challenge "+payload.ChallengeID, err)
 		return
 	}
 
@@ -454,6 +459,14 @@ func VoteChallengeHandler(w http.ResponseWriter, r *http.Request) {
 func GetVoteResultsHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
+
+	// Only for somebody who may watch the video. This route is open without
+	// signing in, and the votes name the two players: for a friends-only
+	// battle, or a private account's, that told a stranger who was in it.
+	if !viewerMayWatch(signedInUserID(r), id) {
+		http.Error(w, "Challenge not found", http.StatusNotFound)
+		return
+	}
 
 	votes := GetVoteSummary(id)
 	if votes == nil {
@@ -499,7 +512,7 @@ func AddChallengeCommentHandler(w http.ResponseWriter, r *http.Request) {
 
 	comment, err := AddChallengeComment(payload.ChallengeID, payload.UserID, payload.Username, payload.Text)
 	if err != nil {
-		http.Error(w, "Failed to add comment: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "adding a comment to challenge "+payload.ChallengeID, err)
 		return
 	}
 
@@ -683,7 +696,7 @@ func DeleteChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := DeleteChallengeByID(payload.ChallengeID); err != nil {
-		http.Error(w, "Failed to delete: "+err.Error(), http.StatusInternalServerError)
+		serverFault(w, "deleting challenge "+payload.ChallengeID, err)
 		return
 	}
 

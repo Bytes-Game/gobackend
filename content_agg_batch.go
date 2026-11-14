@@ -118,6 +118,15 @@ func loadEngagementAggregates(typ string, ids []string, into map[string]*content
 	if db == nil || len(ids) == 0 {
 		return nil
 	}
+	// Each person counts ONCE for each kind of thing they did to a video.
+	//
+	// These numbers come from what phones report, and a phone can report
+	// anything, any number of times. Counted row by row, one account with a
+	// script could send "viewed", "liked" and "shared" for its own video
+	// ten thousand times and ride to the top of everybody's feed. Counted
+	// by person, the same script is worth one view, one like and one share.
+	// The inner query folds a person's reports into one row per kind; the
+	// averages are of people, not of reports, for the same reason.
 	rows, err := db.Query(`
 		SELECT content_id,
 			COUNT(*) FILTER (WHERE event_type = 'view'),
@@ -130,9 +139,15 @@ func loadEngagementAggregates(typ string, ids []string, into map[string]*content
 			COUNT(*) FILTER (WHERE event_type = 'not_interested'),
 			COALESCE(AVG(completion_rate) FILTER (WHERE event_type = 'view'), 0),
 			COALESCE(AVG(watch_duration_ms) FILTER (WHERE event_type = 'view'), 0)
-		FROM feed_events
-		WHERE content_id = ANY($1) AND content_type = $2
-		  AND created_at > NOW() - INTERVAL '90 days'
+		FROM (
+			SELECT content_id, user_id, event_type,
+			       AVG(completion_rate) AS completion_rate,
+			       AVG(watch_duration_ms) AS watch_duration_ms
+			  FROM feed_events
+			 WHERE content_id = ANY($1) AND content_type = $2
+			   AND created_at > NOW() - INTERVAL '90 days'
+			 GROUP BY content_id, user_id, event_type
+		) once_each
 		GROUP BY content_id`, pq.Array(ids), typ)
 	if err != nil {
 		return err
@@ -167,13 +182,18 @@ func loadRecentEngagement(typ string, ids []string, into map[string]*contentEven
 	if db == nil || len(ids) == 0 {
 		return nil
 	}
+	// Each person once for each kind of thing, as above: trending is the
+	// easiest number of all to inflate from one account.
 	rows, err := db.Query(`
 		SELECT content_id,
 			COUNT(*) FILTER (WHERE event_type IN ('like','comment','share','save')),
 			COUNT(*) FILTER (WHERE event_type = 'view')
-		FROM feed_events
-		WHERE content_id = ANY($1) AND content_type = $2
-		  AND created_at > NOW() - INTERVAL '2 hours'
+		FROM (
+			SELECT DISTINCT content_id, user_id, event_type
+			  FROM feed_events
+			 WHERE content_id = ANY($1) AND content_type = $2
+			   AND created_at > NOW() - INTERVAL '2 hours'
+		) once_each
 		GROUP BY content_id`, pq.Array(ids), typ)
 	if err != nil {
 		return err

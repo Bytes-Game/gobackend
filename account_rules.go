@@ -13,6 +13,7 @@ package main
 // somebody else's phone, and anything can call this server without it.
 
 import (
+	"fmt"
 	"net/mail"
 	"regexp"
 	"strings"
@@ -138,12 +139,10 @@ func cleanEmail(raw string) (string, string) {
 	return email, ""
 }
 
-// minAge is how old somebody must be to have an account.
-const minAge = 13
-
 // parseBirthDate reads a YYYY-MM-DD date of birth and says what is wrong
-// with it, if anything. [now] is passed in so tests can fix the day.
-func parseBirthDate(raw string, now time.Time) (time.Time, string) {
+// with it, if anything: not a date, or younger than [rule] allows where
+// the person is (age_rules.go). [now] is passed in so tests can fix the day.
+func parseBirthDate(raw string, now time.Time, rule ageRule) (time.Time, string) {
 	d, err := time.Parse("2006-01-02", strings.TrimSpace(raw))
 	if err != nil {
 		return time.Time{}, "Enter your date of birth."
@@ -151,8 +150,8 @@ func parseBirthDate(raw string, now time.Time) (time.Time, string) {
 	if d.Year() < 1900 || d.After(now) {
 		return time.Time{}, "Enter your real date of birth."
 	}
-	if ageOn(d, now) < minAge {
-		return time.Time{}, "You need to be 13 or older to join."
+	if ageOn(d, now) < rule.MinAge {
+		return time.Time{}, fmt.Sprintf("You need to be %d or older to join.", rule.MinAge)
 	}
 	return d, ""
 }

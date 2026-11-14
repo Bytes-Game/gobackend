@@ -378,7 +378,7 @@ func loadBattleStandings(ctx context.Context, q querier, challengeID int) (Battl
 
 	rows, err := q.QueryContext(ctx, `
 		SELECT cr.id, cr.responder_id, u.username, COALESCE(cr.views, 0),
-		       COALESCE(cr.is_hidden, FALSE) OR u.deletion_requested_at IS NOT NULL
+		       COALESCE(cr.is_hidden, FALSE) OR u.deletion_requested_at IS NOT NULL OR u.suspended_at IS NOT NULL
 		  FROM challenge_responses cr
 		  JOIN users u ON u.id = cr.responder_id
 		 WHERE cr.challenge_id = $1

@@ -29,6 +29,9 @@ package main
 // "Waiting to be deleted" is one column, users.deletion_requested_at. Lists
 // leave those accounts out with leavingUsersSQL in their query, or, where
 // the list is put together in Go, with leavingIDs().
+//
+// A suspended account (users.suspended_at, moderation.go) is left out by
+// the same means, so it is hidden everywhere a leaving one is.
 
 import (
 	"context"
@@ -55,7 +58,7 @@ const deletionWait = 30 * 24 * time.Hour
 // A handful of rows at most, read through idx_users_waiting_deletion, so it
 // costs next to nothing on any list. users.id is never NULL, which is what
 // makes NOT IN safe here.
-const leavingUsersSQL = `(SELECT id FROM users WHERE deletion_requested_at IS NOT NULL)`
+const leavingUsersSQL = `(SELECT id FROM users WHERE deletion_requested_at IS NOT NULL OR suspended_at IS NOT NULL)`
 
 // visibleAnswersOfC is how many answers challenge `c` has that anybody can
 // see: not those from an account waiting to be deleted. What decides whether
@@ -67,7 +70,7 @@ const visibleAnswersOfC = `(SELECT COUNT(*) FROM challenge_responses
 
 // leavingUserTextIDsSQL is the same list for the tables that keep user ids
 // as text (user_similarities, feed_events).
-const leavingUserTextIDsSQL = `(SELECT id::text FROM users WHERE deletion_requested_at IS NOT NULL)`
+const leavingUserTextIDsSQL = `(SELECT id::text FROM users WHERE deletion_requested_at IS NOT NULL OR suspended_at IS NOT NULL)`
 
 // leavingFresh is how long the remembered list of leaving accounts is
 // trusted before it is read again: how long a deletion, or keeping an
@@ -97,7 +100,7 @@ func leavingIDs() map[int]bool {
 	if db == nil {
 		return map[int]bool{}
 	}
-	rows, err := db.Query(`SELECT id FROM users WHERE deletion_requested_at IS NOT NULL`)
+	rows, err := db.Query(`SELECT id FROM users WHERE deletion_requested_at IS NOT NULL OR suspended_at IS NOT NULL`)
 	if queryFailed("the accounts waiting to be deleted",
 		"lists keep the last ones known, and show any new ones", err) {
 		if set != nil {
@@ -271,6 +274,9 @@ func accountPurgeRound(ctx context.Context) {
 	} else if n > 0 {
 		log.Printf("deleted %d account(s) for good: their 30 days were up", n)
 	}
+	// Sign-ups whose parent did not answer in time, or said no
+	// (parent_consent.go).
+	purgeExpiredPendingSignups()
 }
 
 // purgeDueAccounts deletes for good every account that asked to be deleted

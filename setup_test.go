@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,4 +92,27 @@ const postTestBase = "http://127.0.0.1:1"
 // stand-in storage, the way buildObjectKey lays one out.
 func testUpload(uid int, file string) string {
 	return fmt.Sprintf("%s/u/%d/up%d/%s", postTestBase, uid, time.Now().UnixNano(), file)
+}
+
+// lockedLog collects log lines for a test to read.
+//
+// A background task left over from an earlier test can write a log line at
+// the very moment a test reads what it collected. A plain bytes.Buffer is
+// not safe for that: the race detector saw it on 9 November and failed a CI
+// run whose code was fine. This one takes a lock for both.
+type lockedLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
 }

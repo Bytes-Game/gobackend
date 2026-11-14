@@ -48,6 +48,10 @@ type User struct {
 	// See profile_photo.go.
 	AvatarURL  string `json:"avatarUrl,omitempty"`
 	ProfileTag string `json:"profileTag,omitempty"`
+	// FollowRequested is true when the person looking has asked to follow
+	// this private account and its owner has not answered yet. Only set on
+	// a profile fetched for one viewer. See follow_requests.go.
+	FollowRequested bool `json:"followRequested,omitempty"`
 }
 
 // SearchResponse wraps search results with total count for pagination.

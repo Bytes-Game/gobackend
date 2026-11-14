@@ -85,13 +85,22 @@ func TestAccountRules_BirthDates(t *testing.T) {
 		"11/10/2000": false, // not the form the app sends
 		"":           false,
 	} {
-		_, why := parseBirthDate(raw, today)
+		_, why := parseBirthDate(raw, today, defaultAgeRule)
 		if got := why == ""; got != wantOK {
 			t.Errorf("%q: allowed=%v, want %v (%q)", raw, got, wantOK, why)
 		}
 	}
-	if _, why := parseBirthDate("2015-01-01", today); !strings.Contains(why, "13 or older") {
+	if _, why := parseBirthDate("2015-01-01", today, defaultAgeRule); !strings.Contains(why, "13 or older") {
 		t.Errorf("somebody under 13 is told %q", why)
+	}
+	// Where the law says 16 (age_rules.go), a 15-year-old is turned away
+	// and told the right age; a 16-year-old is not.
+	sixteen := ageRuleFor("AU")
+	if _, why := parseBirthDate("2010-10-12", today, sixteen); !strings.Contains(why, "16 or older") {
+		t.Errorf("somebody of 15 in Australia is told %q", why)
+	}
+	if _, why := parseBirthDate("2010-10-11", today, sixteen); why != "" {
+		t.Errorf("somebody of 16 in Australia is refused: %q", why)
 	}
 }
 
@@ -111,12 +120,15 @@ func TestAccountRules_SignupChecksEveryBoxInOrder(t *testing.T) {
 	today := time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)
 	good := signupRequest{Username: " Maya ", Password: "sunset42", FullName: "",
 		Email: "Maya@Example.com", BirthDate: "2000-05-01", AcceptTerms: true}
-	acct, bad := checkSignup(good, today)
+	acct, bad := checkSignup(good, today, defaultAgeRule)
 	if bad != nil {
 		t.Fatalf("a good sign-up was refused: %v", bad)
 	}
 	if acct.username != "maya" || acct.email != "maya@example.com" || acct.fullName != "maya" {
 		t.Errorf("stored as %+v", acct)
+	}
+	if acct.parentEmail != "" {
+		t.Errorf("an adult's sign-up is to wait for a parent at %q", acct.parentEmail)
 	}
 	for field, change := range map[string]func(*signupRequest){
 		"username":  func(r *signupRequest) { r.Username = "admin" },
@@ -128,8 +140,48 @@ func TestAccountRules_SignupChecksEveryBoxInOrder(t *testing.T) {
 	} {
 		r := good
 		change(&r)
-		if _, bad := checkSignup(r, today); bad == nil || bad.Field != field {
+		if _, bad := checkSignup(r, today, defaultAgeRule); bad == nil || bad.Field != field {
 			t.Errorf("a bad %s was refused as %+v", field, bad)
 		}
+	}
+}
+
+// Somebody under the consent age must name a parent, and the parent's
+// address must be a real one that is not their own. An adult is never
+// asked, whatever they send.
+func TestAccountRules_UnderTheConsentAgeAParentIsAsked(t *testing.T) {
+	today := time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)
+	young := signupRequest{Username: "maya", Password: "sunset42", Email: "maya@example.com",
+		BirthDate: "2010-05-01", AcceptTerms: true} // 16
+	for name, c := range map[string]struct {
+		parent, wantField, wantParent string
+	}{
+		"none given":        {"", "parentEmail", ""},
+		"not an address":    {"mum", "parentEmail", ""},
+		"their own address": {"Maya@Example.com", "parentEmail", ""},
+		"a parent's":        {" Mum@Example.com ", "", "mum@example.com"},
+	} {
+		r := young
+		r.ParentEmail = c.parent
+		acct, bad := checkSignup(r, today, defaultAgeRule)
+		switch {
+		case c.wantField != "" && (bad == nil || bad.Field != c.wantField):
+			t.Errorf("%s: refused as %+v, want the %s box", name, bad, c.wantField)
+		case c.wantField == "" && bad != nil:
+			t.Errorf("%s: refused: %+v", name, bad)
+		case c.wantField == "" && acct.parentEmail != c.wantParent:
+			t.Errorf("%s: the parent to ask is %q, want %q", name, acct.parentEmail, c.wantParent)
+		}
+	}
+	// The day they turn 18, nobody is asked.
+	adult := young
+	adult.BirthDate = "2008-10-11"
+	if acct, bad := checkSignup(adult, today, defaultAgeRule); bad != nil || acct.parentEmail != "" {
+		t.Errorf("an 18-year-old: refused %+v, parent %q", bad, acct.parentEmail)
+	}
+	almost := young
+	almost.BirthDate = "2008-10-12" // 18 tomorrow
+	if _, bad := checkSignup(almost, today, defaultAgeRule); bad == nil || bad.Field != "parentEmail" {
+		t.Errorf("somebody 18 tomorrow was not asked for a parent: %+v", bad)
 	}
 }
