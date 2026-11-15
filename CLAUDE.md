@@ -247,6 +247,14 @@ The video worker uses the address the server sends with each job
 (`publicBaseFor` in `cmd/hls-worker`). Its own `R2_PUBLIC_BASE_URL` is
 only for a server too old to send one.
 
+Every stored file says how long a copy of it may be kept: a year on a
+phone, two hours at Cloudflare (`uploadCacheControl`, in the worker and,
+under the same name, in the app). The two hours are what makes a deleted
+video stop opening through media.flexete.com. They used to depend on a
+rule made by hand in Cloudflare, and a rule entered wrong matches nothing
+and says nothing: on 15 November a deleted file still opened there eleven
+hours later. Keep the worker's line and the app's the same.
+
 ---
 
 ## The legal documents live in the app

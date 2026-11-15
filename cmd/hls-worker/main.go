@@ -601,6 +601,23 @@ func (u uploaded) bytesPerSec() float64 {
 // Eight at a time keeps the line busy while each one waits.
 const uploadParallel = 8
 
+// uploadCacheControl is what every file the worker stores says about how
+// long a copy of it may be kept. Storage keeps the line with the file and
+// hands it out with every copy. The app writes the same line on what it
+// uploads itself (uploadCacheControl in the app's stored_file_headers.dart).
+//
+//   - max-age: a phone may keep the file for a year. It never changes.
+//   - s-maxage: a copy held between storage and the phones (Cloudflare, at
+//     media.flexete.com) is good for two hours only. A video that has been
+//     deleted or removed has to stop opening.
+//
+// Cloudflare also has a rule of its own, made by hand, that says the same
+// two hours. But a rule entered wrong matches nothing and says nothing.
+// That happened on 14 November: with only "a year" on the file, the picture
+// of a deleted video still opened eleven hours after it had gone from
+// storage. So the two hours are written on the file itself.
+const uploadCacheControl = "public, max-age=31536000, s-maxage=7200, immutable"
+
 // uploadClient keeps a connection open for every upload running at once. The
 // default client keeps two, so six of eight would set up a fresh encrypted
 // connection for every file — the very wait running them together is meant
@@ -940,10 +957,11 @@ func uploadFile(ctx context.Context, cfg *workerConfig, localPath, objectKey str
 	}
 	req.ContentLength = stat.Size()
 	req.Header.Set("Content-Type", contentTypeFor(objectKey))
-	// Mirror the cache-control we set on direct-from-client uploads:
-	// segments and manifests are content-addressed (path includes a
-	// random prefix per challenge) so they're immutable forever.
-	req.Header.Set("Cache-Control", "public, max-age=31536000, immutable")
+	// The same line the app puts on its own uploads. Segments and
+	// manifests never change (the path has a random part per job), so a
+	// phone may keep them for a year; see uploadCacheControl for the two
+	// hours given to the copy in between.
+	req.Header.Set("Cache-Control", uploadCacheControl)
 
 	res, err := uploadClient.Do(req)
 	if err != nil {
