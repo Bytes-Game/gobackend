@@ -137,6 +137,8 @@ type Conversation struct {
 	// "sent", "delivered" or "read". The chat list shows "Seen" from these.
 	LastFromMe bool   `json:"lastFromMe"`
 	LastStatus string `json:"lastStatus"`
+	// Whether you muted this chat: no notifications for it (chat_mute.go).
+	Muted bool `json:"muted"`
 }
 
 // Post represents a piece of content (video/image short) uploaded by a user.

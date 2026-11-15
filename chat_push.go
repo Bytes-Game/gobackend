@@ -69,7 +69,8 @@ func pushNow(userID string, p OutboxRow) int {
 }
 
 // pushChatMessage tells the receiver's phone about a new message — unless
-// they turned "Messages and calls" off in their notification settings.
+// they turned "Messages and calls" off in their notification settings, or
+// muted their chat with the sender (chat_mute.go).
 func pushChatMessage(msg ChatMessage) {
 	sid, err1 := strconv.Atoi(msg.SenderID)
 	rid, err2 := strconv.Atoi(msg.ReceiverID)
@@ -77,6 +78,9 @@ func pushChatMessage(msg ChatMessage) {
 		return
 	}
 	if !loadNotificationPrefs(msg.ReceiverID).allowedByPrefs(TriggerChatMessage) {
+		return
+	}
+	if chatMuted(rid, sid) {
 		return
 	}
 	title := msg.SenderUsername

@@ -40,6 +40,8 @@ func liveServer(t *testing.T) *httptest.Server {
 	api.HandleFunc("/chat/read", authed(MarkReadHandler)).Methods("POST")
 	api.HandleFunc("/chat/forward", authed(ForwardMessageHandler)).Methods("POST")
 	api.HandleFunc("/chat/clear", authed(ClearChatHandler)).Methods("POST")
+	api.HandleFunc("/chat/mute", authed(MuteChatHandler)).Methods("POST")
+	api.HandleFunc("/chat/unread", authed(UnreadChatsHandler)).Methods("GET")
 	api.HandleFunc("/calls/ice", authed(CallIceServersHandler)).Methods("GET")
 	api.HandleFunc("/notifications/register", authed(HandleRegisterPushToken)).Methods("POST")
 	api.HandleFunc("/chat/media", authed(ChatMediaPresignHandler)).Methods("POST")

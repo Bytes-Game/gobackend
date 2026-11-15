@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -80,6 +81,9 @@ func resendStandIn(t *testing.T) (emails <-chan resendEmail, answer func(status 
 	was := resendURL
 	resendURL = srv.URL + "/emails"
 	t.Cleanup(func() { resendURL = was })
+	// Sign-up reads its emailed code from here (signUp).
+	standInEmails = got
+	t.Cleanup(func() { standInEmails = nil })
 	t.Setenv("RESEND_API_KEY", "re_standin_key_42")
 	t.Setenv("SMTP_HOST", "")
 	t.Setenv("MAIL_FROM", "Flexete <no-reply@flexete.test>")
@@ -587,6 +591,72 @@ func TestPasswordReset_WrongCodesCountTheSameWhereverTheyAreTried(t *testing.T) 
 	}
 	if code, got := resetWith(t, "five_in_all", sent, "newpass42go"); code != 400 || got["expired"] != true {
 		t.Errorf("the right code after five wrong tries, in a reset, answered %d %v", code, got)
+	}
+}
+
+// Tries sent at the same moment, from many addresses, get five guesses
+// between them and no more: each is counted before its code is compared.
+// Counted after, twenty at once were twenty guesses.
+func TestPasswordReset_TriesAtTheSameMomentGetNoMoreThanFive(t *testing.T) {
+	defer withDB(t)()
+	resetRedis(t)
+	resetActionLimiters(t)
+	mails := smtpStandIn(t)
+	defer resetter(t, 9946, "many_at_once", "many.at.once@example.com")()
+
+	forgot(t, "many_at_once")
+	sent := codeIn(t, nextMail(t, mails))
+	var mu sync.Mutex
+	notRight := 0
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			guess := fmt.Sprintf("%06d", (atoiOr(sent)+1+i)%1_000_000)
+			raw, _ := json.Marshal(map[string]any{"login": "many_at_once", "code": guess})
+			r := httptest.NewRequest("POST", "/password/verify", bytes.NewReader(raw))
+			r.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", 50+i))
+			w := httptest.NewRecorder()
+			VerifyResetCodeHandler(w, r)
+			if strings.Contains(w.Body.String(), "That code isn't right.") {
+				mu.Lock()
+				notRight++
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+	if notRight > resetCodeTries-1 {
+		t.Errorf("%d tries at the same moment were each compared with the code; at most %d may be",
+			notRight, resetCodeTries-1)
+	}
+	if code, got := resetWith(t, "many_at_once", sent, "newpass42go"); code != 400 || got["expired"] != true {
+		t.Errorf("the right code after twenty wrong ones answered %d %v", code, got)
+	}
+}
+
+// Four wrong tries, then the right code checked and then used: it works.
+// Checking the right code gives its try back.
+func TestPasswordReset_CheckingTheRightCodeCostsNoTry(t *testing.T) {
+	defer withDB(t)()
+	resetRedis(t)
+	resetActionLimiters(t)
+	mails := smtpStandIn(t)
+	defer resetter(t, 9947, "four_then_right", "four.then.right@example.com")()
+
+	forgot(t, "four_then_right")
+	sent := codeIn(t, nextMail(t, mails))
+	for i := 1; i <= 4; i++ {
+		if code, got := verifyCode(t, "four_then_right", notTheCode(sent)); code != 400 || got["expired"] == true {
+			t.Fatalf("wrong try %d answered %d %v", i, code, got)
+		}
+	}
+	if code, got := verifyCode(t, "four_then_right", sent); code != 200 {
+		t.Fatalf("the right code, checked, answered %d %v", code, got)
+	}
+	if code, got := resetWith(t, "four_then_right", sent, "newpass42go"); code != 200 {
+		t.Fatalf("the right code, used, answered %d %v", code, got)
 	}
 }
 

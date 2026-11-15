@@ -142,7 +142,10 @@ func truncateAudit(t *testing.T) {
 	t.Helper()
 	// No RESTART IDENTITY: ids keep climbing, so no two tests can ever land on
 	// the same content id and read each other's cached score.
-	for _, tbl := range []string{"feed_events", "challenges", "user_profiles", "users", "pending_signups"} {
+	// signup_email_codes is keyed by email, not tied to an account: without
+	// it here, one test's code waits for the next test's sign-up.
+	for _, tbl := range []string{"feed_events", "challenges", "user_profiles", "users", "pending_signups",
+		"signup_email_codes"} {
 		if _, err := db.Exec("TRUNCATE " + tbl + " CASCADE"); err != nil {
 			t.Logf("truncate %s: %v", tbl, err)
 		}

@@ -277,6 +277,9 @@ func accountPurgeRound(ctx context.Context) {
 	// Sign-ups whose parent did not answer in time, or said no
 	// (parent_consent.go).
 	purgeExpiredPendingSignups()
+	// Codes sent to check a new account's email that nobody used, with the
+	// addresses they went to (signup_email_code.go).
+	purgeExpiredSignupCodes()
 }
 
 // purgeDueAccounts deletes for good every account that asked to be deleted

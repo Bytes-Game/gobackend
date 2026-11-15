@@ -803,6 +803,9 @@ func main() {
 	api.HandleFunc("/chat/edit", authed(EditMessageHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/chat/delete", authed(DeleteMessageHandler)).Methods("POST", "OPTIONS")
 	api.HandleFunc("/chat/clear", authed(ClearChatHandler)).Methods("POST", "OPTIONS")
+	// Muting a chat, and the number on the Messages button (chat_mute.go).
+	api.HandleFunc("/chat/mute", authed(MuteChatHandler)).Methods("POST", "OPTIONS")
+	api.HandleFunc("/chat/unread", authed(UnreadChatsHandler)).Methods("GET", "OPTIONS")
 	api.HandleFunc("/chat/forward", authed(ForwardMessageHandler)).Methods("POST", "OPTIONS")
 	// Whether somebody is online is for people signed in, and never told
 	// across a block (websocket.go).

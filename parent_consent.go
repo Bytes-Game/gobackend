@@ -412,8 +412,9 @@ func allowParentEmail(address string) bool {
 
 // startParentConsent puts a sign-up aside, emails the parent, and answers
 // the app: 202 with where the email went and a ticket (waitingAnswer).
-// [replace] are the person's own earlier tries, which make way.
-func startParentConsent(w http.ResponseWriter, r *http.Request, p pendingSignup, replace []int) {
+// [replace] are the person's own earlier tries, which make way. It says
+// whether the sign-up was put aside; when not, it has answered why.
+func startParentConsent(w http.ResponseWriter, r *http.Request, p pendingSignup, replace []int) bool {
 	// Asked first, so a sign-up that cannot be answered is not kept.
 	if !mailConfigured() {
 		log.Printf("parent consent: a sign-up needs a parent's email, but email is not set up " +
@@ -423,14 +424,14 @@ func startParentConsent(w http.ResponseWriter, r *http.Request, p pendingSignup,
 				"permission. Please try again later.",
 			"unavailable": true,
 		})
-		return
+		return false
 	}
 	if !allowParentEmail(p.parentEmail) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{
 			"field": "parentEmail",
 			"error": "We've emailed that address as many times as we can today. Try again tomorrow.",
 		})
-		return
+		return false
 	}
 	saved, err := beginParentConsent(r, p, replace)
 	if err != nil {
@@ -439,7 +440,7 @@ func startParentConsent(w http.ResponseWriter, r *http.Request, p pendingSignup,
 				"error":       "We couldn't email your parent or guardian right now. Try again in a little while.",
 				"unavailable": true,
 			})
-			return
+			return false
 		}
 		// Two sign-ups racing for one name or one email land here.
 		if constraint, ok := isUniqueViolation(err); ok {
@@ -447,21 +448,22 @@ func startParentConsent(w http.ResponseWriter, r *http.Request, p pendingSignup,
 			case strings.Contains(constraint, "email"):
 				writeFieldError(w, http.StatusConflict, refuse("email",
 					"A sign-up with this email is waiting for a parent's answer. Sign in to send their email again."))
-				return
+				return false
 			case strings.Contains(constraint, "username"):
 				writeFieldError(w, http.StatusConflict, refuse("username", "That username is taken."))
-				return
+				return false
 			case strings.Contains(constraint, "social"):
 				writeJSON(w, http.StatusConflict, map[string]any{
 					"error": "This sign-up is already waiting for a parent's answer.", "alreadyJoined": true})
-				return
+				return false
 			}
 		}
 		log.Printf("parent consent: sign-up %q could not be put aside to wait for a parent: %v", p.username, err)
 		http.Error(w, "signup failed", http.StatusInternalServerError)
-		return
+		return false
 	}
 	writeJSON(w, http.StatusAccepted, waitingAnswer(saved))
+	return true
 }
 
 // beginParentConsent puts a sign-up aside and emails the parent. The
