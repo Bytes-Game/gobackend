@@ -231,7 +231,7 @@ func initPushSender() {
 	if f, ok := sender.(*fcmSender); ok && !f.configured() {
 		log.Printf("notifications: FCM selected but FCM_SERVICE_ACCOUNT_JSON missing/unparseable — sends will fail with fcm_not_configured")
 	}
-	log.Printf("notifications: sender=%s", sender.Name())
+	log.Printf("notifications: sender=%s%s", sender.Name(), firebaseProjectNote(sender))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
