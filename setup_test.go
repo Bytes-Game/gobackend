@@ -13,6 +13,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // mr is the shared miniredis instance used by every test in this package.
@@ -34,6 +35,14 @@ func TestMain(m *testing.M) {
 	// content-score cache must be off for deterministic, isolated results.
 	disableContentScoreCache = true
 	disableUserProfileCache = true
+
+	// Scramble passwords and emailed codes at bcrypt's lowest strength. At
+	// the server's own, the sign-up tests alone take minutes under the race
+	// checker (password.go). One test checks the server's own strength in a
+	// fresh copy of this program, started with serverPasswordCostEnv set.
+	if os.Getenv(serverPasswordCostEnv) == "" {
+		passwordCost = bcrypt.MinCost
+	}
 
 	// Posts and answers must be their poster's own uploads in our storage
 	// (post_media.go). Tests stand in a storage at an address where nothing
