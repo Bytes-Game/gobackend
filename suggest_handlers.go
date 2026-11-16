@@ -19,14 +19,17 @@ import (
 // request small and a short exponential backoff rides out a transient 429.
 // Idempotent (Meilisearch dedupes by primary key); a failed chunk doesn't abort
 // the rest — a partial seed beats none.
-func addDocumentsChunked(indexName string, docs []map[string]any, chunkSize int) error {
-	if meili == nil {
+//
+// [m] is the search service to send to: the server's own (meili), or a
+// test's stand-in.
+func addDocumentsChunked(m meilisearch.ServiceManager, indexName string, docs []map[string]any, chunkSize int) error {
+	if m == nil {
 		return nil
 	}
 	if chunkSize <= 0 {
 		chunkSize = 100
 	}
-	idx := meili.Index(indexName)
+	idx := m.Index(indexName)
 	var lastErr error
 	for start := 0; start < len(docs); start += chunkSize {
 		end := start + chunkSize
@@ -227,7 +230,7 @@ func seedChallengeSubjects() {
 
 	// Push in bounded chunks with retry+backoff so the free-tier rate limit
 	// (429) doesn't leave the index unseeded. Idempotent across reboots.
-	if err := addDocumentsChunked(challengeSubjectsIndexName, docs, 100); err != nil {
+	if err := addDocumentsChunked(meili, challengeSubjectsIndexName, docs, 100); err != nil {
 		log.Printf("seedChallengeSubjects: AddDocuments partial/failed: %v", err)
 		return
 	}

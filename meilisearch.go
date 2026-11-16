@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -65,39 +66,73 @@ func InitMeilisearch() {
 	log.Println("Meilisearch initialized")
 
 	// Seed existing data into indexes
-	go seedMeilisearchData()
+	go seedMeilisearchData(meili)
 }
 
-// seedMeilisearchData loads all existing challenges and users into Meilisearch.
-func seedMeilisearchData() {
-	// Index all users
-	users := GetAllUsers()
+// seedMeilisearchData loads all existing challenges and users into the
+// search service [m] (the server's own, meili), at every start.
+func seedMeilisearchData(m meilisearch.ServiceManager) {
+	seedSearch(m, GetAllUsers(), GetSearchableChallenges())
+}
+
+// seedSearch sends [users] and [challenges] to the search service [m], in
+// batches with retries (addDocumentsChunked, the same as the subjects), and
+// says whether it accepted them. At start-up they are every account and
+// every searchable video.
+//
+// These lines used to say "Indexed 3 users" whatever the search service
+// answered. On 16 November another batch sent at the same start was
+// refused with "too many requests", and the lines could not show whether
+// these had been too.
+func seedSearch(m meilisearch.ServiceManager, users []User, challenges []Challenge) {
 	if len(users) > 0 {
 		docs := make([]map[string]interface{}, len(users))
 		for i, u := range users {
-			docs[i] = map[string]interface{}{
-				"id":        u.ID,
-				"username":  u.Username,
-				"fullName":  u.FullName,
-				"league":    u.League,
-				"followers": u.Followers,
-				"wins":      u.Wins,
-				"losses":    u.Losses,
-			}
+			docs[i] = userToMeiliDoc(u)
 		}
-		meili.Index("users").AddDocuments(docs, nil)
-		log.Printf("Indexed %d users in Meilisearch", len(users))
+		reportSearchFill(counted(len(users), "account", "accounts"),
+			addDocumentsChunked(m, "users", docs, 100))
 	}
-
-	// Index all arena challenges
-	challenges := GetSearchableChallenges()
 	if len(challenges) > 0 {
 		docs := make([]map[string]interface{}, len(challenges))
 		for i, c := range challenges {
 			docs[i] = challengeToMeiliDoc(c)
 		}
-		meili.Index("challenges").AddDocuments(docs, nil)
-		log.Printf("Indexed %d challenges in Meilisearch", len(challenges))
+		reportSearchFill(counted(len(challenges), "video", "videos"),
+			addDocumentsChunked(m, "challenges", docs, 100))
+	}
+}
+
+// reportSearchFill says whether the search service accepted [what], sent
+// at start-up. Until it has them, a search can miss them: when it answers
+// with nothing the server searches the database instead, but when it
+// answers with only some, those are all that show.
+func reportSearchFill(what string, err error) {
+	if err != nil {
+		log.Printf("search: sending %s to the search service at start-up failed (%v). Searches can miss them until the next start, which sends them all again.", what, err)
+		return
+	}
+	log.Printf("search: sent %s to the search service at start-up: all accepted.", what)
+}
+
+// counted is "1 account" or "3 accounts".
+func counted(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
+}
+
+// userToMeiliDoc is what the search service keeps about an account.
+func userToMeiliDoc(u User) map[string]interface{} {
+	return map[string]interface{}{
+		"id":        u.ID,
+		"username":  u.Username,
+		"fullName":  u.FullName,
+		"league":    u.League,
+		"followers": u.Followers,
+		"wins":      u.Wins,
+		"losses":    u.Losses,
 	}
 }
 
@@ -170,27 +205,32 @@ func challengeSearchText(id string) (topics []string, spoken string) {
 }
 
 // IndexChallenge adds or updates a challenge in Meilisearch.
-func IndexChallenge(c Challenge) {
-	if meili == nil {
+func IndexChallenge(c Challenge) { indexChallengeIn(meili, c) }
+
+// indexChallengeIn sends video [c] to the search service [m], and says so
+// when it is refused: searches can then miss it until the next start,
+// which sends every video again. It used to say nothing either way.
+func indexChallengeIn(m meilisearch.ServiceManager, c Challenge) {
+	if m == nil {
 		return
 	}
-	meili.Index("challenges").AddDocuments([]map[string]interface{}{challengeToMeiliDoc(c)}, nil)
+	if _, err := m.Index("challenges").AddDocuments([]map[string]interface{}{challengeToMeiliDoc(c)}, nil); err != nil {
+		log.Printf("search: the search service refused video %s (%v). Searches can miss it until the next start, which sends every video again.", c.ID, err)
+	}
 }
 
 // IndexUser adds or updates a user in Meilisearch.
-func IndexUser(u User) {
-	if meili == nil {
+func IndexUser(u User) { indexUserIn(meili, u) }
+
+// indexUserIn sends account [u] to the search service [m], and says so
+// when it is refused, the same as indexChallengeIn.
+func indexUserIn(m meilisearch.ServiceManager, u User) {
+	if m == nil {
 		return
 	}
-	meili.Index("users").AddDocuments([]map[string]interface{}{{
-		"id":        u.ID,
-		"username":  u.Username,
-		"fullName":  u.FullName,
-		"league":    u.League,
-		"followers": u.Followers,
-		"wins":      u.Wins,
-		"losses":    u.Losses,
-	}}, nil)
+	if _, err := m.Index("users").AddDocuments([]map[string]interface{}{userToMeiliDoc(u)}, nil); err != nil {
+		log.Printf("search: the search service refused account %s (%v). Searches can miss it until the next start, which sends every account again.", u.ID, err)
+	}
 }
 
 // decodeHit converts a meilisearch.Hit (map[string]json.RawMessage) to map[string]interface{}.
