@@ -215,14 +215,21 @@ func liveSetup(t *testing.T) *httptest.Server {
 	return liveServer(t)
 }
 
-// freshLimits starts the typing and calling limits full. They are kept in
-// the process, not in the database, so one test's calls would otherwise
-// count against the next.
+// freshLimits starts the typing, calling and message-sending limits full.
+// They are kept in the process, not in the database, so one test's calls
+// and messages would otherwise count against the next.
+//
+// Sending was left out until 16 November. Sending allows ten messages at
+// once, then one a second, and these tests all send as the same people:
+// on a fast machine leo had used his ten before the push and share tests
+// ran, so their messages were refused with "too many", nothing was sent,
+// and the tests failed as if pushes and deleting were broken.
 func freshLimits(t *testing.T) {
 	t.Helper()
 	actionLimitersMu.Lock()
 	delete(actionLimiters, "call")
 	delete(actionLimiters, "typing")
+	delete(actionLimiters, "chat")
 	actionLimitersMu.Unlock()
 }
 
