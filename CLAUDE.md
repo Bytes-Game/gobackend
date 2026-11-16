@@ -293,9 +293,18 @@ owner must fill in goes on that list the day it is added.
 `com.flexete.app`, and the server knows it (`social_signin.go`). Set it
 only if the id ever changes.
 
-Email is needed for more than forgotten passwords now: somebody under 18
-gets no account until a parent agrees by an emailed link
-(`parent_consent.go`). Without email set up, nobody under 18 can join.
+Email is needed for more than forgotten passwords now. Nobody gets an
+account with an email and a password until they type the code emailed to
+it (`signup_email_code.go`), and somebody under 18 gets no account until a
+parent agrees by an emailed link (`parent_consent.go`). Without email set
+up, nobody can sign up with an email and a password (Google and Apple
+still work), and nobody under 18 can join.
+
+A code sent by email (sign-up, forgotten password) counts each try BEFORE
+it compares the code, in one statement (`UPDATE … RETURNING attempts`).
+Counted after, tries sent at the same moment all read the same count:
+twenty at once were twenty guesses, not five. A right code gives its try
+back. Keep both that way.
 
 There is no demo data and no "wipe the database" route any more, on any
 server (`demo_accounts.go`). Do not add either back: the demo accounts'

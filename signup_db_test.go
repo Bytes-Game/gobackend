@@ -33,15 +33,49 @@ func goodSignup(n int) map[string]any {
 	}
 }
 
-// signUp sends [body] to POST /signup from address [ip].
+// standInEmails is where the stand-in email service of the test running now
+// puts what it is sent (resendStandIn), or nil when there is none.
+var standInEmails <-chan resendEmail
+
+var signupCodeSubject = regexp.MustCompile(`^(\d{6}) is your Flexete sign-up code$`)
+
+// signupCodeFor reads the next email from the stand-in: the sign-up code
+// for [address], which it answers. Anything else next is a failure.
+func signupCodeFor(t *testing.T, address string) string {
+	t.Helper()
+	if standInEmails == nil {
+		t.Fatal("a sign-up code was sent, but this test has no stand-in for email")
+	}
+	e := nextResendEmail(t, standInEmails)
+	to, subject, text := emailTo(e)
+	m := signupCodeSubject.FindStringSubmatch(subject)
+	if m == nil || !strings.EqualFold(to, address) || !strings.Contains(text, m[1]) {
+		t.Fatalf("the next email was not %s's sign-up code: to %q, %q", address, to, subject)
+	}
+	return m[1]
+}
+
+// signUp sends [body] to POST /signup from address [ip], the way the app
+// does: when the server emails a code to check the address, it reads the
+// code and sends the sign-up again with it. The answer is the last one.
 func signUp(t *testing.T, body map[string]any, ip string) (int, map[string]any) {
 	t.Helper()
-	// The test people are made with numbers picked by hand, which the
-	// database's own counter does not know about; move it past them, as it
-	// would be in a database where every account came through sign-up.
-	if _, err := db.Exec(`SELECT setval(pg_get_serial_sequence('users', 'id'),
-		GREATEST((SELECT MAX(id) FROM users), 1))`); err != nil {
-		t.Fatal(err)
+	w := signUpRequest(t, body, func(r *http.Request) {
+		if ip != "" {
+			r.Header.Set("X-Forwarded-For", ip)
+		}
+	})
+	var got map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	return w.Code, got
+}
+
+// postSignup sends [body] to POST /signup from address [ip], once: no code
+// is read or sent for it.
+func postSignup(t *testing.T, body map[string]any, ip string) (int, map[string]any) {
+	t.Helper()
+	if standInEmails == nil {
+		resendStandIn(t)
 	}
 	raw, _ := json.Marshal(body)
 	r := httptest.NewRequest("POST", "/signup", bytes.NewReader(raw))
@@ -53,6 +87,46 @@ func signUp(t *testing.T, body map[string]any, ip string) (int, map[string]any) 
 	var got map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &got)
 	return w.Code, got
+}
+
+// signUpRequest is signUp, with every request made the way [prep] says.
+func signUpRequest(t *testing.T, body map[string]any, prep func(*http.Request)) *httptest.ResponseRecorder {
+	t.Helper()
+	// The test people are made with numbers picked by hand, which the
+	// database's own counter does not know about; move it past them, as it
+	// would be in a database where every account came through sign-up.
+	if _, err := db.Exec(`SELECT setval(pg_get_serial_sequence('users', 'id'),
+		GREATEST((SELECT MAX(id) FROM users), 1))`); err != nil {
+		t.Fatal(err)
+	}
+	// Email is needed to sign up at all now. A test that has not set up its
+	// own stand-in gets one.
+	if standInEmails == nil {
+		resendStandIn(t)
+	}
+	send := func(b map[string]any) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(b)
+		r := httptest.NewRequest("POST", "/signup", bytes.NewReader(raw))
+		if prep != nil {
+			prep(r)
+		}
+		w := httptest.NewRecorder()
+		SignupHandler(w, r)
+		return w
+	}
+	w := send(body)
+	var first map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &first)
+	if w.Code != http.StatusAccepted || first["emailCodeSent"] != true {
+		return w
+	}
+	email, _ := first["email"].(string)
+	withCode := map[string]any{}
+	for k, v := range body {
+		withCode[k] = v
+	}
+	withCode["emailCode"] = signupCodeFor(t, email)
+	return send(withCode)
 }
 
 // logIn sends POST /login and answers the status and the token.

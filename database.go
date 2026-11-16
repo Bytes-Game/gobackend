@@ -2615,6 +2615,7 @@ func GetConversations(userID int) []Conversation {
 
 	// Step 2: For each partner, get their info, last message, and unread count
 	result := make([]Conversation, 0, len(partnerIDs))
+	muted := mutedChatsOf(userID)
 	// When each chat's last message was, to the microsecond: the list puts
 	// the newest on top, and two messages in the same second must still
 	// come in the order they were sent.
@@ -2676,6 +2677,7 @@ func GetConversations(userID int) []Conversation {
 			UnreadCount: unread,
 			LastFromMe:  lastFromMe,
 			LastStatus:  lastStatus,
+			Muted:       muted[pid],
 		})
 		lastAt = append(lastAt, lastTime)
 	}

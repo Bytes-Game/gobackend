@@ -101,8 +101,14 @@ jobs:
       # and a half: the suite has grown with every feature, and a limit that
       # close fails a good change on a slow runner. A run that really hangs
       # is still stopped.
+      #
+      # Go has a limit of its own: it stops a package's tests after ten
+      # minutes unless told otherwise, so raising only the step's limit did
+      # nothing. On 15 November a run was stopped at exactly ten. -timeout
+      # gives each package twelve, which still leaves Go time to print the
+      # test that was running before the step itself is stopped.
       - name: go test -race
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -timeout 12m ./...
         timeout-minutes: 15
 
       # Every check staticcheck has, not the default subset.

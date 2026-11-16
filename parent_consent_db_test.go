@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -133,16 +134,15 @@ func TestParentConsent_NoAccountUntilAParentAgrees(t *testing.T) {
 	emails, _, done := parentSetup(t)
 	defer done()
 
-	raw, _ := json.Marshal(youngSignup(1))
-	r := httptest.NewRequest("POST", "/signup", bytes.NewReader(raw))
-	r.Header.Set("X-Forwarded-For", "203.0.113.1")
-	r.Header.Set("CF-IPCountry", "IN")
-	// The sender may say the request came to any address at all. The link
-	// in the email is to the server's own address, from its settings.
-	r.Host = "evil.example"
 	t.Setenv("PUBLIC_BASE_URL", "https://api.flexete.test/")
-	w := httptest.NewRecorder()
-	SignupHandler(w, r)
+	w := signUpRequest(t, youngSignup(1), func(r *http.Request) {
+		r.Header.Set("X-Forwarded-For", "203.0.113.1")
+		r.Header.Set("CF-IPCountry", "IN")
+		// The sender may say the request came to any address at all. The
+		// link in the email is to the server's own address, from its
+		// settings.
+		r.Host = "evil.example"
+	})
 	var got map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &got)
 	if w.Code != http.StatusAccepted || got["parentConsentPending"] != true {
@@ -356,23 +356,17 @@ func TestParentConsent_OnlyTheYoungAreAsked(t *testing.T) {
 
 	// Where the law says 16 (age_rules.go), a 15-year-old cannot join even
 	// with a parent; a 16-year-old can, with one.
-	raw, _ := json.Marshal(youngSignup(5))
-	r := httptest.NewRequest("POST", "/signup", bytes.NewReader(raw))
-	r.Header.Set("X-Forwarded-For", "203.0.113.2")
-	r.Header.Set("CF-IPCountry", "AU")
-	w := httptest.NewRecorder()
-	SignupHandler(w, r)
+	inAustralia := func(r *http.Request) {
+		r.Header.Set("X-Forwarded-For", "203.0.113.2")
+		r.Header.Set("CF-IPCountry", "AU")
+	}
+	w := signUpRequest(t, youngSignup(5), inAustralia)
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "16 or older") {
 		t.Fatalf("a 15-year-old in Australia answered %d %s", w.Code, w.Body.String())
 	}
 	sixteen := youngSignup(6)
 	sixteen["birthDate"] = bornYearsAgo(16)
-	raw, _ = json.Marshal(sixteen)
-	r = httptest.NewRequest("POST", "/signup", bytes.NewReader(raw))
-	r.Header.Set("X-Forwarded-For", "203.0.113.2")
-	r.Header.Set("CF-IPCountry", "AU")
-	w = httptest.NewRecorder()
-	SignupHandler(w, r)
+	w = signUpRequest(t, sixteen, inAustralia)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("a 16-year-old in Australia with a parent named answered %d %s", w.Code, w.Body.String())
 	}
@@ -949,40 +943,57 @@ func TestParentConsent_NothingIsKeptWhenTheParentCannotBeEmailed(t *testing.T) {
 	_, answer, done := parentSetup(t)
 	defer done()
 
+	// The code to the young person's own email goes; the email to their
+	// parent does not.
+	if code, got := postSignup(t, youngSignup(1), "203.0.113.1"); code != http.StatusAccepted || got["emailCodeSent"] != true {
+		t.Fatalf("the first step answered %d %v", code, got)
+	}
+	withCode := youngSignup(1)
+	withCode["emailCode"] = signupCodeFor(t, "teen1@example.com")
 	answer(500, `{"name":"internal_server_error","message":"down"}`)
-	code, got := signUp(t, youngSignup(1), "203.0.113.1")
-	if code != http.StatusServiceUnavailable || got["unavailable"] != true {
-		t.Fatalf("with the email service down it answered %d %v", code, got)
+	code, got := postSignup(t, withCode, "203.0.113.1")
+	if code != http.StatusServiceUnavailable || got["unavailable"] != true ||
+		!strings.Contains(fmt.Sprint(got["error"]), "parent") {
+		t.Fatalf("with the email to the parent failing it answered %d %v", code, got)
 	}
 	if n := countRows(t, `SELECT COUNT(*) FROM pending_signups`); n != 0 {
 		t.Fatal("a sign-up was kept though its parent was never emailed")
 	}
+	// The code still works: they can try again in a moment.
+	answer(200, `{"id":"49a3999c-0ce1-4ea6-ab68-afcd6dc2e794"}`)
+	if code, got := postSignup(t, withCode, "203.0.113.1"); code != http.StatusAccepted || got["parentConsentPending"] != true {
+		t.Fatalf("trying again with the same code answered %d %v", code, got)
+	}
 
-	// Not set up at all: the same for the young person, and the server's
-	// log says which setting is missing, so the owner can see why nobody
-	// under 18 can join.
+	// Not set up at all: nobody can sign up with an email and a password,
+	// young or not, since no email can be checked. Each is told so, and the
+	// server's log says which setting is missing, so the owner can see why.
 	t.Setenv("RESEND_API_KEY", "")
 	t.Setenv("SMTP_HOST", "")
-	var logged lockedLog
-	log.SetOutput(&logged)
-	code, got = signUp(t, youngSignup(2), "203.0.113.1")
-	log.SetOutput(os.Stderr)
-	if code != http.StatusServiceUnavailable || got["unavailable"] != true {
-		t.Fatalf("with email not set up it answered %d %v", code, got)
+	for _, who := range []map[string]any{youngSignup(2), goodSignup(3)} {
+		var logged lockedLog
+		log.SetOutput(&logged)
+		code, got = postSignup(t, who, "203.0.113.1")
+		log.SetOutput(os.Stderr)
+		if code != http.StatusServiceUnavailable || got["unavailable"] != true || got["reason"] != "notSetUp" {
+			t.Fatalf("%s with email not set up answered %d %v", who["username"], code, got)
+		}
+		// Trying again in a moment would not help; another way in would.
+		if said, _ := got["error"].(string); !strings.Contains(said, "Google or Apple") {
+			t.Errorf("%s with email not set up is told %q", who["username"], said)
+		}
+		if said := logged.String(); !strings.Contains(said, "email is not set up") || !strings.Contains(said, "RESEND_API_KEY") {
+			t.Errorf("the log does not say that email is not set up, or what to set:\n%s", said)
+		}
 	}
-	// Trying again in a moment would not help, so they are not told to.
-	if said, _ := got["error"].(string); !strings.Contains(said, "can't take sign-ups that need a parent's permission") {
-		t.Errorf("with email not set up the young person is told %q", said)
-	}
-	if said := logged.String(); !strings.Contains(said, "email is not set up") || !strings.Contains(said, "RESEND_API_KEY") {
-		t.Errorf("the log does not say that email is not set up, or what to set:\n%s", said)
-	}
-	if n := countRows(t, `SELECT COUNT(*) FROM pending_signups`) + countRows(t, `SELECT COUNT(*) FROM users WHERE username LIKE 'teen%'`); n != 0 {
-		t.Fatal("something was kept though email is not set up")
-	}
-	// An adult is not held up by any of that.
-	if code, got := signUp(t, goodSignup(3), "203.0.113.1"); code != http.StatusCreated {
-		t.Fatalf("an adult with email not set up answered %d %v", code, got)
+	for what, query := range map[string]string{
+		"a waiting sign-up": `SELECT COUNT(*) FROM pending_signups WHERE username <> 'teen1'`,
+		"an account":        `SELECT COUNT(*) FROM users WHERE username IN ('teen2', 'newbie3')`,
+		"a code":            `SELECT COUNT(*) FROM signup_email_codes`,
+	} {
+		if n := countRows(t, query); n != 0 {
+			t.Errorf("%d of %s kept though email is not set up", n, what)
+		}
 	}
 }
 

@@ -495,6 +495,9 @@ func deliverChatMessage(recipientUsername string, msg ChatMessage) {
 		"mediaHeight":      msg.MediaHeight,
 		"waveform":         msg.Waveform,
 		"shared":           msg.Shared,
+		// From a chat the receiver muted: the app shows it in the chat,
+		// with no pop-up (chat_mute.go).
+		"muted":            msgFromMutedChat(msg),
 	}
 
 	data, err := json.Marshal(envelope)

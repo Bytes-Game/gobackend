@@ -105,6 +105,14 @@ var actionLimitTable = map[string]actionLimitConfig{
 	"signup":           {tokensPerSecond: 10.0 / 3600, burst: 10},
 	"signup_day":       {tokensPerSecond: 50.0 / 86400, burst: 50},
 	"signup_all":       {tokensPerSecond: 600.0 / 3600, burst: 100},
+	// The code that checks a new account's email (signup_email_code.go).
+	// Trying codes, per internet address: 60 an hour, 30 at once — room for
+	// every sign-up the address may make and a few mistypes each; a code is
+	// one in a million and has five tries of its own. Codes to one email
+	// address: 5 at once, then one every two and a half hours, so nobody
+	// can fill a stranger's inbox by signing up with it.
+	"signup_code_try":   {tokensPerSecond: 60.0 / 3600, burst: 30},
+	"signup_code_email": {tokensPerSecond: 10.0 / 86400, burst: 5},
 	// Changing your password: 5 an hour. Each one checks the old password,
 	// so it is also a way to guess it.
 	"password_change":  {tokensPerSecond: 5.0 / 3600, burst: 5},

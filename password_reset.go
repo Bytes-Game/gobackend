@@ -253,11 +253,15 @@ func checkResetCode(w http.ResponseWriter, login, code string) (resetTarget, boo
 		wrong()
 		return t, false
 	}
+	// Every try is counted before its code is compared, in one statement.
+	// Counted after, tries sent at the same moment all read the same count
+	// and were all compared: twenty at once were twenty guesses, not five.
 	var hash string
 	var expires time.Time
 	var attempts int
-	err = db.QueryRow(`SELECT code_hash, expires_at, attempts FROM password_reset_codes
-	                    WHERE user_id::text = $1`, t.id).Scan(&hash, &expires, &attempts)
+	err = db.QueryRow(`UPDATE password_reset_codes SET attempts = attempts + 1
+	                    WHERE user_id::text = $1
+	                    RETURNING code_hash, expires_at, attempts`, t.id).Scan(&hash, &expires, &attempts)
 	if err == sql.ErrNoRows {
 		spent("That code has expired. Ask for a new one.")
 		return t, false
@@ -276,18 +280,25 @@ func checkResetCode(w http.ResponseWriter, login, code string) (resetTarget, boo
 		spent("That code has expired. Ask for a new one.")
 		return t, false
 	}
+	if attempts > resetCodeTries {
+		forget()
+		spent("Too many wrong codes. Ask for a new one.")
+		return t, false
+	}
 	if !checkPassword(hash, code) {
-		if attempts+1 >= resetCodeTries {
+		if attempts >= resetCodeTries {
 			forget()
 			spent("Too many wrong codes. Ask for a new one.")
 			return t, false
 		}
-		if _, err := db.Exec(`UPDATE password_reset_codes SET attempts = attempts + 1
-		                       WHERE user_id::text = $1`, t.id); err != nil {
-			log.Printf("password reset: a wrong try at account %s's code could not be counted: %v", t.id, err)
-		}
 		wrong()
 		return t, false
+	}
+	// Right: the try is given back, so checking the code and then using it
+	// costs nothing (only somebody who has the code gets here).
+	if _, err := db.Exec(`UPDATE password_reset_codes SET attempts = GREATEST(attempts - 1, 0)
+	                       WHERE user_id::text = $1`, t.id); err != nil {
+		log.Printf("password reset: the try at account %s's right code could not be given back: %v", t.id, err)
 	}
 	return t, true
 }

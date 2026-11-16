@@ -33,6 +33,9 @@ type signupRequest struct {
 	// ParentEmail is a parent's or guardian's email. Needed only when the
 	// date of birth is under the consent age (age_rules.go).
 	ParentEmail string `json:"parentEmail"`
+	// EmailCode is the code emailed to [Email]. Without it, the sign-up
+	// sends one instead of making the account (signup_email_code.go).
+	EmailCode string `json:"emailCode"`
 }
 
 // newAccount is a sign-up that passed every rule, ready to store.
@@ -115,6 +118,10 @@ func emailTaken(email string) bool {
 // Somebody under the consent age where they are (age_rules.go) gets no
 // account yet: 202 {"parentConsentPending": true, "parentEmail", "ticket"},
 // and the account is made when their parent agrees (parent_consent.go).
+//
+// And nobody gets one before their email is checked: the first time, a
+// code is emailed instead (202 {"emailCodeSent": true}), and the sign-up
+// is sent again with it (signup_email_code.go).
 func SignupHandler(w http.ResponseWriter, r *http.Request) {
 	if db == nil {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
@@ -132,8 +139,19 @@ func SignupHandler(w http.ResponseWriter, r *http.Request) {
 	// clientIP). This used to be one bucket shared by the whole platform:
 	// three sign-ups a minute, for everybody — the fourth person to try at
 	// launch would have been turned away.
+	//
+	// A sign-up that comes back with its emailed code was counted when the
+	// code was sent; its tries are counted on their own, so a mistyped
+	// code does not use up a sign-up.
 	ip := clientIP(r)
-	if !allowAction("ip:"+ip, "signup") || !allowAction("ip:"+ip, "signup_day") ||
+	code := strings.TrimSpace(in.EmailCode)
+	if code != "" {
+		if !allowAction("ip:"+ip, "signup_code_try") {
+			log.Printf("sign-up code tries rate limited from %s", ip)
+			writeRateLimited(w, "signup_code_try")
+			return
+		}
+	} else if !allowAction("ip:"+ip, "signup") || !allowAction("ip:"+ip, "signup_day") ||
 		!allowAction("", "signup_all") {
 		log.Printf("sign-up rate limited from %s", ip)
 		writeRateLimited(w, "signup")
@@ -170,6 +188,16 @@ func SignupHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Everything else is right. Now the email: a code to it the first
+	// time, and the code checked when the sign-up comes back with it.
+	if code == "" {
+		sendSignupCode(w, acct.email)
+		return
+	}
+	if !checkSignupCode(w, acct.email, code) {
+		return
+	}
+
 	hash, err := hashPassword(acct.password)
 	if err != nil {
 		log.Printf("sign-up: could not hash the password for %q: %v", acct.username, err)
@@ -180,11 +208,13 @@ func SignupHandler(w http.ResponseWriter, r *http.Request) {
 	// Under the consent age: no account yet. The sign-up waits, and the
 	// parent is asked (parent_consent.go).
 	if acct.parentEmail != "" {
-		startParentConsent(w, r, pendingSignup{
+		if startParentConsent(w, r, pendingSignup{
 			username: acct.username, passwordHash: hash, fullName: acct.fullName,
 			email: acct.email, birthDate: acct.birthDate, country: country,
 			parentEmail: acct.parentEmail,
-		}, own)
+		}, own) {
+			forgetSignupCode(acct.email)
+		}
 		return
 	}
 
@@ -219,6 +249,7 @@ func SignupHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("New user signed up: %s (id=%s)", acct.username, id)
+	forgetSignupCode(acct.email)
 	welcomeNewAccount(w, id, acct.username)
 }
 
